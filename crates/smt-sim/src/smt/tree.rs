@@ -467,6 +467,9 @@ impl Arrow {
 
     /// Get a leaf hash for key and key-value hashes.
     pub(crate) fn leaf_hash(key: &Hash, key_value: &Hash) -> Hash {
+        // TODO: This wonky proof of non-inclusion scheme requires the KV pair to be the sibling of
+        // a zero. Don't get confused! It will go away when the proof of non-inclusion problem is
+        // proper fixed.
         Self::sibling(key).hash(&[0; 32], key_value)
     }
 
