@@ -29,7 +29,7 @@ pub struct SmtNih {
     db: File,
     // TODO: Remove RefCell ... it's only needed because I made the trait take `&self` for all
     // methods.
-    map: RefCell<BTreeMap<Hash, SmtNode>>,
+    pub(crate) map: RefCell<BTreeMap<Hash, SmtNode>>,
 }
 
 impl Smt for SmtNih {

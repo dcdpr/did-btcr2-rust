@@ -5,6 +5,7 @@ use monotree::{Monotree, hasher::Sha2};
 use std::cell::RefCell;
 
 mod nih;
+mod proofstore;
 mod sqlite;
 mod tree;
 

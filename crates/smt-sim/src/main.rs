@@ -272,6 +272,7 @@ where
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
 
+                // TODO: Compress proofs into a prefix tree.
                 // Write all proofs to memory
                 let mut writer = Vec::new();
                 bincode::encode_into_std_write(my_proofs, &mut writer, bincode::config::standard())
@@ -280,6 +281,14 @@ where
 
                 // Insert the proof size into the surface
                 surface.insert((m * 100.0) as u64, avg_num_updates as u64, byte_count);
+
+                // Write all proofs to disk
+                let p_path = format!("./db/smt-sim-{size}-{m}.proof");
+                std::fs::write(&p_path, &writer).unwrap();
+
+                // Show proof's size on disk
+                let proof_size = Command::new("du").args(["-hs", &p_path]).output().unwrap();
+                println!("{}", String::from_utf8_lossy(&proof_size.stdout).trim());
             }
 
             if size > 10_000 {
