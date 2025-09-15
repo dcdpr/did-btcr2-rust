@@ -145,6 +145,8 @@ pub(crate) trait SmtBackend {
                 key: leaf_key,
                 key_value,
             } => {
+                proof.bitmap.truncate(depth);
+
                 if &leaf_key != key {
                     // Proof-of-non-inclusion
                     proof.path.push((Arrow::sibling(&leaf_key), key_value));
@@ -158,7 +160,12 @@ pub(crate) trait SmtBackend {
                 left,
                 right,
             } => {
+                proof
+                    .bitmap
+                    .insert_zero_nodes(depth, prefix.bit_count - depth);
+
                 let depth = depth.max(prefix.bit_count);
+
                 if get_nth_bit(key, depth) {
                     // Sibling is on the left.
                     proof.path.push((Arrow::Left, left));
@@ -330,6 +337,37 @@ impl Prefix {
     pub(crate) fn byte_count(bit_count: u16) -> usize {
         (bit_count as f32 / 8.0).ceil() as usize
     }
+
+    fn insert_zero_nodes(&mut self, depth: u16, bit_count: u16) {
+        let byte_start = (depth / 8) as usize;
+        let mut bit_start = depth % 8;
+        let mut bit_count = bit_count;
+
+        for i in byte_start..Self::byte_count(depth + bit_count) {
+            for j in bit_start..(bit_start + bit_count).min(8) {
+                self.path[i] &= !(1 << (7 - j));
+            }
+            bit_count = bit_count.saturating_sub(8 - bit_start);
+            bit_start = 0;
+        }
+    }
+
+    fn truncate(&mut self, depth: u16) {
+        self.insert_zero_nodes(depth, 256 - depth);
+    }
+
+    #[cfg(test)]
+    fn count_ones(&self) -> u16 {
+        self.path.iter().map(|e| e.count_ones() as u16).sum()
+    }
+
+    // TODO: This was used in the `arbtest_proof_bitmap` test
+    #[allow(dead_code)]
+    fn trailing_zeroes(&self) -> u16 {
+        let zero_bytes = self.path.iter().rev().take_while(|e| **e == 0).count();
+
+        self.path[31 - zero_bytes].trailing_zeros() as u16 + (zero_bytes as u16 * 8)
+    }
 }
 
 impl fmt::Debug for Prefix {
@@ -383,7 +421,7 @@ pub struct Proof {
     // TODO: `Arrow` should not be embedded with the hashes. It should be separate variable-length
     // bitmap. This will reduce the size of serialized proofs proportional to the cohort size. It
     // will also allow proofs of non-inclusion to be verifiable. They are not currently (see below).
-    // // bitmap: Prefix,
+    bitmap: Prefix,
 
     // TODO: Probably want to reverse the order to be compatible with the spec. VecDeque can do that
     // cheaply.
@@ -396,7 +434,10 @@ pub struct Proof {
 
 impl Proof {
     pub(crate) fn new() -> Self {
-        Self { path: Vec::new() }
+        Self {
+            bitmap: Prefix::new(256, &[0xff; 32]),
+            path: Vec::new(),
+        }
     }
 
     /// Verify the proof against a known `root` and key-value pair.
@@ -498,7 +539,7 @@ mod tests {
     use crate::smt::{Smt as _, SmtNih};
     use arbtest::arbitrary::{Result as ArbResult, Unstructured};
     use arbtest::arbtest;
-    use std::{collections::HashSet, ops::Range};
+    use std::{collections::BTreeSet, ops::Range};
     use tempfile::NamedTempFile;
 
     /// Generate hashes that share a prefix determined by the prefix range.
@@ -530,7 +571,7 @@ mod tests {
         u: &mut Unstructured,
         num_hashes: usize,
         prefix_range: Range<u16>,
-    ) -> ArbResult<HashSet<Hash>> {
+    ) -> ArbResult<BTreeSet<Hash>> {
         let bit_count = u.int_in_range(prefix_range.start..=prefix_range.end)?;
         let byte_count = Prefix::byte_count(bit_count);
         let hash = u.arbitrary()?;
@@ -628,6 +669,71 @@ mod tests {
             tree.insert(root.as_ref(), &key, &[0xff; 32]),
             Err(NihError::Smt(Error::ValueChanged)),
         ));
+    }
+
+    #[test]
+    fn test_prefix_insert_zero_nodes() {
+        let mut prefix = Prefix::new(256, &[0xff; 32]);
+
+        prefix.insert_zero_nodes(3, 7);
+        let mut expected = [0xff; 32];
+        expected[0..2].copy_from_slice(&[0b1110_0000, 0b0011_1111]);
+        assert_eq!(prefix.path, expected);
+
+        prefix.insert_zero_nodes(30, 20);
+        expected[3..7].copy_from_slice(&[0b1111_1100, 0b0000_0000, 0b0000_0000, 0b0011_1111]);
+        assert_eq!(prefix.path, expected);
+
+        prefix.truncate(65);
+        expected[8] = 0b1000_0000;
+        expected[9..].copy_from_slice(&[0; 23]);
+        assert_eq!(prefix.path, expected);
+    }
+
+    #[test]
+    fn arbtest_proof_bitmap() {
+        arbtest(|u| {
+            // Generate a bunch of hashes
+            let num_hashes = u.int_in_range(1..=100_000)?;
+            let hashes = arb_hashes(u, num_hashes, 0..0)?;
+
+            // Create an SMT. Note that the temp file will be empty, because we do not call
+            // the `commit()` method.
+            let db_path = NamedTempFile::new().unwrap();
+            let tree = SmtNih::new(&db_path.path().to_string_lossy()).unwrap();
+
+            // Insert all the hashes into the tree.
+            let mut root = None;
+            for hash in &hashes {
+                root = tree.insert(root.as_ref(), hash, hash).unwrap();
+            }
+
+            // Verify all proof paths for every hash inserted.
+            let root = root.unwrap();
+            for hash in &hashes {
+                let proof = tree.get_proof(&root, hash).unwrap();
+
+                // props to test:
+                // - foreach proof:
+                //     - the number of 1-bits in the bitmap should equal the # of elements in the path
+                //     - the index of last 1-bit should be no greater than log2(n) + fudge
+
+                // The number of 1-bits in the bitmap should equal the # of elements in the path
+                let num_one_bits = proof.bitmap.count_ones();
+                assert_eq!(num_one_bits, proof.path.len() as u16);
+
+                // TODO: the index of last 1-bit should be no greater than log2(n) + fudge
+                // We want to test for this property, but the arbtest crate uses a low quality PRNG
+                // that cycles earlier than expected. In turn, that causes the number of hashes
+                // generated to be around 10x less than we want (after de-duplicating).
+                // Additionally, the low quality randomness produces hashes with prefixes that match
+                // far more often than a uniform coin flip.
+            }
+
+            Ok(())
+        })
+        .size_min(100_000)
+        .size_max(1_000_000);
     }
 
     #[test]

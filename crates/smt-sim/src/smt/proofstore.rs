@@ -125,10 +125,10 @@ fn from_smt_inner<T: SmtBackend>(
 mod tests {
     use super::*;
     use crate::smt::{Smt, SmtNih};
-    use rand::Rng;
+    use arbtest::{arbitrary::Unstructured, arbtest};
     use tempfile::NamedTempFile;
 
-    fn create_smt() -> (Hash, SmtNih, Vec<Hash>) {
+    fn create_smt(u: &mut Unstructured) -> (Hash, SmtNih, Vec<Hash>) {
         let db_path = NamedTempFile::new().unwrap();
         let smt = SmtNih::new(&db_path.path().to_string_lossy()).unwrap();
 
@@ -137,7 +137,7 @@ mod tests {
         // Insert random keys into the SMT.
         let cohort_size = 1_000;
         let keys = (0..cohort_size)
-            .map(|_| rand::thread_rng().r#gen())
+            .map(|_| u.arbitrary().unwrap())
             .collect::<Vec<_>>();
 
         for key in &keys {
@@ -148,53 +148,65 @@ mod tests {
     }
 
     #[test]
-    fn test_proofstore_root() {
-        let (root, smt, _) = create_smt();
+    fn arbtest_proofstore_root() {
+        arbtest(|u| {
+            let (root, smt, _) = create_smt(u);
 
-        // Create a CompactProofStore from the SMT.
-        let cps = CompactProofStore::from_smt(&smt, &root).unwrap();
+            // Create a CompactProofStore from the SMT.
+            let cps = CompactProofStore::from_smt(&smt, &root).unwrap();
 
-        // Hydrate the compact proofs (re-hash everything).
-        let ps = ProofStore::from(cps);
+            // Hydrate the compact proofs (re-hash everything).
+            let ps = ProofStore::from(cps);
 
-        // The hydrated root should be equal to the known root.
-        assert_eq!(ps.root, root);
+            // The hydrated root should be equal to the known root.
+            assert_eq!(ps.root, root);
+
+            Ok(())
+        });
     }
 
     #[test]
-    fn test_compact_proofstore_size() {
-        let (root, smt, keys) = create_smt();
+    fn arbtest_compact_proofstore_size() {
+        arbtest(|u| {
+            let (root, smt, keys) = create_smt(u);
 
-        // Create a CompactProofStore from the SMT.
-        let cps = CompactProofStore::from_smt(&smt, &root);
+            // Create a CompactProofStore from the SMT.
+            let cps = CompactProofStore::from_smt(&smt, &root);
 
-        // Get the size in bytes of the encoded CompactProofStore.
-        let mut proof_store_bytes = Vec::new();
-        bincode::encode_into_std_write(cps, &mut proof_store_bytes, bincode::config::standard())
+            // Get the size in bytes of the encoded CompactProofStore.
+            let mut proof_store_bytes = Vec::new();
+            bincode::encode_into_std_write(
+                cps,
+                &mut proof_store_bytes,
+                bincode::config::standard(),
+            )
             .unwrap();
 
-        // Compare size of list of proofs to size of CompactProofStore.
-        let my_proofs = keys
-            .iter()
-            .map(|key| smt.get_proof(&root, key))
-            .collect::<Result<Vec<_>, _>>()
+            // Compare size of list of proofs to size of CompactProofStore.
+            let my_proofs = keys
+                .iter()
+                .map(|key| smt.get_proof(&root, key))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            let mut vec_proof_bytes = Vec::new();
+            bincode::encode_into_std_write(
+                my_proofs,
+                &mut vec_proof_bytes,
+                bincode::config::standard(),
+            )
             .unwrap();
 
-        let mut vec_proof_bytes = Vec::new();
-        bincode::encode_into_std_write(
-            my_proofs,
-            &mut vec_proof_bytes,
-            bincode::config::standard(),
-        )
-        .unwrap();
+            // The compact proof store is expected to be at least 4x smaller.
+            //
+            // TODO: This might change after addressing the proof of non-inclusion problem. The current
+            // implementation includes the `key` and a zero in every leaf node. But we can remove those
+            // with a proper implementation.
+            //
+            // The expected theoretical compression ratio is approximately 10:1.
+            assert!(proof_store_bytes.len() < vec_proof_bytes.len() / 4);
 
-        // The compact proof store is expected to be at least 4x smaller.
-        //
-        // TODO: This might change after addressing the proof of non-inclusion problem. The current
-        // implementation includes the `key` and a zero in every leaf node. But we can remove those
-        // with a proper implementation.
-        //
-        // The expected theoretical compression ratio is approximately 10:1.
-        assert!(proof_store_bytes.len() < vec_proof_bytes.len() / 4);
+            Ok(())
+        });
     }
 }
