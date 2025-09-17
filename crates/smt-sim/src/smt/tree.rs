@@ -355,19 +355,6 @@ impl Prefix {
     fn truncate(&mut self, depth: u16) {
         self.insert_zero_nodes(depth, 256 - depth);
     }
-
-    #[cfg(test)]
-    fn count_ones(&self) -> u16 {
-        self.path.iter().map(|e| e.count_ones() as u16).sum()
-    }
-
-    // TODO: This was used in the `arbtest_proof_bitmap` test
-    #[allow(dead_code)]
-    fn trailing_zeroes(&self) -> u16 {
-        let zero_bytes = self.path.iter().rev().take_while(|e| **e == 0).count();
-
-        self.path[31 - zero_bytes].trailing_zeros() as u16 + (zero_bytes as u16 * 8)
-    }
 }
 
 impl fmt::Debug for Prefix {
@@ -539,8 +526,15 @@ mod tests {
     use crate::smt::{Smt as _, SmtNih};
     use arbtest::arbitrary::{Result as ArbResult, Unstructured};
     use arbtest::arbtest;
+    use sha2::Sha256;
     use std::{collections::BTreeSet, ops::Range};
     use tempfile::NamedTempFile;
+
+    impl Prefix {
+        fn count_ones(&self) -> u16 {
+            self.path.iter().map(|e| e.count_ones() as u16).sum()
+        }
+    }
 
     /// Generate hashes that share a prefix determined by the prefix range.
     ///
@@ -694,8 +688,16 @@ mod tests {
     fn arbtest_proof_bitmap() {
         arbtest(|u| {
             // Generate a bunch of hashes
-            let num_hashes = u.int_in_range(1..=100_000)?;
-            let hashes = arb_hashes(u, num_hashes, 0..0)?;
+            let num_hashes = u.int_in_range(1..=30_000)?;
+            let salt = u.int_in_range(0..=(i32::MAX - num_hashes))?;
+            let expected_log2n = num_hashes.ilog2() as u16;
+            let hashes = (0..num_hashes)
+                .map(|i| {
+                    let i = i + salt;
+
+                    Sha256::digest(i.to_le_bytes()).into()
+                })
+                .collect::<Vec<Hash>>();
 
             // Create an SMT. Note that the temp file will be empty, because we do not call
             // the `commit()` method.
@@ -716,24 +718,20 @@ mod tests {
                 // props to test:
                 // - foreach proof:
                 //     - the number of 1-bits in the bitmap should equal the # of elements in the path
-                //     - the index of last 1-bit should be no greater than log2(n) + fudge
+                //     - the number of 1-bits should be no greater than log2(n) + fudge
 
                 // The number of 1-bits in the bitmap should equal the # of elements in the path
                 let num_one_bits = proof.bitmap.count_ones();
                 assert_eq!(num_one_bits, proof.path.len() as u16);
 
-                // TODO: the index of last 1-bit should be no greater than log2(n) + fudge
-                // We want to test for this property, but the arbtest crate uses a low quality PRNG
-                // that cycles earlier than expected. In turn, that causes the number of hashes
-                // generated to be around 10x less than we want (after de-duplicating).
-                // Additionally, the low quality randomness produces hashes with prefixes that match
-                // far more often than a uniform coin flip.
+                // The number of 1-bits should be no greater than log2(n) + fudge
+                assert!(num_one_bits <= expected_log2n + 5);
             }
 
             Ok(())
         })
-        .size_min(100_000)
-        .size_max(1_000_000);
+        .size_min(1_000_000)
+        .size_max(10_000_000);
     }
 
     #[test]
