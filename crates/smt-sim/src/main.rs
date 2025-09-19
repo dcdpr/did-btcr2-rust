@@ -224,82 +224,163 @@ where
     for size in sizes {
         println!("Cohort size: {}", human_size(size));
 
-        let mut surface = Surface::new(size as u64);
-        let db_path = format!("./db/smt-sim-{}.{}", human_size(size), T::EXT);
+        let surface_wo = create_surface_without_nonce::<T>(size);
+        let surface_w = create_surface_with_nonce::<T>(size);
 
-        for m in [0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75] {
-            if size > 1_000 {
-                println!("Running simulation with {}% mine...", m * 100.0);
-            }
+        println!("Without Nonce max_bytes: {}", surface_wo.max_bytes);
+        println!("With Nonce max_bytes:    {}", surface_w.max_bytes);
 
-            let my_did_count = (size as f64 * m) as usize;
-            let kv_pairs = create_kv_pairs(size);
-            let mut i = 0;
-            let (mine, not_mine): (Vec<_>, Vec<_>) = kv_pairs.into_iter().partition(|_| {
-                i += 1;
+        let diff = surface_w.difference(&surface_wo);
+        println!("Diff  max_bytes: {}", diff.max_bytes);
 
-                i < my_did_count
-            });
-            let max_possible_updates = size as f64 * (1.0 - m);
-
-            // TODO: Run two simulations:
-            //
-            // 1. Proofs of non-inclusion without nonce (done below)
-            // 2. Proofs of inclusion with nonce
-            //
-            // When plotting the diagram, pass both surfaces. The color is determined by the
-            // difference sampled from both surfaces.
-
-            // Run some randomized trials to collect rough averages
-            for _trial in 0..TRIALS {
-                if size > 10_000 {
-                    // println!("Running trial {} of {TRIALS}", trial + 1);
-                    print!(".");
-                    std::io::stdout().lock().flush().unwrap();
-                }
-
-                // todo: is currently Uniform sampling, we want Gaussian?
-                let avg_num_updates = random_size(max_possible_updates as usize);
-
-                // Insert all updates into the tree
-                let smt = T::new(&db_path).unwrap();
-                let root = smt_demo(&smt, &not_mine[..avg_num_updates], false);
-
-                // Create all of my proofs of non-inclusion
-                let my_proofs = mine
-                    .iter()
-                    .map(|(key, _)| smt.get_proof(&root, key))
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap();
-
-                // TODO: Compress proofs into a prefix tree.
-                // Write all proofs to memory
-                let mut writer = Vec::new();
-                bincode::encode_into_std_write(my_proofs, &mut writer, bincode::config::standard())
-                    .unwrap();
-                let byte_count = writer.len() as u64;
-
-                // Insert the proof size into the surface
-                surface.insert((m * 100.0) as u64, avg_num_updates as u64, byte_count);
-
-                // Write all proofs to disk
-                let p_path = format!("./db/smt-sim-{size}-{m}.proof");
-                std::fs::write(&p_path, &writer).unwrap();
-
-                // Show proof's size on disk
-                let proof_size = Command::new("du").args(["-hs", &p_path]).output().unwrap();
-                println!("{}", String::from_utf8_lossy(&proof_size.stdout).trim());
-            }
-
-            if size > 10_000 {
-                println!();
-            }
-        }
-
-        draw_chart(&surface);
+        draw_chart(&surface_wo, "wo");
+        draw_chart(&surface_w, "w");
+        draw_chart(&diff, "diff");
 
         println!();
     }
+}
+
+fn create_surface_without_nonce<T>(size: usize) -> Surface
+where
+    T: Smt,
+    <T as Smt>::Error: std::fmt::Debug,
+{
+    let mut surface = Surface::new(size as u64);
+    let db_path = format!("./db/smt-sim-{}.{}", human_size(size), T::EXT);
+
+    for m in [0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75] {
+        if size > 1_000 {
+            println!("Running simulation with {}% mine...", m * 100.0);
+        }
+
+        let my_did_count = (size as f64 * m) as usize;
+        let kv_pairs = create_kv_pairs(size);
+        let mut i = 0;
+        let (mine, not_mine): (Vec<_>, Vec<_>) = kv_pairs.into_iter().partition(|_| {
+            i += 1;
+
+            i < my_did_count
+        });
+        let max_possible_updates = size as f64 * (1.0 - m);
+
+        // TODO: Run two simulations:
+        //
+        // 1. Proofs of non-inclusion without nonce (done below)
+        // 2. Proofs of inclusion with nonce
+        //
+        // When plotting the diagram, pass both surfaces. The color is determined by the
+        // difference sampled from both surfaces.
+
+        // Run some randomized trials to collect rough averages
+        for _trial in 0..TRIALS {
+            if size > 10_000 {
+                // println!("Running trial {} of {TRIALS}", trial + 1);
+                print!(".");
+                std::io::stdout().lock().flush().unwrap();
+            }
+
+            // todo: is currently Uniform sampling, we want Gaussian?
+            let avg_num_updates = random_size(max_possible_updates as usize);
+
+            // Insert all updates into the tree
+            let smt = T::new(&db_path).unwrap();
+            let root = smt_demo(&smt, &not_mine[..avg_num_updates], false);
+
+            // Create all of my proofs of non-inclusion
+            let my_proofs = mine
+                .iter()
+                .map(|(key, _)| smt.get_proof(&root, key))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            // TODO: Compress proofs into a prefix tree.
+            // Write all proofs to memory
+            let mut writer = Vec::new();
+            bincode::encode_into_std_write(my_proofs, &mut writer, bincode::config::standard())
+                .unwrap();
+            let byte_count = writer.len() as u64;
+
+            // Insert the proof size into the surface
+            surface.insert((m * 100.0) as u64, avg_num_updates as u64, byte_count);
+
+            // Write all proofs to disk
+            let p_path = format!("./db/smt-sim-{size}-{m}.proof");
+            std::fs::write(&p_path, &writer).unwrap();
+
+            // Show proof's size on disk
+            let proof_size = Command::new("du").args(["-hs", &p_path]).output().unwrap();
+            println!("{}", String::from_utf8_lossy(&proof_size.stdout).trim());
+        }
+
+        if size > 10_000 {
+            println!();
+        }
+    }
+
+    surface
+}
+
+fn create_surface_with_nonce<T>(size: usize) -> Surface
+where
+    T: Smt,
+    <T as Smt>::Error: std::fmt::Debug,
+{
+    let mut surface = Surface::new(size as u64);
+    let db_path = format!("./db/smt-sim-{}.{}", human_size(size), T::EXT);
+
+    for m in [0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75] {
+        if size > 1_000 {
+            println!("Running simulation with {}% mine...", m * 100.0);
+        }
+
+        let my_did_count = (size as f64 * m) as usize;
+        let kv_pairs = create_kv_pairs(size);
+        let smt = T::new(&db_path).unwrap();
+        let root = smt_demo(&smt, &kv_pairs, false);
+
+        let mut i = 0;
+        let (mine, not_mine): (Vec<_>, Vec<_>) = kv_pairs.into_iter().partition(|_| {
+            i += 1;
+
+            i < my_did_count
+        });
+
+        // Create all of my proofs of non-inclusion
+        let my_proofs = mine
+            .iter()
+            .map(|(key, _)| smt.get_proof(&root, key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        // TODO: Compress proofs into a prefix tree.
+        // Write all proofs to memory
+        let mut writer = Vec::new();
+        bincode::encode_into_std_write(my_proofs, &mut writer, bincode::config::standard())
+            .unwrap();
+        let byte_count = writer.len() as u64;
+
+        // Insert the proof size into the surface
+        surface.insert(
+            (m * 100.0) as u64,
+            (mine.len() + not_mine.len()) as u64,
+            byte_count,
+        );
+
+        // Write all proofs to disk
+        let p_path = format!("./db/smt-sim-{size}-{m}.proof");
+        std::fs::write(&p_path, &writer).unwrap();
+
+        // Show proof's size on disk
+        let proof_size = Command::new("du").args(["-hs", &p_path]).output().unwrap();
+        println!("{}", String::from_utf8_lossy(&proof_size.stdout).trim());
+    }
+
+    if size > 10_000 {
+        println!();
+    }
+
+    surface
 }
 
 fn smt_demo<T>(smt: &T, kv_pairs: &[(Hash, Hash)], diagrams: bool) -> Hash
@@ -331,12 +412,15 @@ fn human_size(size: usize) -> String {
     }
 }
 
-fn draw_chart(surface: &Surface) {
+fn draw_chart(surface: &Surface, name: &str) {
     use plotters::prelude::*;
 
     let cohort_size = surface.cohort_size;
     let max_bytes = surface.max_bytes;
-    let filename = format!("./db/surface_{}.svg", human_size(cohort_size as usize));
+    let filename = format!(
+        "./db/surface_{name}_{}.svg",
+        human_size(cohort_size as usize)
+    );
     let drawing_area = SVGBackend::new(&filename, (800, 600)).into_drawing_area();
 
     // Draw background.
@@ -462,6 +546,20 @@ impl Surface {
 
         // Interpolate and scale back to byte range.
         (lerp(z0, z1, t) * b) as u64
+    }
+
+    fn difference(&self, other: &Self) -> Self {
+        assert_eq!(self.cohort_size, other.cohort_size);
+
+        let mut diff = Surface::new(self.cohort_size);
+
+        for (m, tree) in self.samples.iter() {
+            for (u, height) in tree.iter() {
+                diff.insert(*m, *u, height.abs_diff(other.sample(*m, *u)));
+            }
+        }
+
+        diff
     }
 }
 
