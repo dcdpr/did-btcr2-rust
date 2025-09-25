@@ -12,6 +12,7 @@ plotters = "0.3"
 rand = "0.8"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
+ultraviolet = { version = "0.10", features = ["f64"] }
 
 [dev-dependencies]
 arbtest = "0.3"
