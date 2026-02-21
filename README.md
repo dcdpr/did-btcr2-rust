@@ -1,4 +1,4 @@
-# did-btc1-rust
+# did-btcr2-rust
 
 ## One-time Setup
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use did_btc1::resolver::ResolverState;
-use did_btc1::{Document, ResolutionOptions, document::SidecarData};
+use did_btcr2::resolver::ResolverState;
+use did_btcr2::{Document, ResolutionOptions, document::SidecarData};
 use std::collections::HashMap;
 
 fn main() -> Result<()> {
@@ -13,7 +13,8 @@ fn main() -> Result<()> {
     };
 
     let agent = ureq::agent();
-    let did = "did:btc1:k1q5pqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsx6n2m7".parse()?;
+    let did =
+        "did:btcr2:k1q5pqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsx6n2m7".parse()?;
     let mut fsm = Document::read(&did, resolution_options)?;
 
     // Drive the blockchain traversal state machine forward.

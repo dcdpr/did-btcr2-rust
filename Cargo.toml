@@ -1,12 +1,12 @@
 [package]
-name = "did-btc1"
+name = "did-btcr2"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Implementation of DID:BTC1"
-repository = "https://github.com/dcdpr/did-btc1.git"
+repository = "https://github.com/dcdpr/did-btcr2.git"
 authors = ["Dan Pape <dpape@dpape.com>", "Jay Oster <jay@blipjoy.com>"]
-keywords = ["did", "did-btc1", "decentralized"]
+keywords = ["did", "did-btcr2", "decentralized"]
 readme = "README.md"
 
 [dependencies]
