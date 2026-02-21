@@ -10,7 +10,7 @@ pub enum Error {
     Zcap(String),
 }
 
-// Errors defined by the DID:BTC1 specification and other related specifications.
+// Errors defined by the DID:BTCR2 specification and other related specifications.
 pub trait ProblemDetails {
     fn details(&self) -> Option<Value> {
         None
@@ -18,7 +18,7 @@ pub trait ProblemDetails {
 }
 
 #[derive(Error, Debug)]
-pub enum Btc1Error {
+pub enum Btcr2Error {
     // Errors from DID Resolution Spec
     //
     /// An invalid DID was detected during DID Resolution.
@@ -27,7 +27,7 @@ pub enum Btc1Error {
     /// The DID document was malformed.
     InvalidDidDocument(String),
 
-    // Errors from DID BTC1 Spec
+    // Errors from DID BTCR2 Spec
     //
     /// Sidecar data was invalid
     InvalidSidecarData(String),
@@ -56,7 +56,7 @@ pub enum Btc1Error {
     ProofGeneration(String),
 }
 
-impl Btc1Error {
+impl Btcr2Error {
     pub(crate) fn late_publishing(found_hash: Sha256Hash, expected_hash: Sha256Hash) -> Self {
         Self::LatePublishingError(format!(
             "Found hash `{}`, expected `{}`",
@@ -66,12 +66,12 @@ impl Btc1Error {
     }
 }
 
-impl ProblemDetails for Btc1Error {
+impl ProblemDetails for Btcr2Error {
     fn details(&self) -> Option<Value> {
         let prefix = match self {
             Self::InvalidDid(_) | Self::InvalidDidDocument(_) => "https://www.w3.org/ns/did",
             // TODO: Is this the right error namespace?
-            // From: https://github.com/dcdpr/did-btc1/issues/71#issuecomment-3179550385
+            // From: https://github.com/dcdpr/did-btcr2/issues/71#issuecomment-3179550385
             Self::InvalidSidecarData(_)
             | Self::LatePublishingError(_)
             | Self::InvalidUpdateProof(_)
@@ -79,7 +79,7 @@ impl ProblemDetails for Btc1Error {
             | Self::InvalidDidUpdate(_)
             | Self::ProofVerification(_)
             | Self::ProofTransformation(_)
-            | Self::ProofGeneration(_) => "https://btc1.dev/context/v1",
+            | Self::ProofGeneration(_) => "https://btcr2.dev/context/v1",
         };
 
         let name = match self {

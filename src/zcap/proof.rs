@@ -115,7 +115,7 @@ pub struct ProofInner {
     pub capability_action: String,
 
     // TODO: What is this? Our spec looks wrong...?
-    // See example in https://dcdpr.github.io/did-btc1/#dereference-root-capability-identifier
+    // See example in https://dcdpr.github.io/did-btcr2/#dereference-root-capability-identifier
     // `invocationTarget` is used in an ephemeral object (never serialized) named "root capability",
     // but also appears in ZCAP delegated capability OUTSIDE of `proof`:
     // https://w3c-ccg.github.io/zcap-spec/#delegated-capability

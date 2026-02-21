@@ -4,7 +4,7 @@
 
 use crate::update::{UnsecuredUpdate, Update};
 use crate::zcap::proof::{Proof, ProofInner, ProofPurpose, ProofValue};
-use crate::{error::Btc1Error, identifier::Sha256Hash, key::PublicKey};
+use crate::{error::Btcr2Error, identifier::Sha256Hash, key::PublicKey};
 use multibase::{Base, decode, encode};
 use secp256k1::schnorr::Signature;
 use secp256k1::{KeyPair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
@@ -24,7 +24,7 @@ impl CryptoSuite {
         &self,
         unsecured_update: &UnsecuredUpdate,
         mut inner: ProofInner,
-    ) -> Result<Proof, Btc1Error> {
+    ) -> Result<Proof, Btcr2Error> {
         // Add document context to proof if present
         if let Some(context) = unsecured_update.as_ref()["@context"].as_array() {
             inner.context = context
@@ -62,10 +62,10 @@ impl CryptoSuite {
         public_key: PublicKey,
         update: &Update,
         expected_proof_purpose: &ProofPurpose,
-    ) -> Result<(), Btc1Error> {
+    ) -> Result<(), Btcr2Error> {
         // Step 5
         if &update.proof.inner.proof_purpose != expected_proof_purpose {
-            return Err(Btc1Error::ProofVerification(format!(
+            return Err(Btcr2Error::ProofVerification(format!(
                 "Proof purpose was expected to be {expected_proof_purpose}"
             )));
         }
@@ -75,7 +75,7 @@ impl CryptoSuite {
     }
 
     // bip340 cryptosuite spec Section 3.3.2
-    fn verify_proof(&self, public_key: PublicKey, update: &Update) -> Result<(), Btc1Error> {
+    fn verify_proof(&self, public_key: PublicKey, update: &Update) -> Result<(), Btcr2Error> {
         // Remove proof from update document
         let unsecured_update = UnsecuredUpdate::from(update);
 
@@ -94,7 +94,7 @@ impl CryptoSuite {
             );
 
             if !contexts_are_equal {
-                return Err(Btc1Error::InvalidUpdateProof(
+                return Err(Btcr2Error::InvalidUpdateProof(
                     "Proof context does not match update context".into(),
                 ));
             }
@@ -146,7 +146,7 @@ impl CryptoSuite {
         &self,
         hash_data: Sha256Hash,
         proof: &ProofInner,
-    ) -> Result<Signature, Btc1Error> {
+    ) -> Result<Signature, Btcr2Error> {
         // Get verification method
         let _verification_method_id = &proof.verification_method;
 
@@ -168,14 +168,14 @@ impl CryptoSuite {
         hash_data: Sha256Hash,
         proof_bytes: Signature,
         public_key: PublicKey,
-    ) -> Result<(), Btc1Error> {
+    ) -> Result<(), Btcr2Error> {
         // Verify signature
         bip340_verify(hash_data, proof_bytes, &public_key.x_only_public_key().0)
     }
 }
 
 /// Sign data using BIP340 Schnorr signatures
-fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signature, Btc1Error> {
+fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signature, Btcr2Error> {
     let secp = Secp256k1::new();
 
     // Create message object from hash
@@ -192,7 +192,7 @@ fn bip340_verify(
     message_hash: Sha256Hash,
     signature: Signature,
     public_key: &XOnlyPublicKey,
-) -> Result<(), Btc1Error> {
+) -> Result<(), Btcr2Error> {
     let secp = Secp256k1::new();
 
     // Create message object from hash
@@ -200,7 +200,7 @@ fn bip340_verify(
 
     // Verify signature
     secp.verify_schnorr(&signature, &message, public_key)
-        .map_err(|_| Btc1Error::InvalidUpdateProof("Verification failed".into()))
+        .map_err(|_| Btcr2Error::InvalidUpdateProof("Verification failed".into()))
 }
 
 /// Encode binary data using Multibase (base58-btc)
@@ -209,11 +209,11 @@ fn multibase_encode(signature: Signature) -> ProofValue {
 }
 
 /// Decode multibase encoded string
-fn multibase_decode(proof_value: &ProofValue) -> Result<Signature, Btc1Error> {
+fn multibase_decode(proof_value: &ProofValue) -> Result<Signature, Btcr2Error> {
     let decoded = decode(&proof_value.0)
         .map(|(_, decoded)| decoded)
-        .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))?;
+        .map_err(|_| Btcr2Error::ProofVerification("Invalid proofValue encoding".into()))?;
 
     Signature::from_slice(&decoded)
-        .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))
+        .map_err(|_| Btcr2Error::ProofVerification("Invalid proofValue encoding".into()))
 }

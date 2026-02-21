@@ -1,5 +1,5 @@
 use crate::zcap::proof::Proof;
-use crate::{canonical_hash::CanonicalHash, error::Btc1Error, identifier::Sha256Hash, json_tools};
+use crate::{canonical_hash::CanonicalHash, error::Btcr2Error, identifier::Sha256Hash, json_tools};
 use json_patch::Patch;
 use onlyerror::Error;
 use serde_json::Value;
@@ -70,13 +70,13 @@ impl Update {
     }
 
     // Spec section 7.2.2.4
-    pub(crate) fn confirm_duplicate(&self, hash_history: &[Sha256Hash]) -> Result<(), Btc1Error> {
+    pub(crate) fn confirm_duplicate(&self, hash_history: &[Sha256Hash]) -> Result<(), Btcr2Error> {
         let update_hash = UnsecuredUpdate::from(self).hash();
         let update_hash_index = usize::try_from(u64::from(self.target_version_id) - 2).unwrap();
         let historical_update_hash = hash_history[update_hash_index];
 
         if historical_update_hash != update_hash {
-            Err(Btc1Error::late_publishing(
+            Err(Btcr2Error::late_publishing(
                 update_hash,
                 historical_update_hash,
             ))
