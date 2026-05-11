@@ -1,3 +1,5 @@
+#![warn(clippy::unwrap_used)]
+
 use crate::zcap::proof::Proof;
 use crate::{canonical_hash::CanonicalHash, error::Btc1Error, identifier::Sha256Hash, json_tools};
 use json_patch::Patch;
@@ -72,7 +74,27 @@ impl Update {
     // Spec section 7.2.2.4
     pub(crate) fn confirm_duplicate(&self, hash_history: &[Sha256Hash]) -> Result<(), Btc1Error> {
         let update_hash = UnsecuredUpdate::from(self).hash();
-        let update_hash_index = usize::try_from(u64::from(self.target_version_id) - 2).unwrap();
+        // target_version_id is u64; on 32-bit hosts a sufficiently long update
+        // history would overflow usize. Legitimately fallible -> Result.
+        // Btc1Error::InvalidDidUpdate is the closest existing variant; we do
+        // not introduce a new error variant here.
+        //
+        // checked_sub(2) also defends against the prior u64 underflow when
+        // target_version_id == 1 (NonZeroU64 enforces non-zero, not >= 2);
+        // without checked_sub, 1u64 - 2 would wrap to 0xFFFF_FFFF_FFFF_FFFF in
+        // release mode and the index would then go out of bounds on hash_history.
+        let update_hash_index = u64::from(self.target_version_id)
+            .checked_sub(2)
+            .ok_or_else(|| {
+                Btc1Error::InvalidDidUpdate(
+                    "target_version_id must be >= 2 for duplicate-check; got 1".into(),
+                )
+            })?;
+        let update_hash_index = usize::try_from(update_hash_index).map_err(|_| {
+            Btc1Error::InvalidDidUpdate(
+                "target_version_id overflows usize on this host (32-bit limit)".into(),
+            )
+        })?;
         let historical_update_hash = hash_history[update_hash_index];
 
         if historical_update_hash != update_hash {

@@ -1,3 +1,4 @@
+#![warn(clippy::unwrap_used)]
 //! # DID:BTC1 Encoding
 //!
 //! This crate provides encoding and decoding functionality for DID:BTC1 identifiers
@@ -88,6 +89,10 @@ pub enum Error {
     #[error("Invalid identifier type: {0}")]
     InvalidIdType(String),
 
+    /// Invalid secp256k1 public key (length-correct but not a valid curve point)
+    #[error("Invalid secp256k1 public key point: {0}")]
+    InvalidPublicKeyPoint(secp256k1::Error),
+
     /// Error with key operations
     Key(#[from] crate::key::Error),
 
@@ -122,16 +127,17 @@ impl FromStr for Did {
     }
 }
 
-impl From<DidComponents> for Did {
-    fn from(components: DidComponents) -> Self {
-        let encoded =
-            encode_did_identifier(components.version, components.network, components.id_type)
-                .unwrap();
+impl TryFrom<DidComponents> for Did {
+    type Error = Error;
 
-        Self {
+    fn try_from(components: DidComponents) -> Result<Self, Self::Error> {
+        let encoded =
+            encode_did_identifier(components.version, components.network, components.id_type)?;
+
+        Ok(Self {
             encoded,
             components,
-        }
+        })
     }
 }
 
@@ -153,8 +159,12 @@ impl Did {
 
     pub(crate) fn public_key_unchecked(&self) -> PublicKey {
         match self.components.id_type {
-            IdType::Key(key) => PublicKey::from_slice(&key).unwrap(),
-            IdType::External(_) => unreachable!(), // todo: parse don't validate
+            IdType::Key(key) => PublicKey::from_slice(&key).expect(
+                "IdType::Key bytes were validated as a valid secp256k1 point at parse time in IdType::try_from",
+            ),
+            IdType::External(_) => unreachable!(
+                "public_key_unchecked called on an External id type — callers must check id_type first"
+            ),
         }
     }
 }
@@ -324,12 +334,24 @@ impl TryFrom<&DecodedResult> for IdType {
 
         // Determine identifier type from HRP
         match decoded.hrp.as_str() {
-            // Unwraps exist here because the length checks have already happened above.
-            HRP_KEY => Ok(IdType::Key(decoded.dp[1..].try_into().unwrap())),
-            HRP_EXTERNAL => Ok(IdType::External(Sha256Hash(
-                decoded.dp[1..].try_into().unwrap(),
-            ))),
-            _ => unreachable!(),
+            HRP_KEY => {
+                // Length already checked above (actual_len == PUBLIC_KEY_SIZE).
+                let payload: [u8; PUBLIC_KEY_SIZE] = decoded.dp[1..].try_into().expect(
+                    "decoded.dp[1..] has length PUBLIC_KEY_SIZE per length check immediately above",
+                );
+                // Parse, don't validate: reject 33-byte payloads that are not a
+                // valid secp256k1 curve point. This makes `Did::public_key_unchecked`
+                // a statically-guaranteed success.
+                PublicKey::from_slice(&payload).map_err(Error::InvalidPublicKeyPoint)?;
+                Ok(IdType::Key(payload))
+            }
+            HRP_EXTERNAL => {
+                let payload: [u8; SHA256_HASH_LEN] = decoded.dp[1..].try_into().expect(
+                    "decoded.dp[1..] has length SHA256_HASH_LEN per length check immediately above",
+                );
+                Ok(IdType::External(Sha256Hash(payload)))
+            }
+            _ => unreachable!("HRP filtered to HRP_KEY/HRP_EXTERNAL by expected_len match above"),
         }
     }
 }
@@ -498,6 +520,16 @@ mod tests {
         }
     }
 
+    /// Returns a valid 33-byte compressed secp256k1 public key (derived from
+    /// secret key = [0x01; 32]). Required because parse-time curve-point
+    /// validation rejects the previously-used all-zero placeholder.
+    fn valid_secp256k1_pubkey_bytes() -> [u8; PUBLIC_KEY_SIZE] {
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[1u8; 32])
+            .expect("0x01..0x01 is a valid secp256k1 secret key");
+        sk.public_key(&secp).serialize()
+    }
+
     #[test]
     fn test_network_conversion() {
         assert_eq!(Network::try_from(0).unwrap(), Network::Mainnet);
@@ -522,7 +554,9 @@ mod tests {
 
     #[test]
     fn test_encode_decode_key_based() {
-        let key = IdType::from(&[0_u8; PUBLIC_KEY_SIZE][..]);
+        // Encode->parse round-trip requires a valid curve point,
+        // because parse-time validation now rejects non-curve-point payloads.
+        let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
 
         let did_str = encode_did_identifier(DidVersion::One, Network::Mainnet, key).unwrap();
 
@@ -532,6 +566,36 @@ mod tests {
         assert_eq!(u8::from(components.version), 1);
         assert_eq!(components.network, Network::Mainnet);
         assert_eq!(components.id_type, key);
+    }
+
+    #[test]
+    fn did_with_non_curve_point_payload_is_rejected() {
+        // a DID with HRP=`k` and a 33-byte payload that is
+        // length-correct but is NOT a valid secp256k1 curve point must be
+        // rejected at parse time. Previously, parsing succeeded and the
+        // panic happened later in Did::public_key_unchecked() — an
+        // attacker-controlled-input panic on the resolve happy path.
+
+        // Construct a payload of 33 zero bytes. The secp256k1 library
+        // rejects the all-zero key (it is not on the curve).
+        let bad_payload = [0u8; PUBLIC_KEY_SIZE];
+
+        // Build the encoded data: 1 version/network byte + 33 payload bytes.
+        let mut data = Vec::with_capacity(1 + bad_payload.len());
+        data.push(0u8); // version=1 (high nibble 0), network=Mainnet (low nibble 0)
+        data.extend_from_slice(&bad_payload);
+
+        let bech32_part = encode(HRP_KEY, &data).expect("HRP and data are valid bech32m inputs");
+        let did_str = format!("{DID_BTC1_PREFIX}{bech32_part}");
+
+        // Must fail to parse — and specifically with InvalidPublicKeyPoint.
+        let err = did_str
+            .parse::<Did>()
+            .expect_err("non-curve-point payload must be rejected at parse time");
+        assert!(
+            matches!(err, Error::InvalidPublicKeyPoint(_)),
+            "expected InvalidPublicKeyPoint, got: {err:?}"
+        );
     }
 
     #[test]
@@ -565,7 +629,8 @@ mod tests {
 
     #[test]
     fn test_custom_network() {
-        let key = IdType::from(&[0_u8; PUBLIC_KEY_SIZE][..]);
+        // Encode->parse round-trip requires a valid curve point.
+        let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
         let did = encode_did_identifier(DidVersion::One, Network::Custom(15), key).unwrap();
 
         let components = parse_did_identifier(&did).unwrap();

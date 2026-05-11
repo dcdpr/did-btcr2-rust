@@ -1,3 +1,6 @@
+#![warn(clippy::unwrap_used)]
+//! Panic-sweep policy: test code is exempted via clippy.toml.
+
 use crate::beacon::BeaconType;
 use crate::canonical_hash::CanonicalHash as _;
 use crate::document::{Document, InitialDocument, ResolutionOptions, SidecarData, SignalsMetadata};
@@ -66,7 +69,7 @@ impl Resolver {
 
         Self {
             contemporary_doc: initial_doc,
-            current_version_id: 1.try_into().unwrap(),
+            current_version_id: NonZeroU64::MIN,
             target_condition,
             update_hash_history: vec![],
             signals_metadata,
@@ -152,7 +155,10 @@ impl Resolver {
                     }
 
                     // Step 10.2.
-                    let next_update_version_id = self.current_version_id.checked_add(1).unwrap();
+                    let next_update_version_id = self
+                        .current_version_id
+                        .checked_add(1)
+                        .expect("version_id overflow requires 2^64 updates to a single DID");
                     if update.target_version_id == next_update_version_id {
                         // Step 10.2.1.
                         if update.source_hash != contemporary_hash {
@@ -187,7 +193,12 @@ impl Resolver {
                     }
 
                     // Step 10.3.
-                    if update.target_version_id > self.current_version_id.checked_add(1).unwrap() {
+                    if update.target_version_id
+                        > self
+                            .current_version_id
+                            .checked_add(1)
+                            .expect("version_id overflow requires 2^64 updates to a single DID")
+                    {
                         return Err(Error::LatePublishingError);
                     }
                 }
@@ -215,7 +226,9 @@ impl Resolver {
         let mut signals = Vec::new();
         for (beacon_type, txs) in transactions {
             for tx in txs {
-                let txout = tx.outputs.last().unwrap();
+                let Some(txout) = tx.outputs.last() else {
+                    continue;
+                };
                 let ops = txout
                     .script_pubkey
                     .instructions()
@@ -262,7 +275,10 @@ impl Resolver {
                             self.rpc_host, beacon.descriptor,
                         ))
                         .body(())
-                        .unwrap();
+                        .expect(
+                            "rpc_host + bitcoin Address Display produce a valid HTTP URI; \
+                             esploda::Req::body only fails on URI parse",
+                        );
 
                     if !self.request_cache.contains(req.uri()) {
                         self.request_cache.insert(req.uri().clone());

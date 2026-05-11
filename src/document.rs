@@ -1,3 +1,8 @@
+#![warn(clippy::unwrap_used)]
+//! Panic-sweep policy: legitimately fallible sites use Result;
+//! type-system-guaranteed sites use `.expect("<invariant>")` with a structural
+//! justification. Test code is exempted via clippy.toml's `allow-unwrap-in-tests`.
+
 use crate::beacon::{AddressExt as _, Beacon, BeaconType};
 use crate::canonical_hash::CanonicalHash;
 use crate::cryptosuite::CryptoSuite;
@@ -189,7 +194,9 @@ where
         use json_tools::*;
 
         let id: T = string_from_object(value, "id")?.parse()?;
-        let network = id.try_network().or(network).unwrap();
+        let network = id.try_network().or(network).ok_or_else(|| {
+            Btc1Error::InvalidDid("no network derivable from id and none provided".into())
+        })?;
 
         // TODO: Might want to abstract this null-check for required keys.
         if value["@context"].is_null() {
@@ -310,7 +317,7 @@ impl Document {
         did_components: DidComponents,
         resolution_options: ResolutionOptions,
     ) -> Result<(Did, Resolver), Error> {
-        let did = Did::from(did_components);
+        let did = Did::try_from(did_components)?;
         let resolver = Self::read(&did, resolution_options)?;
 
         Ok((did, resolver))
@@ -452,12 +459,19 @@ impl InitialDocument {
 
         let id_type = IdType::External(hash);
 
-        let did = DidComponents::new(
+        // Per the panic-sweep policy:
+        // type-system-guaranteed encode (default DidVersion, default Network,
+        // 32-byte hash payload) -> .expect() with structural invariant.
+        // Result propagation here would change `from_external_intermediate`'s
+        // public signature from `(Did, Self)` to `Result<(Did, Self), _>`,
+        // which is architectural scope beyond the original panic sweep.
+        let did: Did = DidComponents::new(
             version.unwrap_or_default(),
             network.unwrap_or_default(),
             id_type,
         )
-        .into();
+        .try_into()
+        .expect("default DidVersion + default Network + 32-byte External hash payload always encode to a valid did:btc1 string");
 
         let initial_document = doc.into_initial(&did);
 
@@ -648,7 +662,10 @@ impl IntermediateDocument {
         let mut json_data = self.json_data.clone();
         find_and_replace(&mut json_data, DID_PLACEHOLDER, did.encode());
 
-        InitialDocument::from_json_value(json_data).unwrap()
+        InitialDocument::from_json_value(json_data).expect(
+            "intermediate doc validated at construction; substituting the placeholder DID \
+             string for a real DID string preserves structural validity",
+        )
     }
 
     pub(crate) fn from_initial(initial_doc: &InitialDocument) -> Self {

@@ -1,6 +1,9 @@
 #![allow(dead_code)] // todo
+#![warn(clippy::unwrap_used)]
 
-//! BIP340 cryptosuite implementation
+//! BIP340 cryptosuite implementation.
+//!
+//! Panic-sweep policy: test code is exempted via clippy.toml.
 
 use crate::update::{UnsecuredUpdate, Update};
 use crate::zcap::proof::{Proof, ProofInner, ProofPurpose, ProofValue};
@@ -30,7 +33,8 @@ impl CryptoSuite {
         }
 
         // Create proof config
-        let proof_config = self.configure_proof(&serde_json::to_value(&inner).unwrap());
+        let proof_config =
+            self.configure_proof(&serde_json::to_value(&inner).expect("JSON is always valid JCS"));
 
         // Transform document
         let transformed_data = self.transform(unsecured_update);
@@ -99,7 +103,8 @@ impl CryptoSuite {
         let transformed_data = self.transform(&unsecured_update);
 
         // Configure proof
-        let proof_options = serde_json::to_value(&update.proof.inner).unwrap();
+        let proof_options =
+            serde_json::to_value(&update.proof.inner).expect("JSON is always valid JCS");
         let proof_config = self.configure_proof(&proof_options);
 
         // Hash data
@@ -133,22 +138,15 @@ impl CryptoSuite {
     // bip340 cryptosuite spec Section 3.3.6
     fn serialize_proof(
         &self,
-        hash_data: Sha256Hash,
-        proof: &ProofInner,
+        _hash_data: Sha256Hash,
+        _proof: &ProofInner,
     ) -> Result<Signature, Btc1Error> {
-        // Get verification method
-        let _verification_method_id = &proof.verification_method;
-
-        // In a real implementation, retrieve the private key associated with
-        // the "verificationMethod"
-        // For this stub, we'll just generate a dummy signature
-
-        // TODO: Implement actual key retrieval (using `verification_method`)
-        let private_key_bytes = [0u8; secp256k1::constants::SECRET_KEY_SIZE];
-        let secret_key = SecretKey::from_slice(&private_key_bytes).unwrap();
-
-        // Sign hash with BIP340
-        bip340_sign(hash_data, secret_key)
+        // BIP340 signing requires verification_method-keyed
+        // secret-key retrieval. The previous implementation used a hardcoded
+        // zero-key stub (a "hidden half-implementation" per PROJECT.md). Per
+        // The panic-sweep policy converts hidden stubs to visible
+        // `todo!()` so contributors cannot accidentally exercise them.
+        todo!("BIP340 signing — verification_method-keyed secret-key retrieval")
     }
 
     // bip340 cryptosuite spec Section 3.3.7
@@ -168,7 +166,8 @@ fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signat
     let secp = Secp256k1::new();
 
     // Create message object from hash
-    let message = Message::from_slice(&message_hash.0).unwrap();
+    let message = Message::from_slice(&message_hash.0)
+        .expect("Sha256Hash is exactly 32 bytes; Message::from_slice requires 32");
 
     // Sign with BIP340 Schnorr
     let keypair = KeyPair::from_secret_key(&secp, &secret_key);
@@ -185,7 +184,8 @@ fn bip340_verify(
     let secp = Secp256k1::new();
 
     // Create message object from hash
-    let message = Message::from_slice(&message_hash.0).unwrap();
+    let message = Message::from_slice(&message_hash.0)
+        .expect("Sha256Hash is exactly 32 bytes; Message::from_slice requires 32");
 
     // Verify signature
     secp.verify_schnorr(&signature, &message, public_key)
