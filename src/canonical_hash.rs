@@ -4,7 +4,6 @@ use sha2::{Digest as _, Sha256};
 
 pub(crate) trait CanonicalHash: AsRef<Value> {
     fn hash(&self) -> Sha256Hash {
-        // TODO: Need to replace JCS with RDFC at some point
         let jcs = serde_jcs::to_string(self.as_ref()).expect("JSON is always valid JCS");
         let hash_bytes = Sha256::digest(jcs.as_bytes());
 

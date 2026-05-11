@@ -11,12 +11,7 @@ use secp256k1::{KeyPair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub(crate) enum CryptoSuite {
-    Jcs, // TODO: Remove JCS asap
-
-    #[allow(dead_code)]
-    Rdfc,
-}
+pub(crate) struct CryptoSuite;
 
 impl CryptoSuite {
     // bip340 cryptosuite spec Section 3.3.1
@@ -116,10 +111,7 @@ impl CryptoSuite {
 
     // bip340 cryptosuite spec Section 3.3.3
     fn transform(&self, unsecured_update: &UnsecuredUpdate) -> String {
-        match self {
-            Self::Jcs => serde_jcs::to_string(unsecured_update.as_ref()).unwrap(),
-            Self::Rdfc => todo!(),
-        }
+        serde_jcs::to_string(unsecured_update.as_ref()).expect("JSON is always valid JCS")
     }
 
     // bip340 cryptosuite spec Section 3.3.4
@@ -135,10 +127,7 @@ impl CryptoSuite {
 
     // bip340 cryptosuite spec Section 3.3.5
     fn configure_proof(&self, options: &Value) -> String {
-        match self {
-            Self::Jcs => serde_jcs::to_string(options).unwrap(),
-            Self::Rdfc => todo!(),
-        }
+        serde_jcs::to_string(options).expect("JSON is always valid JCS")
     }
 
     // bip340 cryptosuite spec Section 3.3.6

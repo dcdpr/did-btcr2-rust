@@ -429,7 +429,6 @@ impl InitialDocument {
         let intermediate_doc = IntermediateDocument::from_initial(self);
 
         // Canonicalize the JSON doc to get a hash
-        // todo: need to use RDFC canonicalization instead
         let hash_bytes = intermediate_doc.hash();
 
         if hash_bytes != hash {
@@ -452,8 +451,7 @@ impl InitialDocument {
             ));
         }
 
-        // TODO: Replace JCS asap
-        let crypto_suite = CryptoSuite::Jcs;
+        let crypto_suite = CryptoSuite;
 
         // Extract public key from the document
         let verification_method = &update.proof.inner.verification_method;

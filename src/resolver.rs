@@ -260,7 +260,7 @@ impl Resolver {
                         map.entry(beacon.ty).or_default().push(req);
                     }
                 }
-                BeaconType::Map => todo!(),
+                BeaconType::Cas => todo!(),
                 BeaconType::SparseMerkleTree => todo!(),
             }
         }
@@ -286,7 +286,7 @@ impl Resolver {
                         beacon_signal.signal_bytes,
                         signal_metadata,
                     )?,
-                    BeaconType::Map => todo!(),
+                    BeaconType::Cas => todo!(),
                     BeaconType::SparseMerkleTree => todo!(),
                 };
 

@@ -53,7 +53,7 @@ pub struct Beacon {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum BeaconType {
     Singleton,
-    Map,
+    Cas,
     SparseMerkleTree,
 }
 
@@ -63,7 +63,7 @@ impl FromStr for BeaconType {
     fn from_str(ty: &str) -> Result<Self, Self::Err> {
         match ty {
             "SingletonBeacon" => Ok(Self::Singleton),
-            "MapBeacon" => Ok(Self::Map),
+            "CASBeacon" => Ok(Self::Cas),
             "SMTBeacon" => Ok(Self::SparseMerkleTree),
             _ => Err(Error::InvalidBeaconType),
         }
@@ -74,7 +74,7 @@ impl fmt::Display for BeaconType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Singleton => f.write_str("SingletonBeacon"),
-            Self::Map => f.write_str("MapBeacon"),
+            Self::Cas => f.write_str("CASBeacon"),
             Self::SparseMerkleTree => f.write_str("SMTBeacon"),
         }
     }
@@ -105,5 +105,18 @@ mod tests {
             Address::from_bip21("foo:mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU", Network::Regtest);
 
         assert!(matches!(address, Err(Error::InvalidBip21)));
+    }
+
+    #[test]
+    fn cas_beacon_string_round_trip() {
+        // Spec: did-btcr2/src/beacons.md Table 1 — on-wire string is "CASBeacon".
+        assert_eq!("CASBeacon".parse::<BeaconType>().unwrap(), BeaconType::Cas);
+        assert_eq!(BeaconType::Cas.to_string(), "CASBeacon");
+    }
+
+    #[test]
+    fn old_mapbeacon_string_rejected() {
+        // The old-spec on-wire string "MapBeacon" must NOT parse — wire-level rename
+        assert!("MapBeacon".parse::<BeaconType>().is_err());
     }
 }
