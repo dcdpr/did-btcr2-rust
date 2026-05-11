@@ -1,5 +1,6 @@
 use crate::identifier::Sha256Hash;
-use esploda::bitcoin::base58;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use onlyerror::Error;
 use serde_json::Value;
 use std::{fmt::Display, str::FromStr};
@@ -22,6 +23,8 @@ pub enum JsonError {
     ExpectedJsonStr,
 
     /// Invalid Base58 encoding
+    // retained pending a later error-vocabulary cleanup
+    #[allow(dead_code)]
     Base58(#[from] esploda::bitcoin::base58::Error),
 
     /// Error with key operations
@@ -62,8 +65,12 @@ impl Display for ExpectedType {
 }
 
 pub(crate) fn hash_from_object(value: &Value, key: &str) -> Result<Sha256Hash, JsonError> {
+    let s = string_from_object(value, key)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|_| JsonError::InvalidHash(key.into()))?;
     Ok(Sha256Hash(
-        base58::decode(string_from_object(value, key)?)?
+        bytes
             .try_into()
             .map_err(|_| JsonError::InvalidHash(key.into()))?,
     ))

@@ -36,9 +36,13 @@
 //! # Ok::<(), Error>(())
 //! ```
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bech32_rust::{Bech32Error, DecodedResult, decode, encode};
 use onlyerror::Error;
 use secp256k1::{PublicKey, constants::PUBLIC_KEY_SIZE};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 
 /// The DID method prefix for BTC1 identifiers
@@ -264,6 +268,37 @@ pub enum IdType {
 /// Represents a SHA-256 hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Sha256Hash(pub [u8; SHA256_HASH_LEN]);
+
+// data-structures.md §sidecar-data — base64url-no-pad encoding for hashes.
+// Manual impls (NOT derive(Serialize, Deserialize)) because the default derive
+// on a tuple struct around [u8; 32] would emit a JSON array of 32 numbers, not
+// a base64url string.
+impl Serialize for Sha256Hash {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let encoded = URL_SAFE_NO_PAD.encode(self.0);
+        // Emit a plain JSON string (NOT an array of bytes). serde_jcs uses
+        // the same Serialize trait, so JCS-canonical output is identical to
+        // serde_json's output for this type — preserves hash integrity per
+        serializer.serialize_str(&encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sha256Hash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <&str>::deserialize(deserializer)?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(s)
+            .map_err(|e| D::Error::custom(format!("invalid base64url-no-pad hash: {e}")))?;
+        let arr: [u8; SHA256_HASH_LEN] = bytes.try_into().map_err(|v: Vec<u8>| {
+            D::Error::custom(format!(
+                "expected {} bytes, got {}",
+                SHA256_HASH_LEN,
+                v.len()
+            ))
+        })?;
+        Ok(Sha256Hash(arr))
+    }
+}
 
 impl TryFrom<&DecodedResult> for IdType {
     type Error = Error;
@@ -535,5 +570,45 @@ mod tests {
 
         let components = parse_did_identifier(&did).unwrap();
         assert_eq!(components.network, Network::Custom(15));
+    }
+}
+
+#[cfg(test)]
+mod sha256_hash_serde_tests {
+    use super::*;
+
+    #[test]
+    fn sha256_hash_round_trips_as_base64url_no_pad() {
+        // Spec: did-btcr2/src/data-structures.md lines 14-15 — base64url-no-pad
+        // encoding for all hashes.
+        let bytes = [0x42u8; 32];
+        let hash = Sha256Hash(bytes);
+
+        // Verified base64url-no-pad of [0x42; 32]: 43 chars, no padding.
+        let expected = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI";
+
+        let json = serde_json::to_string(&hash).unwrap();
+        assert_eq!(json, format!("\"{expected}\""));
+
+        // serde_jcs and serde_json must produce identical bytes for a
+        // Sha256Hash.
+        let jcs = serde_jcs::to_string(&hash).unwrap();
+        assert_eq!(jcs, format!("\"{expected}\""));
+
+        let parsed: Sha256Hash = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, hash);
+    }
+
+    #[test]
+    fn sha256_hash_rejects_padded_base64url() {
+        let padded = "\"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"";
+        assert!(serde_json::from_str::<Sha256Hash>(padded).is_err());
+    }
+
+    #[test]
+    fn sha256_hash_rejects_short_input() {
+        // 16-byte hash should be rejected (wrong length).
+        let short = "\"QkJCQkJCQkJCQkJCQkJCQg\""; // 16 bytes of 0x42
+        assert!(serde_json::from_str::<Sha256Hash>(short).is_err());
     }
 }
