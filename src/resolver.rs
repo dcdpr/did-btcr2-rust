@@ -432,7 +432,7 @@ mod tests {
             "../fixtures/k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp-transactions.json"
         );
         let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let first_tx = &mut json["Singleton"][0];
+        let first_tx = &mut json["SingletonBeacon"][0];
         let expected_txid_str = first_tx["txid"].as_str().unwrap().to_string();
         first_tx["status"] = serde_json::json!({ "confirmed": false });
 

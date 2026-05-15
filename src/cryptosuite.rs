@@ -75,29 +75,52 @@ impl CryptoSuite {
 
     // bip340 cryptosuite spec Section 3.3.2
     fn verify_proof(&self, public_key: PublicKey, update: &Update) -> Result<(), Btc1Error> {
+        // Compare @context FIRST (before any expensive crypto). Per VC Data
+        // Integrity, the proof's @context MUST exactly match the secured
+        // document's @context — both length and elementwise. The previous
+        // `.zip().all(...)` truncated at the shorter iterator and accepted a
+        // proof whose @context was a strict prefix of the update's;
+        // symmetrically, the absent-@context branch silently accepted proofs
+        // carrying a non-empty context. Both were context-binding bypasses
+        // Performing this check before multibase_decode
+        // is also defense-in-depth: cheap structural checks fail fast before
+        // expensive crypto.
+        match update.as_ref()["@context"].as_array() {
+            Some(context) => {
+                if context.len() != update.proof.inner.context.len() {
+                    return Err(Btc1Error::InvalidUpdateProof(
+                        "Proof context length does not match update context length".into(),
+                    ));
+                }
+                let contexts_are_equal = context.iter().zip(update.proof.inner.context.iter()).all(
+                    |(update_context_entry, proof_context_entry)| {
+                        update_context_entry
+                            .as_str()
+                            .map(|update_context_entry| update_context_entry == proof_context_entry)
+                            .unwrap_or_default()
+                    },
+                );
+
+                if !contexts_are_equal {
+                    return Err(Btc1Error::InvalidUpdateProof(
+                        "Proof context does not match update context".into(),
+                    ));
+                }
+            }
+            None => {
+                if !update.proof.inner.context.is_empty() {
+                    return Err(Btc1Error::InvalidUpdateProof(
+                        "Update has no @context but proof carries a non-empty @context".into(),
+                    ));
+                }
+            }
+        }
+
         // Remove proof from update document
         let unsecured_update = UnsecuredUpdate::from(update);
 
         // Decode proof value
         let proof_bytes = multibase_decode(&update.proof.proof_value)?;
-
-        // Compare @context
-        if let Some(context) = update.as_ref()["@context"].as_array() {
-            let contexts_are_equal = context.iter().zip(update.proof.inner.context.iter()).all(
-                |(update_context_entry, proof_context_entry)| {
-                    update_context_entry
-                        .as_str()
-                        .map(|update_context_entry| update_context_entry == proof_context_entry)
-                        .unwrap_or_default()
-                },
-            );
-
-            if !contexts_are_equal {
-                return Err(Btc1Error::InvalidUpdateProof(
-                    "Proof context does not match update context".into(),
-                ));
-            }
-        }
 
         // Transform document
         let transformed_data = self.transform(&unsecured_update);
@@ -205,4 +228,98 @@ fn multibase_decode(proof_value: &ProofValue) -> Result<Signature, Btc1Error> {
 
     Signature::from_slice(&decoded)
         .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Construct a deterministic PublicKey for tests where the signature path
+    // is never reached (the context-binding check fires first, before
+    // multibase_decode). `PublicKey` is re-exported from secp256k1 (see
+    // crate::key: `pub use secp256k1::{PublicKey, SecretKey}`), so
+    // sk.public_key(&secp) returns exactly the type verify_proof expects.
+    fn dummy_public_key() -> secp256k1::PublicKey {
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[1u8; 32])
+            .expect("[1u8; 32] is a valid secp256k1 secret key");
+        sk.public_key(&secp)
+    }
+
+    // Build an Update from inline JSON. The signature inside
+    // `proof.proofValue` is bogus; we never reach multibase_decode because
+    // verify_proof now runs the context-binding check first.
+    fn make_update(json: serde_json::Value) -> Update {
+        Update::from_json_value(json).expect("test fixture is valid Update JSON")
+    }
+
+    // Common base: a minimal Update JSON with valid sourceHash/targetHash
+    // (base64url-no-pad of 32 bytes), targetVersionId, empty patch, and a
+    // proof object. Caller mutates `@context` and `proof.@context`.
+    fn base_update_json() -> serde_json::Value {
+        // 32 zero-bytes base64url-no-pad-encoded is 43 'A's.
+        let zero_hash = "A".repeat(43);
+        serde_json::json!({
+            "@context": [],
+            "sourceHash": zero_hash,
+            "targetHash": zero_hash,
+            "targetVersionId": 2,
+            "patch": [],
+            "proof": {
+                "type": "DataIntegrityProof",
+                "cryptosuite": "bip340-jcs-2025",
+                "verificationMethod": "did:example:test#key",
+                "proofPurpose": "capabilityInvocation",
+                "capability": "urn:zcap:root:did%3Aexample%3Atest",
+                "capabilityAction": "Write",
+                "@context": [],
+                "proofValue": "z11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+            }
+        })
+    }
+
+    #[test]
+    fn verify_proof_rejects_prefix_context_forgery() {
+        // a proof whose @context is a strict prefix of the
+        // update's @context must NOT pass verification. The previous
+        // `.zip().all(...)` truncated at length 2 and accepted this.
+        let mut json = base_update_json();
+        json["@context"] = serde_json::json!(["A", "B", "C"]);
+        json["proof"]["@context"] = serde_json::json!(["A", "B"]);
+        let update = make_update(json);
+
+        let suite = CryptoSuite;
+        let err = suite
+            .verify_proof(dummy_public_key(), &update)
+            .expect_err("prefix-context forgery must be rejected");
+        match err {
+            Btc1Error::InvalidUpdateProof(msg) => {
+                assert!(
+                    msg.contains("length"),
+                    "expected length-mismatch message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidUpdateProof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_proof_rejects_proof_context_when_update_has_none() {
+        // an update with no @context but a proof with a
+        // non-empty @context must NOT pass. The previous else-branch was a
+        // no-op.
+        let mut json = base_update_json();
+        // Remove @context entirely from the update (the None-branch path).
+        json.as_object_mut()
+            .expect("base_update_json builds an object at the top level")
+            .remove("@context");
+        json["proof"]["@context"] = serde_json::json!(["A"]);
+        let update = make_update(json);
+
+        let suite = CryptoSuite;
+        let err = suite
+            .verify_proof(dummy_public_key(), &update)
+            .expect_err("proof with @context but update without must be rejected");
+        assert!(matches!(err, Btc1Error::InvalidUpdateProof(_)));
+    }
 }

@@ -52,8 +52,11 @@ pub struct Beacon {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum BeaconType {
+    #[serde(rename = "SingletonBeacon")]
     Singleton,
+    #[serde(rename = "CASBeacon")]
     Cas,
+    #[serde(rename = "SMTBeacon")]
     SparseMerkleTree,
 }
 
@@ -118,5 +121,48 @@ mod tests {
     fn old_mapbeacon_string_rejected() {
         // The old-spec on-wire string "MapBeacon" must NOT parse — wire-level rename
         assert!("MapBeacon".parse::<BeaconType>().is_err());
+    }
+
+    #[test]
+    fn beacon_type_serde_round_trips_spec_strings() {
+        // BeaconType's derived Serialize/Deserialize must use
+        // the spec wire strings (per did-btcr2/src/beacons.md Table 1), NOT
+        // the Rust variant names. This pins the contract for the HashMap
+        // wire paths (Resolver::process_responses, transactions fixtures,
+        // and any other HashMap<BeaconType, _> consumer).
+
+        // Deserialize: spec wire strings -> Rust variants.
+        assert_eq!(
+            serde_json::from_str::<BeaconType>("\"SingletonBeacon\"").unwrap(),
+            BeaconType::Singleton
+        );
+        assert_eq!(
+            serde_json::from_str::<BeaconType>("\"CASBeacon\"").unwrap(),
+            BeaconType::Cas
+        );
+        assert_eq!(
+            serde_json::from_str::<BeaconType>("\"SMTBeacon\"").unwrap(),
+            BeaconType::SparseMerkleTree
+        );
+
+        // Serialize: Rust variants -> spec wire strings.
+        assert_eq!(
+            serde_json::to_string(&BeaconType::Singleton).unwrap(),
+            "\"SingletonBeacon\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BeaconType::Cas).unwrap(),
+            "\"CASBeacon\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BeaconType::SparseMerkleTree).unwrap(),
+            "\"SMTBeacon\""
+        );
+
+        // Old Rust-variant-name wire strings must NOT deserialize after the
+        // rename — that was the bug.
+        assert!(serde_json::from_str::<BeaconType>("\"Singleton\"").is_err());
+        assert!(serde_json::from_str::<BeaconType>("\"Cas\"").is_err());
+        assert!(serde_json::from_str::<BeaconType>("\"SparseMerkleTree\"").is_err());
     }
 }
