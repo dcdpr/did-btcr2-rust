@@ -36,10 +36,6 @@ esploda = "0.2"
 # ZCAP
 urlencoding = "2"
 
-[dev-dependencies]
-anyhow = "1"
-ureq = { version = "3", features = ["json"] }
-
 [features]
 # Gates the legacy Base58-encoded test-suite fixtures (e.g. test_traversal in
 # resolver.rs) so CI can stay green after the hash-encoding switch

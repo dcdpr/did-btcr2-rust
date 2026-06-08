@@ -35,6 +35,14 @@ pub enum Btc1Error {
     /// Update payload was published late
     LatePublishingError(String),
 
+    /// Update payload could not be located in either the supplied sidecar
+    /// data nor in CAS (spec MISSING_UPDATE_DATA).
+    ///
+    /// Spec: did-btcr2/src/errors.md:21-23. Added for exactly this variant.
+    /// Other non-spec error variants (ProofTransformation, ProofGeneration,
+    /// Zcap) remain deferred to a later error-vocabulary cleanup.
+    MissingUpdateData { update_hash: Sha256Hash },
+
     /// Invalid Update Proof
     InvalidUpdateProof(String),
 
@@ -74,6 +82,7 @@ impl ProblemDetails for Btc1Error {
             // From: https://github.com/dcdpr/did-btc1/issues/71#issuecomment-3179550385
             Self::InvalidSidecarData(_)
             | Self::LatePublishingError(_)
+            | Self::MissingUpdateData { .. }
             | Self::InvalidUpdateProof(_)
             | Self::Zcap(_)
             | Self::InvalidDidUpdate(_)
@@ -87,6 +96,7 @@ impl ProblemDetails for Btc1Error {
             Self::InvalidDidDocument(_) => "INVALID_DID_DOCUMENT",
             Self::InvalidSidecarData(_) => "INVALID_SIDECAR_DATA",
             Self::LatePublishingError(_) => "LATE_PUBLISHING_ERROR",
+            Self::MissingUpdateData { .. } => "MISSING_UPDATE_DATA",
             Self::InvalidUpdateProof(_) => "INVALID_UPDATE_PROOF",
             Self::Zcap(_) => "ZCAP",
             Self::InvalidDidUpdate(_) => "INVALID_DID_UPDATE",
@@ -99,16 +109,19 @@ impl ProblemDetails for Btc1Error {
             "type": format!("{prefix}#{name}"),
             "title": self.to_string(),
             "detail": match self {
-                Self::InvalidDid(detail) => detail,
-                Self::InvalidDidDocument(detail) => detail,
-                Self::InvalidSidecarData(detail) => detail,
-                Self::LatePublishingError(detail) => detail,
-                Self::InvalidUpdateProof(detail) => detail,
-                Self::Zcap(detail) => detail,
-                Self::InvalidDidUpdate(detail) => detail,
-                Self::ProofVerification(detail) => detail,
-                Self::ProofTransformation(detail) => detail,
-                Self::ProofGeneration(detail) => detail,
+                Self::InvalidDid(detail) => detail.clone(),
+                Self::InvalidDidDocument(detail) => detail.clone(),
+                Self::InvalidSidecarData(detail) => detail.clone(),
+                Self::LatePublishingError(detail) => detail.clone(),
+                Self::MissingUpdateData { update_hash } => {
+                    format!("update_hash={}", hex::encode(update_hash.0))
+                }
+                Self::InvalidUpdateProof(detail) => detail.clone(),
+                Self::Zcap(detail) => detail.clone(),
+                Self::InvalidDidUpdate(detail) => detail.clone(),
+                Self::ProofVerification(detail) => detail.clone(),
+                Self::ProofTransformation(detail) => detail.clone(),
+                Self::ProofGeneration(detail) => detail.clone(),
             },
         }))
     }

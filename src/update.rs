@@ -95,7 +95,11 @@ impl Update {
                 "target_version_id overflows usize on this host (32-bit limit)".into(),
             )
         })?;
-        let historical_update_hash = hash_history[update_hash_index];
+        let historical_update_hash = *hash_history.get(update_hash_index).ok_or_else(|| {
+            Btc1Error::InvalidDidUpdate(
+                "duplicate-check index past end of update hash history".into(),
+            )
+        })?;
 
         if historical_update_hash != update_hash {
             Err(Btc1Error::late_publishing(
@@ -139,3 +143,41 @@ impl AsRef<Value> for UnsecuredUpdate {
 }
 
 impl CanonicalHash for UnsecuredUpdate {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `confirm_duplicate` must NOT panic when the
+    /// caller-supplied sidecar drives a duplicate-check index past the end of the
+    /// update hash history. With `target_version_id - 2 >= hash_history.len()` the
+    /// old raw slice index by position panicked out-of-bounds; the fix
+    /// uses `.get(idx).ok_or_else(InvalidDidUpdate)` so the resolve path returns a
+    /// typed spec error instead.
+    ///
+    /// The first update in `sidecar-two-updates.json` carries
+    /// `targetVersionId: 2` → index 0; an EMPTY `hash_history` makes `0 >= 0`, the
+    /// out-of-range path. Must return `Err(Btc1Error::InvalidDidUpdate(_))`, never
+    /// a panic and never `LatePublishingError` (which is only reachable once the
+    /// index is in range).
+    #[test]
+    fn confirm_duplicate_index_past_end_returns_err() {
+        let raw = include_str!("../fixtures/spec-form/sidecar-two-updates.json");
+        let value: Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let first_update_json = value["updates"][0].clone();
+        let update =
+            Update::from_json_value(first_update_json).expect("first fixture update parses");
+        assert_eq!(u64::from(update.target_version_id), 2);
+
+        // Empty history → update_hash_index 0 is past the end (0 >= 0).
+        let hash_history: Vec<Sha256Hash> = Vec::new();
+        let err = update
+            .confirm_duplicate(&hash_history)
+            .expect_err("out-of-range index must error, not panic");
+
+        match err {
+            Btc1Error::InvalidDidUpdate(_) => {}
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+}

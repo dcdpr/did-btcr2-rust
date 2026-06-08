@@ -13,5 +13,7 @@ mod update;
 mod zcap;
 
 // Re-exports of key components
-pub use document::{Document, ResolutionOptions};
+pub use document::{
+    Document, DocumentMetadata, ResolutionMetadata, ResolutionOptions, ResolutionResult,
+};
 pub use key::{KeyPair, PublicKey, SecretKey};
