@@ -10,8 +10,14 @@ use crate::error::{Btc1Error, ProblemDetails};
 use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network, Sha256Hash};
 use crate::key::{PublicKey, PublicKeyExt as _};
 use crate::verification::{VerificationMethod, VerificationMethodId};
-use crate::zcap::{dereference_root_capability, proof::ProofPurpose};
-use crate::{identifier::TryNetworkExt, json_tools, resolver::Resolver, update::Update};
+use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofType};
+use crate::zcap::{dereference_root_capability, derive_root_capability, proof::ProofPurpose};
+use crate::{
+    identifier::TryNetworkExt,
+    json_tools,
+    resolver::Resolver,
+    update::{UnsecuredUpdate, Update},
+};
 use chrono::{DateTime, Utc};
 use esploda::bitcoin::Address;
 use json_patch::Patch;
@@ -574,6 +580,169 @@ impl Document {
         Ok(Resolver::new(initial_document, resolution_options))
     }
 
+    /// Build the unsigned BTCR2 update for `patch` against this document,
+    /// returning it together with the source and target document hashes.
+    ///
+    /// `sourceHash` is the JCS-SHA256 of this document; `targetHash` is the
+    /// JCS-SHA256 of the patched document. The patch is applied to a *clone*
+    /// of the document JSON — this method never mutates `self`. The patched
+    /// document is re-validated for conformance and rejected if it would
+    /// change the DID document `id` (the spec requires the identifier to be
+    /// immutable across an update).
+    ///
+    /// Spec: did-btcr2/src/operations/update.md — "Construct BTCR2 Unsigned
+    /// Update" and the identifier-immutability requirement.
+    fn construct_unsigned_update(
+        &self,
+        patch: &Patch,
+        target_version_id: NonZeroU64,
+    ) -> Result<(UnsecuredUpdate, Sha256Hash, Sha256Hash), Btc1Error> {
+        let source_hash = self.hash();
+
+        // Apply the patch to a clone so `self` is left untouched. The resolver's
+        // apply_update applies the identical call to its own json_data, so the
+        // two target documents canonicalize to the same JCS bytes.
+        let mut target_value = self.json_data.clone();
+        json_patch::patch(&mut target_value, patch)
+            .map_err(|_| Btc1Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
+
+        // The DID document identifier is immutable across an update.
+        if target_value.get("id") != self.json_data.get("id") {
+            return Err(Btc1Error::InvalidDidUpdate(
+                "update may not change the DID document id".into(),
+            ));
+        }
+
+        // Re-validate conformance (mirrors apply_update's DocumentFields check)
+        // and hash the patched document for the targetHash.
+        let target_hash = Document::from_json_value(target_value)
+            .map_err(|_| Btc1Error::InvalidDidUpdate("patched document is non-conformant".into()))?
+            .hash();
+
+        let unsigned =
+            UnsecuredUpdate::construct(patch, source_hash, target_hash, target_version_id);
+
+        Ok((unsigned, source_hash, target_hash))
+    }
+
+    /// Construct a signed BTCR2 update from `patch` against this document.
+    ///
+    /// This is the spec's Update operation up to — but not including —
+    /// announcing the update on a beacon. It does not mutate `self`; it
+    /// returns the signed [`Update`] for the caller (or a beacon) to announce.
+    ///
+    /// Before any signing, three guards run:
+    ///   1. `verification_method_id` must name a method in this document's
+    ///      verification method set,
+    ///   2. that same id must appear in the document's capabilityInvocation
+    ///      set, and
+    ///   3. the public key derived from `secret_key` must equal the matched
+    ///      method's public key.
+    ///
+    /// The first two checks are spec requirements (raising `INVALID_DID_UPDATE`
+    /// on failure); the third is a project correctness guard that prevents
+    /// emitting a signed update nobody could verify (see adrs/0006).
+    ///
+    /// Spec: did-btcr2/src/operations/update.md — the verificationMethod and
+    /// capabilityInvocation membership requirements and the Data Integrity
+    /// Config shape.
+    pub fn construct_signed_update(
+        &self,
+        patch: Patch,
+        target_version_id: NonZeroU64,
+        verification_method_id: &str,
+        secret_key: secp256k1::SecretKey,
+    ) -> Result<Update, Btc1Error> {
+        // Guard 0: a deactivated DID is terminal and MUST NOT accept further
+        // updates (spec: did-btcr2/src/operations/deactivate.md). The resolver
+        // FSM short-circuits on deactivation, but the construction primitive must
+        // also refuse so it cannot mint a post-deactivation update on its own.
+        if self.fields.deactivated {
+            return Err(Btc1Error::InvalidDidUpdate(
+                "cannot update a deactivated DID document".into(),
+            ));
+        }
+
+        // Guard 1: the id must name a method in the verificationMethod set.
+        let method = self
+            .fields
+            .verification_method
+            .iter()
+            .find(|m| m.id.0 == verification_method_id)
+            .ok_or_else(|| {
+                Btc1Error::InvalidDidUpdate(
+                    "verificationMethod id not present in the document verificationMethod set"
+                        .into(),
+                )
+            })?;
+
+        // Guard 2: the id must also appear in the capabilityInvocation set.
+        if !self
+            .fields
+            .capability_invocation
+            .iter()
+            .any(|id| id.0 == verification_method_id)
+        {
+            return Err(Btc1Error::InvalidDidUpdate(
+                "verificationMethod id not present in the capabilityInvocation set".into(),
+            ));
+        }
+
+        // Guard 3: the caller key must match the matched method's public key,
+        // so the produced signature will verify against this document.
+        let derived = secret_key.public_key(&secp256k1::Secp256k1::new());
+        if derived != method.public_key {
+            return Err(Btc1Error::InvalidDidUpdate(
+                "secret key does not match the verificationMethod public key".into(),
+            ));
+        }
+
+        // Build the unsigned update (also enforces id-immutability + conformance).
+        let (unsigned, _source_hash, _target_hash) =
+            self.construct_unsigned_update(&patch, target_version_id)?;
+
+        // Data Integrity Config: the capability is this DID's root capability,
+        // the proof authorizes a capabilityInvocation Write, and `created` is
+        // left unset so the produced update is byte-reproducible.
+        let capability = derive_root_capability(self.fields.id.clone());
+        let inner = ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: verification_method_id.to_string(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability,
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        };
+
+        // Sign over the unsigned update with the caller's key.
+        let proof = CryptoSuite.create_proof(&unsigned, inner, secret_key)?;
+
+        // Assemble the signed update: the unsigned JSON with "proof" inserted.
+        // Parsing it back through Update::from_json_value yields exactly the
+        // Update a verifier would see on the wire.
+        let mut signed_json = unsigned.as_ref().clone();
+        if let Value::Object(map) = &mut signed_json {
+            map.insert(
+                "proof".to_string(),
+                serde_json::to_value(&proof)
+                    .map_err(|_| Btc1Error::InvalidDidUpdate("failed to serialize proof".into()))?,
+            );
+        }
+
+        Update::from_json_value(signed_json).map_err(|_| {
+            Btc1Error::InvalidDidUpdate("constructed signed update failed to parse".into())
+        })
+    }
+
     // Spec section 7.3
     //
     // TODO: Do we really want to expose this patching concept to users? How do they create patches?
@@ -799,6 +968,16 @@ impl InitialDocument {
 
     // Spec Section 7.2.2.5
     pub(crate) fn apply_update(&mut self, update: &Update) -> Result<(), Btc1Error> {
+        // A deactivated DID is terminal and MUST NOT accept further updates
+        // (spec: did-btcr2/src/operations/deactivate.md). The resolver FSM
+        // short-circuits on deactivation, but the application primitive must also
+        // refuse so a post-deactivation update cannot be applied directly.
+        if self.fields.deactivated {
+            return Err(Btc1Error::InvalidDidUpdate(
+                "cannot apply an update to a deactivated DID document".into(),
+            ));
+        }
+
         let capability_id = &update.proof.inner.capability;
         let did = dereference_root_capability(capability_id)?;
 
@@ -1389,5 +1568,415 @@ mod tests {
             result.is_err(),
             "expected deserialization failure for numeric versionId, got: {result:?}"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Signed-update construction (Document::construct_signed_update).
+    //
+    // These cover: the round-trip through apply_update (the keystone), the
+    // three pre-sign guards + id-immutability rejection, the Data Integrity
+    // Config shape, the proofValue encoding, no-self-mutation, a wrong version
+    // failing the resolver dedup, and a pinned deterministic golden vector.
+    //
+    // Source spec lines are cited inline (e.g. update.md:85) rather than the
+    // project's internal requirement ids.
+    // ──────────────────────────────────────────────────────────────────────
+
+    use crate::key::SecretKeyExt as _;
+    use secp256k1::{Secp256k1, SecretKey};
+
+    /// Fixed secret key for the construction tests. Any fixed valid secp256k1
+    /// key works; `[7u8; 32]` is chosen for reproducibility (its public key
+    /// derives the source DID below, so the key-match guard's happy path and
+    /// the round-trip both have a key that matches the document's method).
+    const SOURCE_SECRET_KEY_BYTES: [u8; 32] = [7u8; 32];
+
+    fn source_secret_key() -> SecretKey {
+        SecretKey::from_slice(&SOURCE_SECRET_KEY_BYTES)
+            .expect("[7u8; 32] is a valid secp256k1 secret key")
+    }
+
+    /// Build a key-based source DID whose single verificationMethod public key
+    /// is derived from `SOURCE_SECRET_KEY_BYTES`, then deterministically
+    /// generate its initial DID document. Returns the DID, the verification
+    /// method id, the `InitialDocument` (the apply_update target), and the
+    /// equivalent `Document` (the construct_signed_update receiver). Both wrap
+    /// the same JSON and hash identically.
+    fn source_documents() -> (Did, String, InitialDocument, Document) {
+        let secp = Secp256k1::new();
+        let public_key = source_secret_key().public_key(&secp);
+        let id_type = IdType::from(public_key);
+        let did: Did = DidComponents::new(DidVersion::One, Network::Mutinynet, id_type)
+            .try_into()
+            .expect("default version + mutinynet + key id type encode to a valid did");
+
+        let resolution_options = ResolutionOptions::default();
+        let initial = InitialDocument::from_did(&did, &resolution_options)
+            .expect("key-based DID deterministically generates its initial document");
+        let document = Document::from(initial.clone());
+
+        let vm_id = format!("{}#initialKey", did.encode());
+        (did, vm_id, initial, document)
+    }
+
+    /// A benign patch that keeps the document conformant and does not touch
+    /// `id`: it appends the existing verification-method id to `assertionMethod`
+    /// (a list of verification-method ids). It leaves capabilityInvocation and
+    /// service non-empty, so the patched document still parses.
+    fn benign_patch(vm_id: &str) -> Patch {
+        serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/assertionMethod/-", "value": vm_id}
+        ]))
+        .expect("benign patch is a valid RFC 6902 op array")
+    }
+
+    /// KEYSTONE: a produced signed update applied to the prior document returns
+    /// Ok and the applied document's hash equals the constructed targetHash.
+    ///
+    /// Spec: did-btcr2/src/operations/update.md (Construct Signed Update) +
+    /// the verify path the resolver runs in apply_update.
+    #[test]
+    fn construct_signed_update_round_trips() {
+        let (_did, vm_id, initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("a valid (patch, version, vm_id, key) must produce a signed update");
+
+        let mut applied = initial.clone();
+        applied
+            .apply_update(&update)
+            .expect("the produced update must apply cleanly to the prior document");
+        assert_eq!(
+            applied.hash(),
+            update.target_hash,
+            "the applied document hash must equal the constructed targetHash"
+        );
+    }
+
+    /// update.md:85 — a vm_id absent from the verificationMethod set is rejected
+    /// before any signing.
+    #[test]
+    fn update_rejects_unknown_vm() {
+        let (did, _vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&format!("{}#initialKey", did.encode()));
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let unknown = format!("{}#does-not-exist", did.encode());
+        let err = document
+            .construct_signed_update(patch, version, &unknown, source_secret_key())
+            .expect_err("an unknown verificationMethod id must be rejected");
+        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+    }
+
+    /// update.md:87 — a vm_id present in verificationMethod but absent from
+    /// capabilityInvocation is rejected before signing.
+    #[test]
+    fn update_rejects_vm_not_in_capability_invocation() {
+        let (did, vm_id, _initial, _document) = source_documents();
+
+        // Build a document whose method id is in verificationMethod but NOT in
+        // capabilityInvocation (capabilityInvocation references a different,
+        // still-present method id so the document stays conformant). The patch
+        // and key are valid for `vm_id`; only the capabilityInvocation
+        // membership fails.
+        let secp = Secp256k1::new();
+        let other_key = SecretKey::generate().public_key(&secp);
+        let other_vm_id = format!("{}#otherKey", did.encode());
+
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"]
+            .as_array_mut()
+            .expect("verificationMethod is an array")
+            .push(serde_json::json!({
+                "id": other_vm_id,
+                "type": "Multikey",
+                "controller": did.encode(),
+                "publicKeyMultibase": other_key.to_multikey(),
+            }));
+        // capabilityInvocation references only the OTHER method id.
+        json["capabilityInvocation"] = serde_json::json!([other_vm_id]);
+
+        let document = Document::from_json_value(json).expect("document is conformant");
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let err = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect_err("a vm_id absent from capabilityInvocation must be rejected");
+        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+    }
+
+    /// The pre-sign key-match guard: a secret key whose public key does not
+    /// match the named method is rejected before signing.
+    #[test]
+    fn update_rejects_key_mismatch() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // A different, valid key than the one matching the method.
+        let wrong_key =
+            SecretKey::from_slice(&[9u8; 32]).expect("[9u8; 32] is a valid secp256k1 secret key");
+
+        let err = document
+            .construct_signed_update(patch, version, &vm_id, wrong_key)
+            .expect_err("a key not matching the method public key must be rejected");
+        match err {
+            Btc1Error::InvalidDidUpdate(msg) => {
+                assert!(
+                    msg.contains("secret key"),
+                    "expected a key-mismatch message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// a deactivated DID is terminal and MUST NOT mint a new signed
+    /// update. The deactivated guard fires before any of the membership/key
+    /// guards, so even an otherwise-valid (patch, version, vm_id, key) is
+    /// rejected. Spec: did-btcr2/src/operations/deactivate.md.
+    #[test]
+    fn construct_rejects_deactivated_document() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json.as_object_mut()
+            .expect("document_json builds an object")
+            .insert("deactivated".to_string(), serde_json::json!(true));
+        let document =
+            Document::from_json_value(json).expect("a deactivated document is still conformant");
+
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let err = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect_err("a deactivated document must not produce a signed update");
+        match err {
+            Btc1Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("deactivated"),
+                "expected a deactivated-document message, got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// applying any update to a deactivated DID document is rejected by
+    /// the terminal-state guard, before the proof is even verified. This is the
+    /// application-side counterpart to `construct_rejects_deactivated_document`.
+    /// Spec: did-btcr2/src/operations/deactivate.md.
+    #[test]
+    fn apply_rejects_deactivated_document() {
+        // Build a real, valid signed update against the live (non-deactivated)
+        // document so the update itself is well-formed; the rejection must come
+        // purely from the target document being deactivated.
+        let (did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("a valid update is produced against the live document");
+
+        // Now build a deactivated InitialDocument as the apply target.
+        let mut json = document_json(&did, &vm_id);
+        json.as_object_mut()
+            .expect("document_json builds an object")
+            .insert("deactivated".to_string(), serde_json::json!(true));
+        let mut deactivated = InitialDocument::from_json_value(json)
+            .expect("a deactivated document is still conformant");
+
+        let err = deactivated
+            .apply_update(&update)
+            .expect_err("an update must not apply to a deactivated document");
+        match err {
+            Btc1Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("deactivated"),
+                "expected a deactivated-document message, got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// update.md:51 — a patch that changes the DID document `id` is rejected
+    /// (identifier immutability).
+    #[test]
+    fn update_rejects_id_change() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "replace", "path": "/id", "value": "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx"}
+        ]))
+        .expect("id-change patch is a valid RFC 6902 op array");
+
+        let err = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect_err("a patch that changes id must be rejected");
+        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+    }
+
+    /// The constructor does not mutate `self`: the document hash is unchanged
+    /// after a successful construct_signed_update call.
+    #[test]
+    fn update_does_not_mutate_self() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let before = document.hash();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let _update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction must succeed");
+        assert_eq!(
+            document.hash(),
+            before,
+            "construct_signed_update must not mutate the source document"
+        );
+    }
+
+    /// update.md:114 — the produced Data Integrity Config is shaped as a
+    /// capabilityInvocation Write over this DID's root capability, with the
+    /// bip340-jcs-2025 cryptosuite and NO `created` field.
+    #[test]
+    fn data_integrity_config_shape() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction must succeed");
+
+        let inner = &update.proof.inner;
+        assert_eq!(inner.capability, derive_root_capability(did.clone()));
+        assert!(inner.capability.starts_with("urn:zcap:root:"));
+        // The capability round-trips back to the source DID.
+        let dereferenced =
+            dereference_root_capability(&inner.capability).expect("capability dereferences");
+        assert_eq!(dereferenced.encode(), did.encode());
+
+        assert_eq!(inner.capability_action, "Write");
+        assert_eq!(inner.cryptosuite, CryptoSuiteName::Jcs);
+        assert_eq!(inner.proof_purpose, ProofPurpose::CapabilityInvocation);
+
+        // The serialized proof must carry no "created" key (determinism).
+        let serialized = serde_json::to_value(&update.proof).expect("proof serializes");
+        assert!(
+            serialized.get("created").is_none(),
+            "a deterministic proof must omit the created field"
+        );
+    }
+
+    /// data-structures.md:195 — proofValue is a base58-btc multibase string
+    /// (leading `z`) whose decoded body is exactly the 64-byte Schnorr signature.
+    #[test]
+    fn proof_value_is_base58btc_64_bytes() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction must succeed");
+
+        let proof_value = &update.proof.proof_value.0;
+        assert!(
+            proof_value.starts_with('z'),
+            "proofValue must be base58-btc multibase (prefix 'z'), got: {proof_value}"
+        );
+        let (_base, decoded) =
+            multibase::decode(proof_value).expect("proofValue must be valid multibase");
+        assert_eq!(
+            decoded.len(),
+            64,
+            "a BIP340 detached Schnorr signature is exactly 64 bytes"
+        );
+    }
+
+    /// data-structures.md:106 — `targetVersionId` must be one more than the
+    /// current versionId. Construction-time enforcement is intentionally
+    /// deferred to the resolver round-trip (the round-trip is the guard): an
+    /// update built with targetVersionId 1 still produces a valid signed
+    /// update, but fails the resolver's duplicate-check (which requires >= 2).
+    #[test]
+    fn wrong_target_version_id_fails_round_trip() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(1).expect("1 is non-zero");
+
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction succeeds even with a wrong target_version_id");
+
+        // confirm_duplicate requires target_version_id >= 2.
+        let err = update
+            .confirm_duplicate(&[])
+            .expect_err("targetVersionId 1 must fail the resolver duplicate-check");
+        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+    }
+
+    /// Deterministic golden vector: the produced signed-update JSON matches a
+    /// committed fixture byte-for-byte on every run. The fixed inputs are
+    /// `SOURCE_SECRET_KEY_BYTES`, the source document deterministically
+    /// generated from that key's DID, the `benign_patch` above, and
+    /// targetVersionId 2. Signing is deterministic (sign_schnorr_no_aux_rand),
+    /// so the bytes are stable.
+    ///
+    /// The committed fixture uses the four-context unsigned-update set.
+    #[test]
+    fn golden_signed_update_bytes() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction must succeed");
+
+        let produced = serde_json::to_string_pretty(update.as_ref())
+            .expect("signed update JSON serializes to pretty string");
+        let golden = include_str!("../fixtures/spec-form/golden-signed-update.json");
+        assert_eq!(
+            produced,
+            golden.trim_end_matches('\n'),
+            "produced signed-update JSON must match the committed golden vector byte-for-byte"
+        );
+    }
+
+    /// Build a minimal conformant key-based DID document JSON with a single
+    /// verification method whose id is `vm_id` and whose public key is derived
+    /// from `SOURCE_SECRET_KEY_BYTES`. Used by the capabilityInvocation-membership
+    /// test which needs to manipulate the raw document shape.
+    fn document_json(did: &Did, vm_id: &str) -> Value {
+        let secp = Secp256k1::new();
+        let public_key = source_secret_key().public_key(&secp);
+        let did_str = did.encode();
+        serde_json::json!({
+            "id": did_str,
+            "@context": [DID_CORE_V1_1_CONTEXT, DID_BTC1_CONTEXT],
+            "controller": [did_str],
+            "verificationMethod": [{
+                "id": vm_id,
+                "type": "Multikey",
+                "controller": did_str,
+                "publicKeyMultibase": public_key.to_multikey(),
+            }],
+            "authentication": [vm_id],
+            "assertionMethod": [vm_id],
+            "capabilityInvocation": [vm_id],
+            "capabilityDelegation": [vm_id],
+            "service": did_service_entries(did),
+        })
+    }
+
+    /// The three default beacon services for `did`, in JSON form — reused so a
+    /// hand-built document stays conformant (non-empty service set).
+    fn did_service_entries(did: &Did) -> Value {
+        let resolution_options = ResolutionOptions::default();
+        let initial = InitialDocument::from_did(did, &resolution_options)
+            .expect("key DID generates its initial document");
+        initial.as_ref()["service"].clone()
     }
 }

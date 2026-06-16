@@ -52,6 +52,15 @@ impl Update {
         // TODO: Can we replace this with serde?
         let source_hash = hash_from_object(&json, "sourceHash")?;
         let target_hash = hash_from_object(&json, "targetHash")?;
+        // `targetVersionId` is a JSON *number*, intentionally NOT the string form
+        // used by the sibling `versionId` field in DocumentMetadata
+        // (`version_id_serde`). The spec carries it unquoted
+        // (did-btcr2/src/data-structures.md:105-106,
+        // did-btcr2/src/example-data/btcr2-signed-update.json:29) and does integer
+        // arithmetic/comparison on it during resolve
+        // (did-btcr2/src/operations/resolve.md:160-176: `targetVersionId - 2`,
+        // `== current_version_id + 1`). Do NOT "fix" this asymmetry by accepting a
+        // string here — a string-form value must be rejected as UnexpectedJsonType.
         let target_version_id = u64::try_from(int_from_object(&json, "targetVersionId")?)
             .map_err(|_| Error::InvalidTargetVersionId)?
             .try_into()
@@ -125,6 +134,38 @@ pub(crate) struct UnsecuredUpdate {
     pub(crate) json: Value,
 }
 
+impl UnsecuredUpdate {
+    /// Build an unsigned BTCR2 update directly from its inputs (the spec's
+    /// "Construct BTCR2 Unsigned Update" step), independent of signing.
+    ///
+    /// Assembles the canonical unsigned-update JSON: the four required
+    /// `@context` URLs in spec order, the JSON Patch, the source/target hashes
+    /// (emitted as base64url-no-pad strings via the `Sha256Hash` serializer),
+    /// and the target version id. The resulting struct hashes identically to
+    /// the same JSON produced by stripping the proof off a signed `Update`,
+    /// so the signing/verify paths share one canonical shape.
+    pub(crate) fn construct(
+        patch: &Patch,
+        source_hash: Sha256Hash,
+        target_hash: Sha256Hash,
+        target_version_id: NonZeroU64,
+    ) -> Self {
+        let json = serde_json::json!({
+            "@context": [
+                "https://w3id.org/security/v2",
+                "https://w3id.org/zcap/v1",
+                "https://w3id.org/json-ld-patch/v1",
+                "https://btcr2.dev/context/v1"
+            ],
+            "patch": patch,
+            "sourceHash": source_hash,
+            "targetHash": target_hash,
+            "targetVersionId": u64::from(target_version_id),
+        });
+        Self { json }
+    }
+}
+
 impl From<&Update> for UnsecuredUpdate {
     fn from(update: &Update) -> Self {
         let mut json = update.json.clone();
@@ -179,5 +220,89 @@ mod tests {
             Btc1Error::InvalidDidUpdate(_) => {}
             other => panic!("expected InvalidDidUpdate, got {other:?}"),
         }
+    }
+
+    /// A small RFC 6902 patch used across the construct tests.
+    fn sample_patch() -> Patch {
+        serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/x", "value": 1}
+        ]))
+        .expect("sample patch is a valid RFC 6902 op array")
+    }
+
+    /// a constructed unsigned update carries exactly the four
+    /// required `@context` URLs, in spec order. The verify path requires an
+    /// exact `@context` match, so a wrong or short set would break interop
+    /// This pins the canonical set at construction time.
+    #[test]
+    fn unsigned_update_has_four_contexts() {
+        let patch = sample_patch();
+        let src = Sha256Hash([0x11; 32]);
+        let tgt = Sha256Hash([0x22; 32]);
+        let ver = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let u = UnsecuredUpdate::construct(&patch, src, tgt, ver);
+
+        assert_eq!(
+            u.as_ref()["@context"],
+            serde_json::json!([
+                "https://w3id.org/security/v2",
+                "https://w3id.org/zcap/v1",
+                "https://w3id.org/json-ld-patch/v1",
+                "https://btcr2.dev/context/v1"
+            ])
+        );
+    }
+
+    /// the constructed unsigned update carries the expected field
+    /// set — `targetVersionId` as the numeric version, `patch` round-tripping
+    /// back to the input, and the two hashes serialized as JSON strings.
+    #[test]
+    fn unsigned_update_field_set() {
+        let patch = sample_patch();
+        let src = Sha256Hash([0x11; 32]);
+        let tgt = Sha256Hash([0x22; 32]);
+        let ver = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let u = UnsecuredUpdate::construct(&patch, src, tgt, ver);
+        let json = u.as_ref();
+
+        assert_eq!(json["targetVersionId"], serde_json::json!(2));
+
+        let round_tripped: Patch = serde_json::from_value(json["patch"].clone())
+            .expect("patch field round-trips back to a Patch");
+        assert_eq!(round_tripped, patch);
+
+        assert!(
+            json["sourceHash"].is_string(),
+            "sourceHash must serialize as a JSON string"
+        );
+        assert!(
+            json["targetHash"].is_string(),
+            "targetHash must serialize as a JSON string"
+        );
+    }
+
+    /// Wire form: the hash strings are base64url-no-pad — they contain
+    /// none of the base64-standard `+`, `/`, or padding `=` characters. Pins
+    /// that the `Sha256Hash` serializer's encoding is preserved through the
+    /// constructor.
+    #[test]
+    fn unsigned_update_hashes_are_base64url_no_pad() {
+        let patch = sample_patch();
+        let src = Sha256Hash([0x11; 32]);
+        let tgt = Sha256Hash([0x22; 32]);
+        let ver = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let u = UnsecuredUpdate::construct(&patch, src, tgt, ver);
+        let json = u.as_ref();
+
+        let source_hash = json["sourceHash"]
+            .as_str()
+            .expect("sourceHash is a JSON string");
+        assert!(
+            !source_hash.contains(['+', '/', '=']),
+            "sourceHash must be base64url-no-pad (no '+', '/', or '='): {source_hash}"
+        );
     }
 }

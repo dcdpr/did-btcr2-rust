@@ -17,3 +17,4 @@ pub use document::{
     Document, DocumentMetadata, ResolutionMetadata, ResolutionOptions, ResolutionResult,
 };
 pub use key::{KeyPair, PublicKey, SecretKey};
+pub use update::Update;

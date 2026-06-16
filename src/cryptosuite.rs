@@ -18,10 +18,11 @@ pub(crate) struct CryptoSuite;
 
 impl CryptoSuite {
     // bip340 cryptosuite spec Section 3.3.1
-    fn create_proof(
+    pub(crate) fn create_proof(
         &self,
         unsecured_update: &UnsecuredUpdate,
         mut inner: ProofInner,
+        secret_key: SecretKey,
     ) -> Result<Proof, Btc1Error> {
         // Add document context to proof if present
         if let Some(context) = unsecured_update.as_ref()["@context"].as_array() {
@@ -43,7 +44,7 @@ impl CryptoSuite {
         let hash_data = self.hash(&transformed_data, &proof_config);
 
         // Generate proof value
-        let proof_bytes = self.serialize_proof(hash_data, &inner)?;
+        let proof_bytes = self.serialize_proof(hash_data, secret_key)?;
 
         // Encode proof value with Multibase
         let proof_value = multibase_encode(proof_bytes);
@@ -159,17 +160,17 @@ impl CryptoSuite {
     }
 
     // bip340 cryptosuite spec Section 3.3.6
+    //
+    // The proof config is already folded into `hash_data` by `hash()`, so the
+    // proof options do not separately influence the signed bytes; this function
+    // signs exactly the precomputed `hash_data`. (The verify side is not
+    // symmetric — `proof_verify` takes a real `proof_bytes` input.)
     fn serialize_proof(
         &self,
-        _hash_data: Sha256Hash,
-        _proof: &ProofInner,
+        hash_data: Sha256Hash,
+        secret_key: SecretKey,
     ) -> Result<Signature, Btc1Error> {
-        // BIP340 signing requires verification_method-keyed
-        // secret-key retrieval. The previous implementation used a hardcoded
-        // zero-key stub (a "hidden half-implementation" per PROJECT.md). Per
-        // The panic-sweep policy converts hidden stubs to visible
-        // `todo!()` so contributors cannot accidentally exercise them.
-        todo!("BIP340 signing — verification_method-keyed secret-key retrieval")
+        bip340_sign(hash_data, secret_key)
     }
 
     // bip340 cryptosuite spec Section 3.3.7
@@ -195,6 +196,12 @@ fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signat
     // Sign with BIP340 Schnorr
     let keypair = KeyPair::from_secret_key(&secp, &secret_key);
 
+    // Deterministic signing (no fresh auxiliary randomness): the signature is a
+    // pure function of (secret key, message), so a given signed update is
+    // byte-reproducible. This is chosen deliberately to enable pinned,
+    // reproducible reference vectors for signed updates. The accepted trade-off
+    // is weaker side-channel hardening than fresh-aux-rand signing; that is an
+    // acceptable risk for a sans-I/O reference library.
     Ok(secp.sign_schnorr_no_aux_rand(&message, &keypair))
 }
 
@@ -222,9 +229,19 @@ fn multibase_encode(signature: Signature) -> ProofValue {
 
 /// Decode multibase encoded string
 fn multibase_decode(proof_value: &ProofValue) -> Result<Signature, Btc1Error> {
-    let decoded = decode(&proof_value.0)
-        .map(|(_, decoded)| decoded)
+    // The producer pins `proofValue` to base58-btc (`multibase_encode`), and the
+    // cryptosuite (data-structures.md) requires base58-btc. `multibase::decode`
+    // accepts *any* multibase prefix, so we must reject a signature re-encoded in
+    // a different base (e.g. base64url `u…`, base16 `f…`); accepting those would
+    // weaken canonicalization of the signed artifact.
+    let (base, decoded) = decode(&proof_value.0)
         .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))?;
+
+    if base != Base::Base58Btc {
+        return Err(Btc1Error::ProofVerification(
+            "proofValue must be base58-btc multibase".into(),
+        ));
+    }
 
     Signature::from_slice(&decoded)
         .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))
@@ -278,6 +295,106 @@ mod tests {
         })
     }
 
+    use crate::update::UnsecuredUpdate;
+    use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofPurpose, ProofType};
+
+    // A SecretKey derived from a non-constant, valid byte array. NOT a zero key.
+    fn test_secret_key() -> SecretKey {
+        SecretKey::from_slice(&[1u8; 32]).expect("[1u8; 32] is a valid secp256k1 secret key")
+    }
+
+    // A minimal unsigned update (four contexts) to sign over.
+    fn unsigned_update() -> UnsecuredUpdate {
+        UnsecuredUpdate {
+            json: serde_json::json!({
+                "@context": [],
+                "patch": [],
+                "targetVersionId": 2,
+            }),
+        }
+    }
+
+    // A valid ProofInner for capabilityInvocation.
+    fn proof_inner() -> ProofInner {
+        ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: "did:example:test#key".to_string(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability: "urn:zcap:root:did%3Aexample%3Atest".to_string(),
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        }
+    }
+
+    #[test]
+    fn sign_produces_base58btc_64byte() {
+        // a produced proofValue is a base58-btc multibase string
+        // ('z' prefix) whose decoded body is exactly the 64-byte detached
+        // Schnorr signature.
+        let suite = CryptoSuite;
+        let proof = suite
+            .create_proof(&unsigned_update(), proof_inner(), test_secret_key())
+            .expect("signing with a valid key must succeed");
+
+        assert!(
+            proof.proof_value.0.starts_with('z'),
+            "proofValue must be base58-btc multibase (prefix 'z'), got: {}",
+            proof.proof_value.0
+        );
+
+        let (_base, decoded) =
+            multibase::decode(&proof.proof_value.0).expect("proofValue must be valid multibase");
+        assert_eq!(
+            decoded.len(),
+            64,
+            "a BIP340 detached Schnorr signature is exactly 64 bytes"
+        );
+    }
+
+    #[test]
+    fn sign_is_deterministic() {
+        // Determinism prerequisite for a pinned golden signed-update vector:
+        // sign_schnorr_no_aux_rand is a pure function of (key, message), so
+        // signing the same update twice yields byte-identical proofValues.
+        let suite = CryptoSuite;
+        let first = suite
+            .create_proof(&unsigned_update(), proof_inner(), test_secret_key())
+            .expect("first signing must succeed");
+        let second = suite
+            .create_proof(&unsigned_update(), proof_inner(), test_secret_key())
+            .expect("second signing must succeed");
+
+        assert_eq!(
+            first.proof_value.0, second.proof_value.0,
+            "deterministic signing must produce byte-identical proofValues"
+        );
+    }
+
+    #[test]
+    fn no_zero_key_stub_in_tree() {
+        // Pins the removal of the hardcoded zero-key signing stub: a future
+        // reintroduction of the constant zero secret-key byte array in this
+        // source file fails at unit-test time.
+        let src = include_str!("cryptosuite.rs");
+        // Assemble the needle at runtime from two separate literals so this
+        // guard does not match its own source text (include_str! pulls in this
+        // very file).
+        let needle = ["0u8; SECRET", "_KEY_SIZE"].concat();
+        assert!(
+            !src.contains(&needle),
+            "zero-key signing stub must not be reintroduced into cryptosuite.rs"
+        );
+    }
+
     #[test]
     fn verify_proof_rejects_prefix_context_forgery() {
         // a proof whose @context is a strict prefix of the
@@ -300,6 +417,67 @@ mod tests {
                 );
             }
             other => panic!("expected InvalidUpdateProof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multibase_decode_rejects_non_base58btc() {
+        // the producer pins proofValue to base58-btc and the spec
+        // requires it. A 64-byte signature re-encoded in any other multibase
+        // (here base64url, prefix 'u') must be rejected even though
+        // multibase::decode would happily decode it.
+        let sig_bytes = [0x42u8; 64];
+        let base58 = multibase::encode(Base::Base58Btc, sig_bytes);
+        assert!(
+            base58.starts_with('z'),
+            "sanity: base58-btc multibase prefix is 'z'"
+        );
+        let base64url = multibase::encode(Base::Base64Url, sig_bytes);
+        assert!(
+            base64url.starts_with('u'),
+            "sanity: base64url multibase prefix is 'u'"
+        );
+
+        // base58-btc form of a 64-byte body decodes to a Signature object
+        // (from_slice only checks length, not curve validity), so the base check
+        // passes and we get Ok back.
+        multibase_decode(&ProofValue(base58))
+            .expect("a 64-byte base58-btc body must decode to a Signature");
+
+        // base64url form must be rejected at the base check.
+        let err_base64 = multibase_decode(&ProofValue(base64url))
+            .expect_err("non-base58-btc multibase must be rejected");
+        match err_base64 {
+            Btc1Error::ProofVerification(msg) => assert!(
+                msg.contains("base58-btc"),
+                "expected base58-btc requirement message, got: {msg}"
+            ),
+            other => panic!("expected ProofVerification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_proof_rejects_non_base58btc_proof_value() {
+        // End-to-end through verify_proof: a proof whose @context matches
+        // the update's (both empty) reaches multibase_decode; a proofValue in a
+        // non-base58-btc multibase must be rejected rather than verified.
+        let sig_bytes = [0x42u8; 64];
+        let base64url = multibase::encode(Base::Base64Url, sig_bytes);
+
+        let mut json = base_update_json();
+        json["proof"]["proofValue"] = serde_json::json!(base64url);
+        let update = make_update(json);
+
+        let suite = CryptoSuite;
+        let err = suite
+            .verify_proof(dummy_public_key(), &update)
+            .expect_err("non-base58-btc proofValue must be rejected");
+        match err {
+            Btc1Error::ProofVerification(msg) => assert!(
+                msg.contains("base58-btc"),
+                "expected base58-btc requirement message, got: {msg}"
+            ),
+            other => panic!("expected ProofVerification, got {other:?}"),
         }
     }
 

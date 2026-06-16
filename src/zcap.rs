@@ -21,7 +21,6 @@ pub(crate) mod proof;
 ///
 /// * `Ok(RootCapability)` - The derived root capability
 /// * `Err(Error)` - If the DID identifier is invalid
-#[allow(dead_code)] // todo: not needed until we impl Update
 pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
     // Step 3: URL encode the DID identifier
     let encoded_identifier = urlencoding::encode(did_identifier.encode());
