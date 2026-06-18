@@ -13,6 +13,7 @@ mod update;
 mod zcap;
 
 // Re-exports of key components
+pub use beacon::{AnnounceError, Prevout, SignedBeaconTx};
 pub use document::{
     Document, DocumentMetadata, ResolutionMetadata, ResolutionOptions, ResolutionResult,
 };

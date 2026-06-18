@@ -36,6 +36,16 @@ esploda = "0.2"
 # ZCAP
 urlencoding = "2"
 
+[dev-dependencies]
+# Test-only re-declaration of `bitcoin` (already brought transitively by
+# `esploda` 0.2) with the `bitcoinconsensus` feature enabled. This wires the
+# full-script `Script::verify` oracle used by the announce-signing tests
+# WITHOUT changing the published crate's feature surface. `esploda` 0.2
+# does NOT re-expose a `bitcoin/bitcoinconsensus` passthrough feature, so this
+# direct dev-dependency is the supported path; it resolves to the same
+# bitcoin 0.30.2 lock entry as `esploda::bitcoin`.
+bitcoin = { version = "0.30", features = ["bitcoinconsensus"] }
+
 [features]
 # Gates the legacy Base58-encoded test-suite fixtures (e.g. test_traversal in
 # resolver.rs) so CI can stay green after the hash-encoding switch

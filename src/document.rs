@@ -743,35 +743,30 @@ impl Document {
         })
     }
 
-    // Spec section 7.3
-    //
-    // TODO: Do we really want to expose this patching concept to users? How do they create patches?
-    //
-    // options:
-    // a) user provides Patch
-    //
-    // b) user provides second document and we compute the diff and patch
-    //
-    // c) the patch can be constructed incrementally through various mutating methods,
-    //     // like `add_service()`, and then committed with `update()`. You would want a way to check
-    //     // whether there are staged patches.
-    //
-    //
-    pub fn update(
-        &mut self,
-        // `btc1Identifier` is implied by `self.did`
-        // `sourceDocument` is implied by `self`
-        // `sourceVersionId` is implied by `self.version`
-        _patch: Patch,
-        _verification_method_id: &str,
-        _beacon_ids: &[usize],
-    ) -> Result<Resolver, Error> {
-        todo!()
-    }
-
-    // Spec section 7.4
-    pub fn deactivate(&mut self) -> Result<Resolver, Error> {
-        todo!()
+    /// Construct a signed deactivation update for this DID document.
+    ///
+    /// Deactivation (spec: did-btcr2/src/operations/deactivate.md) is the
+    /// one-op JSON Patch `[{"op":"add","path":"/deactivated","value":true}]`
+    /// applied through the ordinary signed-update path: this is a thin wrapper
+    /// over [`Document::construct_signed_update`]. The deactivated-document
+    /// guard (Guard 0 in `construct_signed_update`) is inherited for free, so
+    /// deactivating an already-deactivated document returns a typed
+    /// `Btc1Error::InvalidDidUpdate` before any signing.
+    ///
+    /// `target_version_id` is taken explicitly (mirroring
+    /// `construct_signed_update`): a sans-I/O method has no resolver state from
+    /// which to derive the current version.
+    pub fn deactivate(
+        &self,
+        verification_method_id: &str,
+        secret_key: secp256k1::SecretKey,
+        target_version_id: NonZeroU64,
+    ) -> Result<Update, Btc1Error> {
+        let patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/deactivated", "value": true}
+        ]))
+        .expect("the static deactivate patch is always valid RFC-6902");
+        self.construct_signed_update(patch, target_version_id, verification_method_id, secret_key)
     }
 }
 
@@ -806,6 +801,15 @@ impl Document {
     /// Convert the document to a JSON string
     pub fn to_json_string(&self) -> Result<String, Error> {
         Ok(serde_json::to_string_pretty(&self.json_data)?)
+    }
+
+    /// Iterate the beacon services declared on this document.
+    ///
+    /// Read-only borrow over the document's beacon services; an out-of-crate
+    /// caller pairs this with [`Beacon::address`](crate::beacon::Beacon::address)
+    /// to read each beacon's Bitcoin address. No I/O is performed.
+    pub fn beacons(&self) -> impl Iterator<Item = &Beacon> {
+        self.fields.service.iter()
     }
 }
 
@@ -1570,6 +1574,62 @@ mod tests {
         );
     }
 
+    /// A deterministically-generated key-based document exposes its three
+    /// default singleton beacons via the read-only public accessors
+    /// (`Document::beacons()` + `Beacon::id()`/`beacon_type()`/`address()`)
+    /// without any caller reaching into `pub(crate)` internals.
+    #[test]
+    fn beacons_accessor() {
+        use crate::beacon::BeaconType;
+
+        let (did, _vm_id, _initial, document) = source_documents();
+        let network = did.components().network();
+
+        // `beacons()` borrows the document — it must not consume or clone it.
+        let beacons: Vec<&crate::beacon::Beacon> = document.beacons().collect();
+        assert_eq!(
+            beacons.len(),
+            3,
+            "generate_beacons emits exactly the 3 default singletons"
+        );
+
+        // The document is still usable after iterating — proving `beacons()`
+        // is a borrow, not a move.
+        let _still_borrowable = document.beacons().count();
+
+        let suffixes = ["initialP2PKH", "initialP2WPKH", "initialP2TR"];
+        for (beacon, suffix) in beacons.iter().zip(suffixes) {
+            assert!(!beacon.id().is_empty(), "beacon id must be non-empty");
+            assert!(
+                beacon.id().ends_with(suffix),
+                "beacon id {:?} must end with {suffix}",
+                beacon.id()
+            );
+            assert_eq!(
+                beacon.beacon_type(),
+                BeaconType::Singleton,
+                "default beacons are Singletons"
+            );
+
+            // The address borrowed out re-parses as a valid Bitcoin address
+            // for the DID's network (round-trip through its string form).
+            let addr_str = beacon.address().to_string();
+            assert!(!addr_str.is_empty(), "beacon address renders non-empty");
+            let reparsed = addr_str
+                .parse::<esploda::bitcoin::Address<_>>()
+                .expect("beacon address string is a valid Bitcoin address")
+                .require_network(
+                    network
+                        .try_into()
+                        .expect("DID network maps to a bitcoin network"),
+                );
+            assert!(
+                reparsed.is_ok(),
+                "beacon address must be valid for the DID's network: {addr_str}"
+            );
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // Signed-update construction (Document::construct_signed_update).
     //
@@ -1653,6 +1713,375 @@ mod tests {
             applied.hash(),
             update.target_hash,
             "the applied document hash must equal the constructed targetHash"
+        );
+    }
+
+    /// `Document::deactivate` produces a signed update
+    /// whose patch is exactly `[{"op":"add","path":"/deactivated","value":true}]`,
+    /// whose proof verifies, and which applies to the source document producing a
+    /// target with `deactivated == true`. Mirrors `construct_signed_update_round_trips`.
+    ///
+    /// Spec: did-btcr2/src/operations/deactivate.md (the deactivate JSON Patch) +
+    /// the verify/apply path the resolver runs in apply_update.
+    #[test]
+    fn deactivate_update_round_trip() {
+        let (_did, vm_id, initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let update = document
+            .deactivate(&vm_id, source_secret_key(), version)
+            .expect("a valid (vm_id, key, version) must produce a signed deactivate update");
+
+        // The patch is exactly the one-op add /deactivated true.
+        let expected_patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/deactivated", "value": true}
+        ]))
+        .expect("the expected deactivate patch is valid RFC-6902");
+        assert_eq!(
+            update.patch, expected_patch,
+            "deactivate must carry the one-op add /deactivated true patch"
+        );
+
+        // Round-trip: applying the produced update yields a deactivated target
+        // whose hash matches the constructed targetHash.
+        let mut applied = initial.clone();
+        applied
+            .apply_update(&update)
+            .expect("the produced deactivate update must apply cleanly to the prior document");
+        assert!(
+            applied.fields.deactivated,
+            "applying the deactivate update must set deactivated == true"
+        );
+        assert_eq!(
+            applied.hash(),
+            update.target_hash,
+            "the applied document hash must equal the constructed targetHash"
+        );
+    }
+
+    /// Criterion 3a (deactivate-path twin of `construct_rejects_deactivated_document`):
+    /// calling `Document::deactivate` on an already-deactivated document returns
+    /// `Btc1Error::InvalidDidUpdate` whose message mentions "deactivated" BEFORE
+    /// any signing — the construct-time Guard 0 is inherited for free (the
+    /// typed error originates at construct time, not the resolver).
+    ///
+    /// Spec: did-btcr2/src/operations/deactivate.md.
+    #[test]
+    fn deactivate_then_construct_rejected() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json.as_object_mut()
+            .expect("document_json builds an object")
+            .insert("deactivated".to_string(), serde_json::json!(true));
+        let document =
+            Document::from_json_value(json).expect("a deactivated document is still conformant");
+
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let err = document
+            .deactivate(&vm_id, source_secret_key(), version)
+            .expect_err("a deactivated document must not produce a deactivate update");
+        match err {
+            Btc1Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("deactivated"),
+                "expected a deactivated-document message, got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Round-trip + integration tests.
+    //
+    // These prove the announce primitive feeds the resolver's signal
+    // extraction end-to-end, and that a create -> update -> deactivate ->
+    // re-resolve flow terminates with deactivated == true.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Test bridge: turn a [`SignedBeaconTx`] into an
+    /// `esploda::esplora::Transaction` with a synthetic `Status::Confirmed`.
+    ///
+    /// The resolver reads only the LAST output's `script_pubkey`, the `status`,
+    /// and the `txid`, so only those carry real data. The esplora `value`/`fee`
+    /// fields are BTC `Decimal` in memory but sats-on-the-wire (serde adapters
+    /// convert at the JSON boundary), so we build the whole struct via JSON and
+    /// `serde_json::from_value` rather than stuffing sats into a Decimal field
+    fn bridge_to_esplora(
+        signed: &crate::beacon::SignedBeaconTx,
+        block_height: u32,
+        block_time: i64,
+    ) -> esploda::esplora::Transaction {
+        let tx = signed.as_tx();
+        let txid = tx.txid();
+        let vout: Vec<serde_json::Value> = tx
+            .output
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "scriptpubkey": o.script_pubkey.to_hex_string(),
+                    "value": o.value,
+                })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "txid": txid.to_string(),
+            "version": tx.version,
+            "locktime": 0,
+            "vin": [],
+            "vout": vout,
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": block_height,
+                // A synthetic, structurally-valid block hash (all-zero is a valid
+                // 32-byte BlockHash for the resolver, which never inspects it).
+                "block_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                "block_time": block_time,
+            },
+        });
+        serde_json::from_value(json).expect("the bridged esplora transaction JSON deserializes")
+    }
+
+    /// The first default beacon (in `generate_beacons` order) whose descriptor
+    /// matches `pred`, returned as a `(beacon_address, prevout)` pair. The
+    /// prevout is funded at `value` sats from a synthetic outpoint and locked to
+    /// the beacon's own scriptPubKey — for a key-based DID the beacon address
+    /// derives from the DID key, so the DID secret key spends it.
+    fn beacon_prevout(
+        initial: &InitialDocument,
+        pred: impl Fn(&Address) -> bool,
+        value: u64,
+    ) -> (Address, crate::beacon::Prevout) {
+        use esploda::bitcoin::{OutPoint, Txid, hashes::Hash};
+        let beacon = initial
+            .fields
+            .service
+            .iter()
+            .find(|b| pred(&b.descriptor))
+            .expect("a default beacon of the requested address type exists");
+        let address = beacon.descriptor.clone();
+        let script_pubkey = address.script_pubkey();
+        let prevout = crate::beacon::Prevout {
+            // A synthetic funding outpoint; the sans-I/O signer does not check it
+            // exists on-chain (UTXO existence is the caller's I/O concern).
+            outpoint: OutPoint {
+                txid: Txid::all_zeros(),
+                vout: 0,
+            },
+            value,
+            script_pubkey,
+        };
+        (address, prevout)
+    }
+
+    /// Criterion 2: a produced beacon transaction round-trips through the
+    /// resolver. We build a signed update, announce it as a Singleton-beacon tx,
+    /// bridge that tx to a confirmed `esplora::Transaction`, feed it through the
+    /// public resolver FSM, and assert the resolver applies the update (resolving
+    /// to the UPDATED document, not the genesis one).
+    ///
+    /// SELF-REFERENTIAL INTEROP CAVEAT: both the produced OP_RETURN push and the
+    /// sidecar `update_lookup_table` key derive from the SAME `Update::hash()`,
+    /// so this proves INTERNAL consistency of the JSON-Document-Hash plumbing —
+    /// it does NOT exercise any foreign/external test vector and therefore does
+    /// NOT prove cross-implementation interop of the "JSON Document Hash"
+    /// definition.
+    #[test]
+    fn announce_round_trip() {
+        use crate::beacon::BeaconType;
+        use crate::resolver::{Resolver, ResolverState};
+        use std::collections::HashMap;
+
+        let (did, vm_id, initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // Build a real signed update against the genesis document.
+        let patch = benign_patch(&vm_id);
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("a valid signed update is produced against the genesis document");
+
+        // Announce it from the P2WPKH default beacon (its key is the DID key).
+        let (beacon_address, prevout) =
+            beacon_prevout(&initial, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
+        let signed = update
+            .announce_singleton(
+                &beacon_address,
+                &[prevout],
+                1_000,
+                &beacon_address,
+                source_secret_key(),
+            )
+            .expect("announce_singleton produces a signed beacon tx");
+
+        // The OP_RETURN signal bytes equal the update hash (the sidecar key).
+        let bridged = bridge_to_esplora(&signed, 100, 1_700_000_000);
+
+        // Sidecar holds the update; its lookup table is keyed by update.hash().
+        let sidecar = SidecarData::new(None, vec![update.clone()], None, None);
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial.clone(), resolution_options);
+
+        // Drive the FSM: Init -> feed the bridged tx on the matching beacon ->
+        // resolve. The beacon the signal arrives on must be the one we announced
+        // from (P2WPKH), so route the tx under BeaconType::Singleton.
+        let ResolverState::Requests(next_state, _requests) = resolver
+            .resolve()
+            .expect("Init step yields beacon requests")
+        else {
+            panic!("expected Requests from Init step");
+        };
+        let mut transactions: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
+            HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![bridged]);
+        let fsm = next_state.process_responses(transactions);
+
+        // The resolver may need additional empty-signal steps to terminate.
+        let mut state = fsm
+            .resolve()
+            .expect("processing the beacon signal resolves a step");
+        let result = loop {
+            match state {
+                ResolverState::Resolved(result) => break result,
+                ResolverState::Requests(next, _requests) => {
+                    let empty: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
+                        HashMap::new();
+                    state = next
+                        .process_responses(empty)
+                        .resolve()
+                        .expect("empty-signal step resolves");
+                }
+            }
+        };
+
+        // The update was applied: the resolved document is the UPDATED one
+        // (version 2), not the genesis (version 1). (Resolving to the genesis
+        // doc is the warning sign.)
+        assert_eq!(result.document.fields.id.encode(), did.encode());
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            2,
+            "the produced beacon tx must drive the resolver to the updated document"
+        );
+    }
+
+    /// Criterion 4: create a key-based DID, apply one update and then a
+    /// deactivate update, and re-resolve — the terminal state has
+    /// `deactivated == true` and `version_id == 3` (genesis 1 -> update 2 ->
+    /// deactivate 3), with the FSM short-circuiting on deactivation (
+    /// no signal past the deactivation mutates the document).
+    #[test]
+    fn create_update_deactivate_reresolve() {
+        use crate::beacon::BeaconType;
+        use crate::resolver::{Resolver, ResolverState};
+        use std::collections::HashMap;
+
+        // Create: key-based DID -> deterministic genesis document.
+        let (_did, vm_id, genesis, genesis_doc) = source_documents();
+
+        // Update #1: a benign patch targeting version 2, constructed against the
+        // genesis document (so source_hash == genesis.hash()).
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+        let update1 = genesis_doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, source_secret_key())
+            .expect("update #1 constructs against the genesis document");
+
+        // Apply update #1 to obtain the contemporary document for update #2.
+        let mut after_update1 = genesis.clone();
+        after_update1
+            .apply_update(&update1)
+            .expect("update #1 applies to the genesis document");
+        let doc_after_update1 = Document::from(after_update1);
+
+        // Deactivate update: targets version 3, constructed against the
+        // post-update-1 document (so source_hash == doc_after_update1.hash()).
+        let v3 = NonZeroU64::new(3).expect("3 is non-zero");
+        let deactivate = doc_after_update1
+            .deactivate(&vm_id, source_secret_key(), v3)
+            .expect("the deactivate update constructs against the post-update-1 document");
+
+        // Announce both updates from the P2WPKH default beacon and bridge each to
+        // a confirmed esplora tx.
+        let (beacon_address, prevout1) =
+            beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
+        let signed1 = update1
+            .announce_singleton(
+                &beacon_address,
+                &[prevout1],
+                1_000,
+                &beacon_address,
+                source_secret_key(),
+            )
+            .expect("announce update #1");
+        let (_addr2, prevout2) =
+            beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
+        let signed2 = deactivate
+            .announce_singleton(
+                &beacon_address,
+                &[prevout2],
+                1_000,
+                &beacon_address,
+                source_secret_key(),
+            )
+            .expect("announce the deactivate update");
+        let bridged1 = bridge_to_esplora(&signed1, 100, 1_700_000_000);
+        let bridged2 = bridge_to_esplora(&signed2, 101, 1_700_000_100);
+
+        // Sidecar carries both updates (keyed by hash()); re-resolve from genesis.
+        let sidecar = SidecarData::new(None, vec![update1.clone(), deactivate.clone()], None, None);
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(genesis.clone(), resolution_options);
+
+        let ResolverState::Requests(next_state, _requests) = resolver
+            .resolve()
+            .expect("Init step yields beacon requests")
+        else {
+            panic!("expected Requests from Init step");
+        };
+        let mut transactions: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
+            HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![bridged1, bridged2]);
+        let fsm = next_state.process_responses(transactions);
+
+        let mut state = fsm
+            .resolve()
+            .expect("processing the beacon signals resolves a step");
+        let result = loop {
+            match state {
+                ResolverState::Resolved(result) => break result,
+                ResolverState::Requests(next, _requests) => {
+                    let empty: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
+                        HashMap::new();
+                    state = next
+                        .process_responses(empty)
+                        .resolve()
+                        .expect("empty-signal step resolves");
+                }
+            }
+        };
+
+        // Terminal state: deactivated, version 3 (1 -> 2 -> 3), FSM short-circuit
+        // (no signal past the deactivation mutates the document).
+        assert!(
+            result.document_metadata.deactivated,
+            "the re-resolved document must be deactivated"
+        );
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            3,
+            "genesis 1 -> update 2 -> deactivate 3"
+        );
+        assert!(
+            result.document.fields.deactivated,
+            "the resolved document itself carries deactivated == true"
         );
     }
 

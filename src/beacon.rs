@@ -1,5 +1,6 @@
 use crate::identifier::Network;
 use esploda::bitcoin::address::Address;
+use esploda::bitcoin::blockdata::{opcodes::all::OP_RETURN, script::Instruction};
 use onlyerror::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -88,6 +89,25 @@ impl Beacon {
         Self { id, ty, descriptor }
     }
 
+    /// The Bitcoin address this beacon spends from when announcing signals.
+    ///
+    /// Read-only borrow of the beacon's `serviceEndpoint` address; an
+    /// out-of-crate caller (e.g. the `did-btc1-client` facade) uses it to
+    /// discover the UTXOs it must spend. No I/O is performed.
+    pub fn address(&self) -> &Address {
+        &self.descriptor
+    }
+
+    /// The beacon mechanism (Singleton / CAS / SMT).
+    pub fn beacon_type(&self) -> BeaconType {
+        self.ty
+    }
+
+    /// The beacon service id (e.g. `did:btc1:k1...#initialP2TR`).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn into_json(self) -> Value {
         json!({
             "id": self.id,
@@ -95,6 +115,125 @@ impl Beacon {
             "serviceEndpoint": format!("bitcoin:{}", self.descriptor),
             // "minimumConfirmationsRequired": self.min_confirmations_required,
         })
+    }
+}
+
+/// A funding input to spend when announcing a beacon signal.
+///
+/// Carries everything the three default beacon signing schemes need: P2TR
+/// commits to every prevout's `value` + `script_pubkey`, P2WPKH needs the
+/// amount + a script_code derived from the `script_pubkey`, and P2PKH needs its
+/// own `script_pubkey`. The signer infers the address kind from
+/// `script_pubkey` (`is_p2pkh()` / `is_p2wpkh()` / `is_p2tr()`) — single source
+/// of truth, no separate kind tag.
+///
+/// API contract (GIGO): every `Prevout` passed to
+/// [`Update::announce_singleton`](crate::Update::announce_singleton) is signed
+/// with the SAME `beacon_secret_key`. The caller MUST pass only prevouts
+/// spendable by that key; a prevout locked to a foreign key produces a silently
+/// invalid transaction. This is a sans-I/O primitive — it performs no runtime
+/// key/scriptPubKey cross-check (UTXO ownership is the caller's I/O concern).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prevout {
+    /// The outpoint (txid + vout) being spent.
+    pub outpoint: esploda::bitcoin::OutPoint,
+    /// The value of the spent output, in satoshis.
+    pub value: u64,
+    /// The scriptPubKey of the spent output (determines the signing scheme).
+    pub script_pubkey: esploda::bitcoin::ScriptBuf,
+}
+
+/// A signed singleton-beacon announcement transaction.
+///
+/// Newtype over [`esploda::bitcoin::Transaction`] carrying the "valid singleton
+/// beacon signal" invariant: the last output is `OP_RETURN <32-byte push>` (the
+/// JSON Document Hash of the announced update). The internal infallible producer
+/// ([`Update::announce_singleton`](crate::Update::announce_singleton)) builds it
+/// directly; the public [`TryFrom`] validates the invariant for externally-built
+/// transactions (parse-don't-validate). The caller extracts the inner
+/// transaction at broadcast time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedBeaconTx(pub(crate) esploda::bitcoin::Transaction);
+
+impl SignedBeaconTx {
+    /// Consume the newtype and return the inner transaction for serialization /
+    /// broadcast.
+    pub fn into_inner(self) -> esploda::bitcoin::Transaction {
+        self.0
+    }
+
+    /// Borrow the inner transaction (e.g. to serialize without consuming).
+    pub fn as_tx(&self) -> &esploda::bitcoin::Transaction {
+        &self.0
+    }
+}
+
+/// Errors from building or validating a singleton-beacon announcement.
+///
+/// A named public type, separate from the BIP21/parse-concerned [`Error`] in
+/// this module, so a downstream facade caller can name and match the
+/// announce error on its own.
+#[derive(Debug, Error)]
+pub enum AnnounceError {
+    /// The transaction's last output is not `OP_RETURN`, or it has no outputs.
+    MissingOpReturnSignal,
+
+    /// The `OP_RETURN` push is present but is not exactly 32 bytes.
+    WrongSignalLength {
+        /// The actual push length found.
+        len: usize,
+    },
+
+    /// The prevouts slice was empty (would yield a consensus-invalid zero-input
+    /// transaction).
+    NoPrevouts,
+
+    /// `sum(prevout.value)` is less than the requested fee (would underflow
+    /// change).
+    InsufficientFunds {
+        /// Sum of the supplied prevout values, in satoshis.
+        inputs: u64,
+        /// The requested absolute fee, in satoshis.
+        fee: u64,
+    },
+
+    /// A prevout scriptPubKey is not one of P2PKH / P2WPKH / P2TR.
+    UnsupportedScriptType,
+
+    /// Sighash computation or signing failed.
+    Signing(String),
+}
+
+/// Validate that an externally-built transaction is a well-formed singleton
+/// beacon signal: its last output must be exactly `OP_RETURN <32-byte push>`.
+///
+/// Re-asserts the same invariant the resolver matches on
+/// (`resolver.rs` `find_next_signals`), so a transaction that passes here is
+/// guaranteed to be picked up by the resolver's signal-extraction path.
+impl TryFrom<esploda::bitcoin::Transaction> for SignedBeaconTx {
+    type Error = AnnounceError;
+
+    fn try_from(tx: esploda::bitcoin::Transaction) -> Result<Self, Self::Error> {
+        let txout = tx
+            .output
+            .last()
+            .ok_or(AnnounceError::MissingOpReturnSignal)?;
+        let ops = txout
+            .script_pubkey
+            .instructions()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        let [Instruction::Op(OP_RETURN), Instruction::PushBytes(bytes)] = ops[..] else {
+            return Err(AnnounceError::MissingOpReturnSignal);
+        };
+
+        let len = bytes.as_bytes().len();
+        if len != 32 {
+            return Err(AnnounceError::WrongSignalLength { len });
+        }
+
+        Ok(SignedBeaconTx(tx))
     }
 }
 
@@ -164,5 +303,89 @@ mod tests {
         assert!(serde_json::from_str::<BeaconType>("\"Singleton\"").is_err());
         assert!(serde_json::from_str::<BeaconType>("\"Cas\"").is_err());
         assert!(serde_json::from_str::<BeaconType>("\"SparseMerkleTree\"").is_err());
+    }
+
+    use esploda::bitcoin::blockdata::script::{Builder, PushBytesBuf};
+    use esploda::bitcoin::{
+        ScriptBuf, Transaction, TxOut, absolute::LockTime, blockdata::opcodes::all::OP_RETURN,
+    };
+
+    /// Build an `OP_RETURN <n-byte push>` output for test transactions.
+    fn op_return_output(payload: &[u8]) -> TxOut {
+        let mut pb = PushBytesBuf::new();
+        pb.extend_from_slice(payload)
+            .expect("payload fits a single push");
+        let script_pubkey: ScriptBuf = Builder::new()
+            .push_opcode(OP_RETURN)
+            .push_slice(&pb)
+            .into_script();
+        TxOut {
+            value: 0,
+            script_pubkey,
+        }
+    }
+
+    /// A non-OP_RETURN output (a bare `OP_TRUE` scriptPubKey is enough for the
+    /// last-output-ordering tests).
+    fn dummy_output() -> TxOut {
+        TxOut {
+            value: 1000,
+            script_pubkey: Builder::new()
+                .push_opcode(esploda::bitcoin::blockdata::opcodes::all::OP_PUSHNUM_1)
+                .into_script(),
+        }
+    }
+
+    fn tx_with_outputs(output: Vec<TxOut>) -> Transaction {
+        Transaction {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output,
+        }
+    }
+
+    /// a transaction whose last output is `OP_RETURN <32-byte push>`
+    /// parses into a `SignedBeaconTx`.
+    #[test]
+    fn signed_beacon_tx_tryfrom_accepts_valid() {
+        let signal = [0x42u8; 32];
+        let tx = tx_with_outputs(vec![dummy_output(), op_return_output(&signal)]);
+
+        let signed = SignedBeaconTx::try_from(tx.clone()).expect("valid beacon tx must parse");
+        assert_eq!(signed.as_tx(), &tx);
+        // last output is the OP_RETURN signal
+        assert!(
+            signed
+                .as_tx()
+                .output
+                .last()
+                .unwrap()
+                .script_pubkey
+                .is_op_return()
+        );
+    }
+
+    /// OP_RETURN must be LAST. A tx where the OP_RETURN is followed by
+    /// another output is rejected (the resolver reads only `outputs.last()`).
+    #[test]
+    fn signed_beacon_tx_tryfrom_rejects_not_last() {
+        let signal = [0x42u8; 32];
+        let tx = tx_with_outputs(vec![op_return_output(&signal), dummy_output()]);
+
+        let err = SignedBeaconTx::try_from(tx).expect_err("OP_RETURN-not-last must be rejected");
+        assert!(matches!(err, AnnounceError::MissingOpReturnSignal));
+    }
+
+    /// the OP_RETURN push must be exactly 32 bytes. A 31-byte push is
+    /// rejected with the length carried in the error.
+    #[test]
+    fn signed_beacon_tx_tryfrom_rejects_wrong_push_len() {
+        let short = [0x42u8; 31];
+        let tx = tx_with_outputs(vec![op_return_output(&short)]);
+
+        let err =
+            SignedBeaconTx::try_from(tx).expect_err("wrong-length signal push must be rejected");
+        assert!(matches!(err, AnnounceError::WrongSignalLength { len: 31 }));
     }
 }
