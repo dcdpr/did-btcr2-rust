@@ -574,9 +574,30 @@ name = "did-btc1-cli"
 version = "0.1.0"
 dependencies = [
  "did-btc1",
+ "did-btc1-client",
  "error-iter",
+ "esploda",
+ "hex",
  "onlyargs",
  "onlyerror",
+ "secp256k1",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "did-btc1-client"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "did-btc1",
+ "esploda",
+ "hex",
+ "http",
+ "json-patch",
+ "onlyerror",
+ "secp256k1",
+ "serde",
  "serde_json",
  "ureq",
 ]

@@ -32,11 +32,25 @@ pub trait AddressExt {
 
 impl AddressExt for Address {
     fn from_bip21(uri: &str, network: Network) -> Result<Self, Error> {
-        let address = uri.strip_prefix("bitcoin:").ok_or(Error::InvalidBip21)?;
-        let address = address
-            .split_once('?')
-            .map(|(addr, _params)| addr)
-            .unwrap_or(address);
+        let body = uri.strip_prefix("bitcoin:").ok_or(Error::InvalidBip21)?;
+        let (address, params) = match body.split_once('?') {
+            Some((addr, params)) => (addr, Some(params)),
+            None => (body, None),
+        };
+
+        // BIP21 requires a parser to REJECT any `req-` parameter it does not
+        // understand. This implementation understands NONE, so any `req-`
+        // parameter is a hard error rather than being silently dropped.
+        // Non-`req-` parameters (amount/label/message) are intentionally ignored:
+        // for a beacon serviceEndpoint only the address matters.
+        if let Some(params) = params {
+            for kv in params.split('&').filter(|s| !s.is_empty()) {
+                let key = kv.split_once('=').map_or(kv, |(k, _)| k);
+                if key.starts_with("req-") {
+                    return Err(Error::InvalidBip21);
+                }
+            }
+        }
 
         Ok(address
             .parse::<Address<_>>()?
@@ -218,11 +232,17 @@ impl TryFrom<esploda::bitcoin::Transaction> for SignedBeaconTx {
             .output
             .last()
             .ok_or(AnnounceError::MissingOpReturnSignal)?;
-        let ops = txout
+        // Collect into a Result rather than `.flatten()`: a `.flatten()` on a
+        // Result-yielding iterator silently drops Err instruction-parse results,
+        // so a malformed scriptPubKey could collapse to a shorter `ops` vec. We
+        // want any parse error to reject the transaction outright (the intent is
+        // "exactly OP_RETURN <push>", not "OP_RETURN <push> after dropping
+        // unparseable instructions").
+        let ops: Vec<_> = txout
             .script_pubkey
             .instructions()
-            .flatten()
-            .collect::<Vec<_>>();
+            .collect::<Result<_, _>>()
+            .map_err(|_| AnnounceError::MissingOpReturnSignal)?;
 
         let [Instruction::Op(OP_RETURN), Instruction::PushBytes(bytes)] = ops[..] else {
             return Err(AnnounceError::MissingOpReturnSignal);
@@ -247,6 +267,28 @@ mod tests {
             Address::from_bip21("foo:mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU", Network::Regtest);
 
         assert!(matches!(address, Err(Error::InvalidBip21)));
+    }
+
+    /// BIP21 says a parser MUST reject an unrecognized `req-` parameter.
+    /// This implementation understands none, so any `req-*` is rejected rather
+    /// than silently dropped.
+    #[test]
+    fn bip21_rejects_unknown_required_parameter() {
+        let uri = "bitcoin:mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU?req-future=1";
+        let address = Address::from_bip21(uri, Network::Regtest);
+        assert!(
+            matches!(address, Err(Error::InvalidBip21)),
+            "got {address:?}"
+        );
+    }
+
+    /// Non-`req-` parameters (amount/label) are intentionally ignored: only the
+    /// address matters for a beacon serviceEndpoint, so the URI still parses.
+    #[test]
+    fn bip21_ignores_benign_parameters() {
+        let uri = "bitcoin:mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU?amount=0.1&label=beacon";
+        Address::from_bip21(uri, Network::Regtest)
+            .expect("a BIP21 URI with only benign parameters parses to its address");
     }
 
     #[test]
@@ -387,5 +429,29 @@ mod tests {
         let err =
             SignedBeaconTx::try_from(tx).expect_err("wrong-length signal push must be rejected");
         assert!(matches!(err, AnnounceError::WrongSignalLength { len: 31 }));
+    }
+
+    /// a scriptPubKey that is `OP_RETURN <32-byte push>` FOLLOWED BY a
+    /// parse error (a truncated push) must be rejected. Under the old
+    /// `.flatten()` the trailing Err was silently dropped, leaving exactly
+    /// `[OP_RETURN, PushBytes(32)]`, which matched and was (wrongly) accepted.
+    /// Collecting into a Result surfaces the error and rejects the transaction.
+    #[test]
+    fn signed_beacon_tx_tryfrom_rejects_trailing_parse_error() {
+        // OP_RETURN (0x6a), OP_PUSHBYTES_32 (0x20) + 32 data bytes, then a
+        // truncated OP_PUSHBYTES_5 (0x05) with no following data — an Err at the
+        // tail of the instruction stream.
+        let mut raw = vec![0x6a, 0x20];
+        raw.extend_from_slice(&[0x42u8; 32]);
+        raw.push(0x05);
+        let script_pubkey = ScriptBuf::from_bytes(raw);
+        let tx = tx_with_outputs(vec![TxOut {
+            value: 0,
+            script_pubkey,
+        }]);
+
+        let err = SignedBeaconTx::try_from(tx)
+            .expect_err("a script with a trailing instruction-parse error must be rejected");
+        assert!(matches!(err, AnnounceError::MissingOpReturnSignal));
     }
 }

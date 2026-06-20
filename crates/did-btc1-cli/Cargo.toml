@@ -10,8 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 did-btc1 = { path = "../.." }
+did-btc1-client = { path = "../did-btc1-client" }
 onlyargs = "0.2"
 onlyerror = "0.1"
 error-iter = "0.4"
 ureq = { version = "3", features = ["json"] }
 serde_json = "1"
+secp256k1 = "0.27"
+hex = "0.4"
+esploda = "0.2"
