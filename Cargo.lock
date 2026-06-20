@@ -546,7 +546,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "did-btc1"
+name = "did-btcr2"
 version = "0.1.0"
 dependencies = [
  "base58",
@@ -570,11 +570,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "did-btc1-cli"
+name = "did-btcr2-cli"
 version = "0.1.0"
 dependencies = [
- "did-btc1",
- "did-btc1-client",
+ "did-btcr2",
+ "did-btcr2-client",
  "error-iter",
  "esploda",
  "hex",
@@ -586,11 +586,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "did-btc1-client"
+name = "did-btcr2-client"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
- "did-btc1",
+ "did-btcr2",
  "esploda",
  "hex",
  "http",

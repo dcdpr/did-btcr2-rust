@@ -106,7 +106,7 @@ impl Beacon {
     /// The Bitcoin address this beacon spends from when announcing signals.
     ///
     /// Read-only borrow of the beacon's `serviceEndpoint` address; an
-    /// out-of-crate caller (e.g. the `did-btc1-client` facade) uses it to
+    /// out-of-crate caller (e.g. the `did-btcr2-client` facade) uses it to
     /// discover the UTXOs it must spend. No I/O is performed.
     pub fn address(&self) -> &Address {
         &self.descriptor
@@ -117,7 +117,7 @@ impl Beacon {
         self.ty
     }
 
-    /// The beacon service id (e.g. `did:btc1:k1...#initialP2TR`).
+    /// The beacon service id (e.g. `did:btcr2:k1...#initialP2TR`).
     pub fn id(&self) -> &str {
         &self.id
     }

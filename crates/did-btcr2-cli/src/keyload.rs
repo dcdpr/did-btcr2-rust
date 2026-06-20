@@ -6,10 +6,10 @@
 //!
 //! 1. `--key-file <path>` (a file holding raw 32-byte lowercase hex),
 //! 2. `--key-stdin` (the same hex on stdin),
-//! 3. the `DIDBTC1_KEY` environment variable.
+//! 3. the `DIDBTCR2_KEY` environment variable.
 //!
 //! The beacon key mirrors this trio (`--beacon-key-file` / `--beacon-key-stdin`
-//! / `DIDBTC1_BEACON_KEY`); it defaults to the update key when no
+//! / `DIDBTCR2_BEACON_KEY`); it defaults to the update key when no
 //! beacon-key source is supplied (the same pubkey backs `#initialKey` and all
 //! three default singleton beacons).
 //!
@@ -57,7 +57,7 @@ pub struct KeySource {
     pub file: Option<PathBuf>,
     /// `--key-stdin` (read the key from stdin).
     pub stdin: bool,
-    /// The environment variable consulted last (e.g. `DIDBTC1_KEY`).
+    /// The environment variable consulted last (e.g. `DIDBTCR2_KEY`).
     pub env_var: &'static str,
 }
 
@@ -146,7 +146,7 @@ mod tests {
         } else if let Some(e) = env {
             e.to_string()
         } else {
-            return Err(KeyError::MissingSource("DIDBTC1_KEY"));
+            return Err(KeyError::MissingSource("DIDBTCR2_KEY"));
         };
         parse_secret_hex(raw.trim())
     }
@@ -187,7 +187,7 @@ mod tests {
         let src = KeySource {
             file: None,
             stdin: false,
-            env_var: "DIDBTC1_KEY",
+            env_var: "DIDBTCR2_KEY",
         };
         // No constructor takes a raw hex string; loading with nothing set errors.
         assert!(matches!(src.load(), Err(KeyError::MissingSource(_))));

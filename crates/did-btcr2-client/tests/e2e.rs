@@ -30,10 +30,10 @@ use std::cell::{Cell, RefCell};
 use std::num::NonZeroU64;
 use std::rc::Rc;
 
-use did_btc1::document::{Document, ResolutionOptions, SidecarData};
-use did_btc1::identifier::{Did, Network};
-use did_btc1::key::PublicKey;
-use did_btc1_client::{BtcTransport, Client, Fee, Patch, TransportError};
+use did_btcr2::document::{Document, ResolutionOptions, SidecarData};
+use did_btcr2::identifier::{Did, Network};
+use did_btcr2::key::PublicKey;
+use did_btcr2_client::{BtcTransport, Client, Fee, Patch, TransportError};
 use esploda::bitcoin::Transaction as BitcoinTx;
 use esploda::bitcoin::consensus::encode::deserialize;
 use secp256k1::{Secp256k1, SecretKey};

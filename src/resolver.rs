@@ -5,7 +5,7 @@ use crate::beacon::BeaconType;
 use crate::canonical_hash::CanonicalHash as _;
 use crate::document::{InitialDocument, ResolutionOptions, ResolutionResult, SidecarData};
 use crate::update::UnsecuredUpdate;
-use crate::{error::Btc1Error, identifier::Sha256Hash, update::Update};
+use crate::{error::Btcr2Error, identifier::Sha256Hash, update::Update};
 use chrono::{DateTime, Utc};
 use esploda::bitcoin::{Txid, opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
@@ -23,40 +23,40 @@ pub enum Error {
     /// Late Publishing Error
     LatePublishingError,
 
-    /// DID:BTC1 error
-    Btc1Error(#[from] crate::error::Btc1Error),
+    /// DID:BTCR2 error
+    Btcr2Error(#[from] crate::error::Btcr2Error),
 
     /// Beacon-signal transaction is not confirmed; the spec resolver works in
     /// confirmed-block terms. Unconfirmed-tx feature support is Out of Scope
     /// per PROJECT.md; this variant exists so the singleton-beacon happy path
     /// can return a typed Err instead of panicking.
-    /// Module-local enum only; `Btc1Error` (the spec-error enum) is untouched
+    /// Module-local enum only; `Btcr2Error` (the spec-error enum) is untouched
     #[error("unconfirmed beacon transaction (txid={txid})")]
     UnconfirmedBeaconTx { txid: Txid },
 }
 
 /// Boundary conversion from the module-local resolver [`Error`] to the
-/// spec-error vocabulary [`Btc1Error`]. This lets the resolver hot path
+/// spec-error vocabulary [`Btcr2Error`]. This lets the resolver hot path
 /// surface spec-conformant Problem Details to callers without leaking the
 /// internal sentinel enum.
 ///
 /// Note: `MISSING_UPDATE_DATA` is NOT produced here. The sidecar-miss site in
 /// [`Resolver::process_beacon_signals`] raises
-/// `Btc1Error::MissingUpdateData { update_hash }` directly, because only the
+/// `Btcr2Error::MissingUpdateData { update_hash }` directly, because only the
 /// call site has the missed `update_hash` (the beacon signal bytes) in scope
 /// Routing it through this `From` impl would lose the hash.
-impl From<Error> for Btc1Error {
+impl From<Error> for Btcr2Error {
     fn from(err: Error) -> Self {
         match err {
-            Error::UpdateHashMismatch => Btc1Error::InvalidDidUpdate(
+            Error::UpdateHashMismatch => Btcr2Error::InvalidDidUpdate(
                 "update hash does not match the expected beacon-signal hash".into(),
             ),
-            Error::LatePublishingError => Btc1Error::LatePublishingError(
+            Error::LatePublishingError => Btcr2Error::LatePublishingError(
                 "late publishing detected at update sort step".into(),
             ),
             // Pass-through: the inner spec error is already authoritative.
-            Error::Btc1Error(e) => e,
-            Error::UnconfirmedBeaconTx { txid } => Btc1Error::InvalidSidecarData(format!(
+            Error::Btcr2Error(e) => e,
+            Error::UnconfirmedBeaconTx { txid } => Btcr2Error::InvalidSidecarData(format!(
                 "unconfirmed beacon transaction (txid={txid})"
             )),
         }
@@ -212,7 +212,7 @@ impl Resolver {
                     if update.target_version_id == next_update_version_id {
                         // Step 10.2.1.
                         if update.source_hash != contemporary_hash {
-                            return Err(Btc1Error::late_publishing(
+                            return Err(Btcr2Error::late_publishing(
                                 update.source_hash,
                                 contemporary_hash,
                             ))?;
@@ -387,7 +387,7 @@ impl Resolver {
                         self.update_lookup_table
                             .get(&beacon_signal.signal_bytes)
                             .cloned()
-                            .ok_or(Error::Btc1Error(Btc1Error::MissingUpdateData {
+                            .ok_or(Error::Btcr2Error(Btcr2Error::MissingUpdateData {
                                 update_hash: beacon_signal.signal_bytes,
                             }))?
                     }
@@ -542,7 +542,7 @@ mod tests {
     /// (taken from the existing fixtures and overridden to `confirmed:false`)
     /// and asserts the variant is returned with the txid preserved.
     ///
-    /// `Btc1Error` is untouched.
+    /// `Btcr2Error` is untouched.
     #[test]
     fn unconfirmed_beacon_tx_returns_err() {
         // Start from the real on-disk fixture so the OP_RETURN signal extraction
@@ -657,7 +657,7 @@ mod tests {
 
         assert_eq!(
             result.document.fields.id.encode(),
-            "did:btc1:k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp",
+            "did:btcr2:k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp",
         );
 
         let target_doc = Document::from_json_string(include_str!(concat!(
@@ -872,7 +872,7 @@ mod tests {
         } = result;
         assert_eq!(
             document.fields.id.encode(),
-            "did:btc1:k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp",
+            "did:btcr2:k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp",
         );
         assert_eq!(document_metadata.version_id, NonZeroU64::MIN);
         assert!(!document_metadata.deactivated);
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     /// a beacon signal whose `signal_bytes` is NOT present in
-    /// `update_lookup_table` raises `Btc1Error::MissingUpdateData { update_hash }`
+    /// `update_lookup_table` raises `Btcr2Error::MissingUpdateData { update_hash }`
     /// directly — not a sidecar-not-found sentinel and not a panic.
     ///
     /// Spec: did-btcr2/src/errors.md:21-23 (MISSING_UPDATE_DATA: BTCR2 Update data
@@ -1036,7 +1036,7 @@ mod tests {
             .expect_err("missing update must error");
 
         match err {
-            Error::Btc1Error(Btc1Error::MissingUpdateData { update_hash }) => {
+            Error::Btcr2Error(Btcr2Error::MissingUpdateData { update_hash }) => {
                 assert_eq!(update_hash, missing_hash, "error carries the missed hash");
             }
             other => panic!("expected MissingUpdateData, got {other:?}"),

@@ -1,21 +1,21 @@
-//! Root Capability derivation and management for DID:BTC1
+//! Root Capability derivation and management for DID:BTCR2
 //!
-//! This module implements the algorithms specified in section 11.4 of the DID:BTC1
+//! This module implements the algorithms specified in section 11.4 of the DID:BTCR2
 //! specification for deriving and dereferencing root capabilities.
 
-use crate::error::Btc1Error;
+use crate::error::Btcr2Error;
 use crate::identifier::Did;
 
 pub(crate) mod proof;
 
-/// Derive a root capability from a DID:BTC1 identifier
+/// Derive a root capability from a DID:BTCR2 identifier
 ///
-/// This implements the algorithm from section 9.4.1 of the DID:BTC1 specification:
-/// "Derive Root Capability from did:btc1 Identifier"
+/// This implements the algorithm from section 9.4.1 of the DID:BTCR2 specification:
+/// "Derive Root Capability from did:btcr2 Identifier"
 ///
 /// # Arguments
 ///
-/// * `did_identifier` - The DID:BTC1 identifier (e.g., "did:btc1:k1qqpuww...")
+/// * `did_identifier` - The DID:BTCR2 identifier (e.g., "did:btcr2:k1qqpuww...")
 ///
 /// # Returns
 ///
@@ -31,7 +31,7 @@ pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
 
 /// Dereference a root capability identifier to get the capability object
 ///
-/// This implements the algorithm from section 11.4.2 of the DID:BTC1 specification:
+/// This implements the algorithm from section 11.4.2 of the DID:BTCR2 specification:
 /// "Dereference Root Capability Identifier"
 ///
 /// # Arguments
@@ -42,16 +42,16 @@ pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
 ///
 /// * `Ok(Did)` - The dereferenced root capability as a did
 /// * `Err(Error)` - If the capability ID is invalid
-pub(crate) fn dereference_root_capability(capability_id: &str) -> Result<Did, Btc1Error> {
+pub(crate) fn dereference_root_capability(capability_id: &str) -> Result<Did, Btcr2Error> {
     let Some(did_identifier_str) = capability_id.strip_prefix("urn:zcap:root:") else {
-        return Err(Btc1Error::Zcap("invalid root capability".into()));
+        return Err(Btcr2Error::Zcap("invalid root capability".into()));
     };
 
     let did = urlencoding::decode(did_identifier_str)
-        .map_err(|e| Btc1Error::Zcap(format!("Failed to decode DID from capability ID: {e:?}")))?;
+        .map_err(|e| Btcr2Error::Zcap(format!("Failed to decode DID from capability ID: {e:?}")))?;
 
     did.parse()
-        .map_err(|err| Btc1Error::Zcap(format!("Invalid DID in root capability: {err}")))
+        .map_err(|err| Btcr2Error::Zcap(format!("Invalid DID in root capability: {err}")))
 }
 
 #[cfg(test)]
@@ -59,8 +59,8 @@ mod tests {
     use super::*;
 
     const TEST_DID: &str =
-        "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
-    const TEST_CAP_ID: &str = "urn:zcap:root:did%3Abtc1%3Ak1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+        "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+    const TEST_CAP_ID: &str = "urn:zcap:root:did%3Abtcr2%3Ak1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
 
     #[test]
     fn test_dereference_root_capability() {

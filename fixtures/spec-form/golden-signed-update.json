@@ -9,7 +9,7 @@
     {
       "op": "add",
       "path": "/assertionMethod/-",
-      "value": "did:btc1:k1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku#initialKey"
+      "value": "did:btcr2:k1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku#initialKey"
     }
   ],
   "proof": {
@@ -19,15 +19,15 @@
       "https://w3id.org/json-ld-patch/v1",
       "https://btcr2.dev/context/v1"
     ],
-    "capability": "urn:zcap:root:did%3Abtc1%3Ak1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku",
+    "capability": "urn:zcap:root:did%3Abtcr2%3Ak1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku",
     "capabilityAction": "Write",
     "cryptosuite": "bip340-jcs-2025",
     "proofPurpose": "capabilityInvocation",
-    "proofValue": "ziMCWoUq5LAufGXCPCHxYBGzALCwD9ZkqC4ELteT8aAz36FiPaZGTMurTRKxc3vJR16cafY9m65ysFwJTfatRMZk",
+    "proofValue": "z71KKjkrP8nKj6J8cNm9eS9oGk3fYTGQwABFBYvKLRMSo1YXLXZqEdMY3vdrji4sXAUDDxcB4w89nHWDMepxCsQn",
     "type": "DataIntegrityProof",
-    "verificationMethod": "did:btc1:k1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku#initialKey"
+    "verificationMethod": "did:btcr2:k1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku#initialKey"
   },
-  "sourceHash": "3KIjwOPyRHVcF_f0iUareqlQIqoCcgA8q5lfXGQ-5wQ",
-  "targetHash": "VFfppz1TIIIPxnSsDyEhW4ZSKrL3UWVguYSQX8sJczQ",
+  "sourceHash": "rq4utkBkFGZBYCIAnIUyRT-FYq0hK_p1q0OXmwzvDmc",
+  "targetHash": "0EDRJrOL5tV6yWqp1EH5F2bSy_zTUjKxlAREnguN5b8",
   "targetVersionId": 2
 }

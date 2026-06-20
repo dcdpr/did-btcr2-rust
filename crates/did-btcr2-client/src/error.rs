@@ -1,4 +1,4 @@
-//! Error types for the `did-btc1-client` facade.
+//! Error types for the `did-btcr2-client` facade.
 //!
 //! Two layers, mirroring the CLI's `CliRunError` shape: [`TransportError`] for
 //! the HTTP seam (a genuine network failure, an I/O read error, or a typed
@@ -44,16 +44,16 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     /// An error constructing the resolver or applying an update in the core.
-    Core(#[from] did_btc1::document::Error),
+    Core(#[from] did_btcr2::document::Error),
 
-    /// A spec-level (`did:btc1`) error from the core.
-    Btc1(#[from] did_btc1::error::Btc1Error),
+    /// A spec-level (`did:btcr2`) error from the core.
+    Btcr2(#[from] did_btcr2::error::Btcr2Error),
 
     /// An error stepping the resolver FSM in the core.
-    Resolver(#[from] did_btc1::resolver::Error),
+    Resolver(#[from] did_btcr2::resolver::Error),
 
     /// An invalid DID identifier.
-    Identifier(#[from] did_btc1::identifier::Error),
+    Identifier(#[from] did_btcr2::identifier::Error),
 
     /// An unrecognized `--network` value.
     #[error("unknown network '{0}'. Expected testnet, signet, mainnet, or mutinynet")]
@@ -76,7 +76,7 @@ pub enum Error {
     NoBeacon,
 
     /// Building or signing the beacon announcement transaction failed.
-    Announce(#[from] did_btc1::beacon::AnnounceError),
+    Announce(#[from] did_btcr2::beacon::AnnounceError),
 
     /// The `/fee-estimates` endpoint did not return a rate for the requested
     /// conf-target (A3 — error, do NOT silently low-ball with a default rate).

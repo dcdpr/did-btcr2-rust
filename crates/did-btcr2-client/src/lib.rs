@@ -1,8 +1,8 @@
-//! `did-btc1-client` — the I/O-bearing four-operation facade over the sans-I/O
-//! `did-btc1` core.
+//! `did-btcr2-client` — the I/O-bearing four-operation facade over the sans-I/O
+//! `did-btcr2` core.
 //!
-//! The core crate (`did-btc1`) is sans-I/O: it never makes a network call. The
-//! standard `did:btc1` operations, however, imply I/O — `resolve` fetches beacon
+//! The core crate (`did-btcr2`) is sans-I/O: it never makes a network call. The
+//! standard `did:btcr2` operations, however, imply I/O — `resolve` fetches beacon
 //! signals from an Esplora endpoint, `update`/`deactivate` broadcast a beacon
 //! announcement. This crate composes those operations on top of the core,
 //! routing every HTTP call through the [`BtcTransport`] seam so the same
@@ -29,8 +29,8 @@ pub use transport::{BtcTransport, UreqTransport};
 pub use url::{network_base_url, resolve_base_url};
 
 // Re-export the resolve option/result surface a facade caller needs, so callers
-// do not depend on `did-btc1` paths directly for the common case.
-pub use did_btc1::document::{ResolutionOptions, ResolutionResult};
+// do not depend on `did-btcr2` paths directly for the common case.
+pub use did_btcr2::document::{ResolutionOptions, ResolutionResult};
 
 // Re-export `Patch` (the RFC-6902 update patch type) so an `update` caller can
 // name the parameter without depending on `json-patch` directly.

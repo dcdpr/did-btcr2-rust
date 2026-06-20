@@ -1,7 +1,7 @@
 #![warn(clippy::unwrap_used)]
 
 use crate::zcap::proof::Proof;
-use crate::{canonical_hash::CanonicalHash, error::Btc1Error, identifier::Sha256Hash, json_tools};
+use crate::{canonical_hash::CanonicalHash, error::Btcr2Error, identifier::Sha256Hash, json_tools};
 use json_patch::Patch;
 use onlyerror::Error;
 use serde_json::Value;
@@ -81,11 +81,11 @@ impl Update {
     }
 
     // Spec section 7.2.2.4
-    pub(crate) fn confirm_duplicate(&self, hash_history: &[Sha256Hash]) -> Result<(), Btc1Error> {
+    pub(crate) fn confirm_duplicate(&self, hash_history: &[Sha256Hash]) -> Result<(), Btcr2Error> {
         let update_hash = UnsecuredUpdate::from(self).hash();
         // target_version_id is u64; on 32-bit hosts a sufficiently long update
         // history would overflow usize. Legitimately fallible -> Result.
-        // Btc1Error::InvalidDidUpdate is the closest existing variant; we do
+        // Btcr2Error::InvalidDidUpdate is the closest existing variant; we do
         // not introduce a new error variant here.
         //
         // checked_sub(2) also defends against the prior u64 underflow when
@@ -95,23 +95,23 @@ impl Update {
         let update_hash_index = u64::from(self.target_version_id)
             .checked_sub(2)
             .ok_or_else(|| {
-                Btc1Error::InvalidDidUpdate(
+                Btcr2Error::InvalidDidUpdate(
                     "target_version_id must be >= 2 for duplicate-check; got 1".into(),
                 )
             })?;
         let update_hash_index = usize::try_from(update_hash_index).map_err(|_| {
-            Btc1Error::InvalidDidUpdate(
+            Btcr2Error::InvalidDidUpdate(
                 "target_version_id overflows usize on this host (32-bit limit)".into(),
             )
         })?;
         let historical_update_hash = *hash_history.get(update_hash_index).ok_or_else(|| {
-            Btc1Error::InvalidDidUpdate(
+            Btcr2Error::InvalidDidUpdate(
                 "duplicate-check index past end of update hash history".into(),
             )
         })?;
 
         if historical_update_hash != update_hash {
-            Err(Btc1Error::late_publishing(
+            Err(Btcr2Error::late_publishing(
                 update_hash,
                 historical_update_hash,
             ))
@@ -391,7 +391,7 @@ mod tests {
     ///
     /// The first update in `sidecar-two-updates.json` carries
     /// `targetVersionId: 2` → index 0; an EMPTY `hash_history` makes `0 >= 0`, the
-    /// out-of-range path. Must return `Err(Btc1Error::InvalidDidUpdate(_))`, never
+    /// out-of-range path. Must return `Err(Btcr2Error::InvalidDidUpdate(_))`, never
     /// a panic and never `LatePublishingError` (which is only reachable once the
     /// index is in range).
     #[test]
@@ -410,7 +410,7 @@ mod tests {
             .expect_err("out-of-range index must error, not panic");
 
         match err {
-            Btc1Error::InvalidDidUpdate(_) => {}
+            Btcr2Error::InvalidDidUpdate(_) => {}
             other => panic!("expected InvalidDidUpdate, got {other:?}"),
         }
     }

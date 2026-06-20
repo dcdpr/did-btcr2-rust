@@ -1,13 +1,13 @@
 #![warn(clippy::unwrap_used)]
-//! # DID:BTC1 Encoding
+//! # DID:BTCR2 Encoding
 //!
-//! This crate provides encoding and decoding functionality for DID:BTC1 identifiers
-//! as specified in the DID:BTC1 DID Method Specification.
+//! This crate provides encoding and decoding functionality for DID:BTCR2 identifiers
+//! as specified in the DID:BTCR2 DID Method Specification.
 //!
-//! ## DID:BTC1 Identifier Format
+//! ## DID:BTCR2 Identifier Format
 //!
-//! A DID:BTC1 identifier consists of:
-//! - `did:btc1:` prefix
+//! A DID:BTCR2 identifier consists of:
+//! - `did:btcr2:` prefix
 //! - Bech32m-encoded data containing:
 //!   - Version (4 bits)
 //!   - Network identifier (4 bits)
@@ -16,11 +16,11 @@
 //! ## Examples
 //!
 //! ```rust
-//! use did_btc1::identifier::{Network, IdType, Error, DidVersion, Did};
-//! use did_btc1::key::{PublicKeyExt};
+//! use did_btcr2::identifier::{Network, IdType, Error, DidVersion, Did};
+//! use did_btcr2::key::{PublicKeyExt};
 //!
 //! // Parse a DID identifier
-//! let didstr = "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+//! let didstr = "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
 //!
 //! let did: Did = didstr.parse()?;
 //!
@@ -46,8 +46,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 
-/// The DID method prefix for BTC1 identifiers
-pub const DID_BTC1_PREFIX: &str = "did:btc1:";
+/// The DID method prefix for BTCR2 identifiers
+pub const DID_BTCR2_PREFIX: &str = "did:btcr2:";
 
 /// Human-readable part for key-based DID identifiers
 pub const HRP_KEY: &str = "k";
@@ -175,7 +175,7 @@ impl TryNetworkExt for Did {
     }
 }
 
-/// DID:BTC1 encoding version
+/// DID:BTCR2 encoding version
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum DidVersion {
     #[default]
@@ -199,7 +199,7 @@ impl From<DidVersion> for u8 {
     }
 }
 
-/// Bitcoin networks supported by DID:BTC1
+/// Bitcoin networks supported by DID:BTCR2
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Network {
@@ -379,7 +379,7 @@ impl IdType {
     }
 }
 
-/// Components of a parsed DID:BTC1 identifier
+/// Components of a parsed DID:BTCR2 identifier
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DidComponents {
     /// Specification version (1-16)
@@ -413,7 +413,7 @@ impl DidComponents {
     }
 }
 
-/// Parse a DID:BTC1 identifier string into its components
+/// Parse a DID:BTCR2 identifier string into its components
 ///
 /// # Arguments
 ///
@@ -427,9 +427,9 @@ impl DidComponents {
 /// # Examples
 ///
 /// ```rust
-/// use did_btc1::identifier::{parse_did_identifier, Network, IdType, Error, DidVersion};
+/// use did_btcr2::identifier::{parse_did_identifier, Network, IdType, Error, DidVersion};
 ///
-/// let did = "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+/// let did = "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
 /// let components = parse_did_identifier(did)?;
 ///
 /// assert_eq!(components.version(), DidVersion::One);
@@ -439,14 +439,14 @@ impl DidComponents {
 /// ```
 pub fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
     // Check DID prefix
-    if !did.starts_with(DID_BTC1_PREFIX) {
+    if !did.starts_with(DID_BTCR2_PREFIX) {
         return Err(Error::InvalidDidFormat(format!(
-            "DID must start with '{DID_BTC1_PREFIX}'",
+            "DID must start with '{DID_BTCR2_PREFIX}'",
         )));
     }
 
     // Extract the bech32 part
-    let bech32_part = &did[DID_BTC1_PREFIX.len()..];
+    let bech32_part = &did[DID_BTCR2_PREFIX.len()..];
 
     // Decode the bech32 string
     let decoded = decode(bech32_part)?;
@@ -464,7 +464,7 @@ pub fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
     Ok(DidComponents::new(version.try_into()?, network, id_type))
 }
 
-/// Encode DID components into a DID:BTC1 identifier string
+/// Encode DID components into a DID:BTCR2 identifier string
 ///
 /// # Arguments
 ///
@@ -503,7 +503,7 @@ fn encode_did_identifier(
     let bech32_part = encode(id_type.hrp(), &data)?;
 
     // Construct full DID
-    Ok(format!("{DID_BTC1_PREFIX}{bech32_part}"))
+    Ok(format!("{DID_BTCR2_PREFIX}{bech32_part}"))
 }
 
 #[cfg(test)]
@@ -560,7 +560,7 @@ mod tests {
 
         let did_str = encode_did_identifier(DidVersion::One, Network::Mainnet, key).unwrap();
 
-        assert!(did_str.starts_with("did:btc1:k1"));
+        assert!(did_str.starts_with("did:btcr2:k1"));
 
         let components = parse_did_identifier(&did_str).unwrap();
         assert_eq!(u8::from(components.version), 1);
@@ -586,7 +586,7 @@ mod tests {
         data.extend_from_slice(&bad_payload);
 
         let bech32_part = encode(HRP_KEY, &data).expect("HRP and data are valid bech32m inputs");
-        let did_str = format!("{DID_BTC1_PREFIX}{bech32_part}");
+        let did_str = format!("{DID_BTCR2_PREFIX}{bech32_part}");
 
         // Must fail to parse — and specifically with InvalidPublicKeyPoint.
         let err = did_str
@@ -604,7 +604,7 @@ mod tests {
 
         let did = encode_did_identifier(DidVersion::One, Network::Signet, hash).unwrap();
 
-        assert!(did.starts_with("did:btc1:x1"));
+        assert!(did.starts_with("did:btcr2:x1"));
 
         let components = parse_did_identifier(&did).unwrap();
         assert_eq!(u8::from(components.version), 1);
@@ -616,6 +616,13 @@ mod tests {
     fn test_invalid_prefix() {
         let result = parse_did_identifier("did:example:123");
         assert!(matches!(result, Err(Error::InvalidDidFormat(_))));
+
+        // the old on-wire prefix `did:btc1:` is hard-rejected with a typed
+        // error (no back-compat acceptance path), never a panic.
+        let legacy = parse_did_identifier(
+            "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx",
+        );
+        assert!(matches!(legacy, Err(Error::InvalidDidFormat(_))));
     }
 
     #[test]

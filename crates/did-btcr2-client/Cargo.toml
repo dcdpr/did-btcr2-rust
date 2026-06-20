@@ -1,11 +1,11 @@
 [package]
-name = "did-btc1-client"
+name = "did-btcr2-client"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-did-btc1 = { path = "../.." }
+did-btcr2 = { path = "../.." }
 esploda = "0.2"
 ureq = { version = "3", features = ["json"] }
 http = "1"

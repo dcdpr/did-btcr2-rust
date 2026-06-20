@@ -9,14 +9,14 @@
 //! measured transaction vsize.
 //!
 //! Coin-selection target: the target is `needed = absolute_fee`
-//! ONLY — NOT `fee + dust`. The core [`announce_singleton`](did_btc1::Update::announce_singleton)
+//! ONLY — NOT `fee + dust`. The core [`announce_singleton`](did_btcr2::Update::announce_singleton)
 //! folds sub-dust change into the fee (verified update.rs:139-213), so a UTXO that
 //! covers exactly the fee (leaving sub-dust change) is fundable and must not be
 //! rejected.
 
 use std::collections::BTreeMap;
 
-use did_btc1::Prevout;
+use did_btcr2::Prevout;
 use esploda::bitcoin::{OutPoint, ScriptBuf, Txid};
 use serde::Deserialize;
 

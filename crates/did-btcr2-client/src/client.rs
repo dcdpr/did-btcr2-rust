@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
-use did_btc1::document::{Document, InitialDocument, ResolutionOptions, ResolutionResult};
-use did_btc1::identifier::{Did, DidComponents, DidVersion, IdType, Network};
-use did_btc1::key::PublicKey;
-use did_btc1::resolver::ResolverState;
-use did_btc1::{SignedBeaconTx, Update};
+use did_btcr2::document::{Document, InitialDocument, ResolutionOptions, ResolutionResult};
+use did_btcr2::identifier::{Did, DidComponents, DidVersion, IdType, Network};
+use did_btcr2::key::PublicKey;
+use did_btcr2::resolver::ResolverState;
+use did_btcr2::{SignedBeaconTx, Update};
 use esploda::bitcoin::{Address, Txid};
 use esploda::esplora::Transaction;
 use json_patch::Patch;
@@ -25,7 +25,7 @@ use crate::funding::{self, Fee};
 use crate::transport::BtcTransport;
 use crate::url::resolve_base_url;
 
-/// The `did:btc1` client facade.
+/// The `did:btcr2` client facade.
 ///
 /// Holds the Esplora base URL and an injected [`BtcTransport`]. The transport is
 /// a type parameter so a production [`UreqTransport`](crate::transport::UreqTransport)
@@ -70,7 +70,7 @@ impl<T: BtcTransport> Client<T> {
         Ok(Document::from(initial))
     }
 
-    /// Resolve a `did:btc1` identifier to the spec resolution triple.
+    /// Resolve a `did:btcr2` identifier to the spec resolution triple.
     ///
     /// Fetches the chain-tip height (a hard, propagated fetch — a None tip
     /// silently weakens confirmation reporting), then drives the sans-I/O
@@ -134,7 +134,7 @@ impl<T: BtcTransport> Client<T> {
     /// UTXOs, defaults the change address back to the beacon address
     /// resolves the [`Fee`] and selects funding inputs per the bounded
     /// single-input contract, and feeds the result to the core
-    /// [`announce_singleton`](did_btc1::Update::announce_singleton). For a rate
+    /// [`announce_singleton`](did_btcr2::Update::announce_singleton). For a rate
     /// fee the transaction is built twice: once with a provisional fee to measure
     /// the real vsize, then again with the exact `ceil(rate * vsize)` fee on the
     /// SAME single prevout (no divergence between the measured and broadcast tx).
@@ -323,8 +323,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use did_btc1::identifier::Network;
-    use did_btc1::key::PublicKey;
+    use did_btcr2::identifier::Network;
+    use did_btcr2::key::PublicKey;
     use secp256k1::{Secp256k1, SecretKey};
 
     use super::*;
@@ -827,8 +827,8 @@ mod tests {
             )
             .expect_err("update on a deactivated document is rejected before broadcast");
 
-        // The core Guard 0 surfaces as Error::Btc1; no broadcast occurred.
-        assert!(matches!(err, Error::Btc1(_)), "got {err:?}");
+        // The core Guard 0 surfaces as Error::Btcr2; no broadcast occurred.
+        assert!(matches!(err, Error::Btcr2(_)), "got {err:?}");
         assert_eq!(
             client.transport.post_tx_count(),
             0,

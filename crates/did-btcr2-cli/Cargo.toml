@@ -1,16 +1,16 @@
 [package]
-name = "did-btc1-cli"
+name = "did-btcr2-cli"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "did-btc1"
+name = "did-btcr2"
 path = "src/main.rs"
 
 [dependencies]
-did-btc1 = { path = "../.." }
-did-btc1-client = { path = "../did-btc1-client" }
+did-btcr2 = { path = "../.." }
+did-btcr2-client = { path = "../did-btcr2-client" }
 onlyargs = "0.2"
 onlyerror = "0.1"
 error-iter = "0.4"

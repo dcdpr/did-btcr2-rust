@@ -7,7 +7,7 @@
 
 use crate::update::{UnsecuredUpdate, Update};
 use crate::zcap::proof::{Proof, ProofInner, ProofPurpose, ProofValue};
-use crate::{error::Btc1Error, identifier::Sha256Hash, key::PublicKey};
+use crate::{error::Btcr2Error, identifier::Sha256Hash, key::PublicKey};
 use multibase::{Base, decode, encode};
 use secp256k1::schnorr::Signature;
 use secp256k1::{KeyPair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
@@ -23,7 +23,7 @@ impl CryptoSuite {
         unsecured_update: &UnsecuredUpdate,
         mut inner: ProofInner,
         secret_key: SecretKey,
-    ) -> Result<Proof, Btc1Error> {
+    ) -> Result<Proof, Btcr2Error> {
         // Add document context to proof if present
         if let Some(context) = unsecured_update.as_ref()["@context"].as_array() {
             inner.context = context
@@ -62,10 +62,10 @@ impl CryptoSuite {
         public_key: PublicKey,
         update: &Update,
         expected_proof_purpose: &ProofPurpose,
-    ) -> Result<(), Btc1Error> {
+    ) -> Result<(), Btcr2Error> {
         // Step 5
         if &update.proof.inner.proof_purpose != expected_proof_purpose {
-            return Err(Btc1Error::ProofVerification(format!(
+            return Err(Btcr2Error::ProofVerification(format!(
                 "Proof purpose was expected to be {expected_proof_purpose}"
             )));
         }
@@ -75,7 +75,7 @@ impl CryptoSuite {
     }
 
     // bip340 cryptosuite spec Section 3.3.2
-    fn verify_proof(&self, public_key: PublicKey, update: &Update) -> Result<(), Btc1Error> {
+    fn verify_proof(&self, public_key: PublicKey, update: &Update) -> Result<(), Btcr2Error> {
         // Compare @context FIRST (before any expensive crypto). Per VC Data
         // Integrity, the proof's @context MUST exactly match the secured
         // document's @context — both length and elementwise. The previous
@@ -89,7 +89,7 @@ impl CryptoSuite {
         match update.as_ref()["@context"].as_array() {
             Some(context) => {
                 if context.len() != update.proof.inner.context.len() {
-                    return Err(Btc1Error::InvalidUpdateProof(
+                    return Err(Btcr2Error::InvalidUpdateProof(
                         "Proof context length does not match update context length".into(),
                     ));
                 }
@@ -103,14 +103,14 @@ impl CryptoSuite {
                 );
 
                 if !contexts_are_equal {
-                    return Err(Btc1Error::InvalidUpdateProof(
+                    return Err(Btcr2Error::InvalidUpdateProof(
                         "Proof context does not match update context".into(),
                     ));
                 }
             }
             None => {
                 if !update.proof.inner.context.is_empty() {
-                    return Err(Btc1Error::InvalidUpdateProof(
+                    return Err(Btcr2Error::InvalidUpdateProof(
                         "Update has no @context but proof carries a non-empty @context".into(),
                     ));
                 }
@@ -169,7 +169,7 @@ impl CryptoSuite {
         &self,
         hash_data: Sha256Hash,
         secret_key: SecretKey,
-    ) -> Result<Signature, Btc1Error> {
+    ) -> Result<Signature, Btcr2Error> {
         bip340_sign(hash_data, secret_key)
     }
 
@@ -179,14 +179,14 @@ impl CryptoSuite {
         hash_data: Sha256Hash,
         proof_bytes: Signature,
         public_key: PublicKey,
-    ) -> Result<(), Btc1Error> {
+    ) -> Result<(), Btcr2Error> {
         // Verify signature
         bip340_verify(hash_data, proof_bytes, &public_key.x_only_public_key().0)
     }
 }
 
 /// Sign data using BIP340 Schnorr signatures
-fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signature, Btc1Error> {
+fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signature, Btcr2Error> {
     let secp = Secp256k1::new();
 
     // Create message object from hash
@@ -210,7 +210,7 @@ fn bip340_verify(
     message_hash: Sha256Hash,
     signature: Signature,
     public_key: &XOnlyPublicKey,
-) -> Result<(), Btc1Error> {
+) -> Result<(), Btcr2Error> {
     let secp = Secp256k1::new();
 
     // Create message object from hash
@@ -219,7 +219,7 @@ fn bip340_verify(
 
     // Verify signature
     secp.verify_schnorr(&signature, &message, public_key)
-        .map_err(|_| Btc1Error::InvalidUpdateProof("Verification failed".into()))
+        .map_err(|_| Btcr2Error::InvalidUpdateProof("Verification failed".into()))
 }
 
 /// Encode binary data using Multibase (base58-btc)
@@ -228,23 +228,23 @@ fn multibase_encode(signature: Signature) -> ProofValue {
 }
 
 /// Decode multibase encoded string
-fn multibase_decode(proof_value: &ProofValue) -> Result<Signature, Btc1Error> {
+fn multibase_decode(proof_value: &ProofValue) -> Result<Signature, Btcr2Error> {
     // The producer pins `proofValue` to base58-btc (`multibase_encode`), and the
     // cryptosuite (data-structures.md) requires base58-btc. `multibase::decode`
     // accepts *any* multibase prefix, so we must reject a signature re-encoded in
     // a different base (e.g. base64url `u…`, base16 `f…`); accepting those would
     // weaken canonicalization of the signed artifact.
     let (base, decoded) = decode(&proof_value.0)
-        .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))?;
+        .map_err(|_| Btcr2Error::ProofVerification("Invalid proofValue encoding".into()))?;
 
     if base != Base::Base58Btc {
-        return Err(Btc1Error::ProofVerification(
+        return Err(Btcr2Error::ProofVerification(
             "proofValue must be base58-btc multibase".into(),
         ));
     }
 
     Signature::from_slice(&decoded)
-        .map_err(|_| Btc1Error::ProofVerification("Invalid proofValue encoding".into()))
+        .map_err(|_| Btcr2Error::ProofVerification("Invalid proofValue encoding".into()))
 }
 
 #[cfg(test)]
@@ -410,7 +410,7 @@ mod tests {
             .verify_proof(dummy_public_key(), &update)
             .expect_err("prefix-context forgery must be rejected");
         match err {
-            Btc1Error::InvalidUpdateProof(msg) => {
+            Btcr2Error::InvalidUpdateProof(msg) => {
                 assert!(
                     msg.contains("length"),
                     "expected length-mismatch message, got: {msg}"
@@ -448,7 +448,7 @@ mod tests {
         let err_base64 = multibase_decode(&ProofValue(base64url))
             .expect_err("non-base58-btc multibase must be rejected");
         match err_base64 {
-            Btc1Error::ProofVerification(msg) => assert!(
+            Btcr2Error::ProofVerification(msg) => assert!(
                 msg.contains("base58-btc"),
                 "expected base58-btc requirement message, got: {msg}"
             ),
@@ -473,7 +473,7 @@ mod tests {
             .verify_proof(dummy_public_key(), &update)
             .expect_err("non-base58-btc proofValue must be rejected");
         match err {
-            Btc1Error::ProofVerification(msg) => assert!(
+            Btcr2Error::ProofVerification(msg) => assert!(
                 msg.contains("base58-btc"),
                 "expected base58-btc requirement message, got: {msg}"
             ),
@@ -498,6 +498,6 @@ mod tests {
         let err = suite
             .verify_proof(dummy_public_key(), &update)
             .expect_err("proof with @context but update without must be rejected");
-        assert!(matches!(err, Btc1Error::InvalidUpdateProof(_)));
+        assert!(matches!(err, Btcr2Error::InvalidUpdateProof(_)));
     }
 }

@@ -1,15 +1,15 @@
-//! `did-btc1` — command-line client for the `did:btc1` DID method.
+//! `did-btcr2` — command-line client for the `did:btcr2` DID method.
 //!
-//! This binary is a thin shell over the `did-btc1-client` facade. It parses
+//! This binary is a thin shell over the `did-btcr2-client` facade. It parses
 //! subcommands and loads input (DIDs, patch files, secret
-//! keys) and then dispatches into [`did_btc1_client::Client`], which owns all
+//! keys) and then dispatches into [`did_btcr2_client::Client`], which owns all
 //! operation composition: the resolver FSM loop, beacon funding, fee resolution,
 //! and broadcast. The CLI carries NO FSM pump, no UTXO/fee math, and no
-//! announce/broadcast logic of its own; the sans-I/O core (`did-btc1`) makes no
+//! announce/broadcast logic of its own; the sans-I/O core (`did-btcr2`) makes no
 //! network calls, and all HTTP lives behind the facade's transport seam.
 
-use did_btc1::{ResolutionResult, document::SidecarData};
-use did_btc1_client::{BtcTransport, Client, Fee, ResolutionOptions, UreqTransport};
+use did_btcr2::{ResolutionResult, document::SidecarData};
+use did_btcr2_client::{BtcTransport, Client, Fee, ResolutionOptions, UreqTransport};
 use error_iter::ErrorIter as _;
 use onlyargs::{CliError, OnlyArgs, traits::*};
 use onlyerror::Error;
@@ -114,11 +114,11 @@ enum CliRunError {
     Cli(#[from] CliError),
 
     /// Invalid DID identifier.
-    DidParse(#[from] did_btc1::identifier::Error),
+    DidParse(#[from] did_btcr2::identifier::Error),
 
-    /// An error from the `did-btc1-client` facade (resolve/update/deactivate:
+    /// An error from the `did-btcr2-client` facade (resolve/update/deactivate:
     /// transport, funding, broadcast, or a core composition error).
-    Client(#[from] did_btc1_client::Error),
+    Client(#[from] did_btcr2_client::Error),
 
     /// Secret-key loading error (file/stdin/env, hex decode, key validity).
     Key(#[from] keyload::KeyError),
@@ -149,29 +149,29 @@ impl OnlyArgs for Args {
             " v",
             env!("CARGO_PKG_VERSION"),
             "\n",
-            "Command-line client for the did:btc1 DID method.\n\n",
-            "Usage:\n  did-btc1 [flags] <command> [command args]\n",
+            "Command-line client for the did:btcr2 DID method.\n\n",
+            "Usage:\n  did-btcr2 [flags] <command> [command args]\n",
             "\nFlags:\n",
             "  -h --help     Show this help message.\n",
             "  -V --version  Show the application version.\n",
             "\nCommands:\n",
-            "  resolve <did>                Resolve a did:btc1 identifier and print the\n",
+            "  resolve <did>                Resolve a did:btcr2 identifier and print the\n",
             "                               DID resolution result as JSON.\n",
             "    --network <net>             Network: testnet (default), signet, mainnet,\n",
             "                                or mutinynet.\n",
             "    --esplora-url <url>         Esplora base URL override (no trailing slash).\n",
             "    --sidecar <file>            Path to a sidecar data JSON file.\n",
             "\n",
-            "  update <did>                 Update a did:btc1 document via a beacon signal.\n",
+            "  update <did>                 Update a did:btcr2 document via a beacon signal.\n",
             "    --patch <file.json>         REQUIRED. RFC-6902 JSON Patch to apply.\n",
             "    --vm <id>                   Verification method id to sign with\n",
             "                                (default: <did>#initialKey).\n",
             "    --key-file <file>           Secret key file (raw 32-byte lowercase hex).\n",
             "    --key-stdin                 Read the secret key from stdin.\n",
-            "                                (or set DIDBTC1_KEY)\n",
+            "                                (or set DIDBTCR2_KEY)\n",
             "    --beacon-key-file <file>    Beacon secret key file (defaults to the key).\n",
             "    --beacon-key-stdin          Read the beacon secret key from stdin.\n",
-            "                                (or set DIDBTC1_BEACON_KEY)\n",
+            "                                (or set DIDBTCR2_BEACON_KEY)\n",
             "    --fee <sats>                Absolute fee in satoshis.\n",
             "    --feerate <sat/vB>          Fee rate (single-input only).\n",
             "    --change <addr>             Change address (defaults to the beacon address).\n",
@@ -180,7 +180,7 @@ impl OnlyArgs for Args {
             "    --yes                       Skip the broadcast confirm prompt.\n",
             "    --network / --esplora-url / --sidecar   As for resolve.\n",
             "\n",
-            "  deactivate <did>             Deactivate a did:btc1 document via a beacon\n",
+            "  deactivate <did>             Deactivate a did:btcr2 document via a beacon\n",
             "                               signal. Same key/fee/broadcast flags as update.\n",
         );
         println!("{help_text}");
@@ -379,7 +379,7 @@ fn beacon_index(beacon: Option<&str>) -> Result<usize, CliRunError> {
         Some("P2PKH") => Ok(0),
         Some("P2TR") => Ok(2),
         Some(other) => Err(CliRunError::Client(
-            did_btc1_client::Error::UnknownBeaconType(other.to_string()),
+            did_btcr2_client::Error::UnknownBeaconType(other.to_string()),
         )),
     }
 }
@@ -407,7 +407,7 @@ fn run_resolve(
     esplora_url: Option<String>,
     sidecar: Option<PathBuf>,
 ) -> Result<(), CliRunError> {
-    let did: did_btc1::identifier::Did = did_str.parse()?;
+    let did: did_btcr2::identifier::Did = did_str.parse()?;
     let opts = load_sidecar(sidecar)?;
     let client = Client::with_network(
         network.unwrap_or("testnet"),
@@ -469,14 +469,14 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
         KeySource {
             file: d.beacon_key_file,
             stdin: d.beacon_key_stdin,
-            env_var: "DIDBTC1_BEACON_KEY",
+            env_var: "DIDBTCR2_BEACON_KEY",
         }
         .load()?
     } else {
         update_sk
     };
 
-    let did: did_btc1::identifier::Did = d.did.parse()?;
+    let did: did_btcr2::identifier::Did = d.did.parse()?;
     let vm_id = d
         .vm_id
         .unwrap_or_else(|| format!("{}#initialKey", did.encode()));
@@ -487,7 +487,7 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
             // The change output is spent on the DID's network, so the --change
             // address must match it (nothing downstream re-checks this).
             let btc_network = esploda::bitcoin::Network::try_from(did.components().network())
-                .map_err(did_btc1_client::Error::from)?;
+                .map_err(did_btcr2_client::Error::from)?;
             Some(parse_change_address(&addr, btc_network)?)
         }
         None => None,
@@ -521,7 +521,7 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
 /// [`execute_write`] can be driven by either the production transport or an
 /// in-process fake.
 struct WriteParams {
-    did: did_btc1::identifier::Did,
+    did: did_btcr2::identifier::Did,
     /// `Some(path)` for update; `None` for deactivate.
     patch: Option<PathBuf>,
     vm_id: String,
@@ -549,19 +549,21 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
     // resolves to its true current state before the next update is built.
     let current = client.resolve(&p.did, load_sidecar(p.sidecar)?)?;
     let current_version_id = current.document_metadata.version_id;
-    let doc = did_btc1::Document::from_json_value(current.document.as_ref().clone())
-        .map_err(did_btc1_client::Error::from)?;
+    let doc = did_btcr2::Document::from_json_value(current.document.as_ref().clone())
+        .map_err(did_btcr2_client::Error::from)?;
     let target = current_version_id
         .checked_add(1)
         .ok_or(CliRunError::Client(
-            did_btc1_client::Error::VersionIdOverflow,
+            did_btcr2_client::Error::VersionIdOverflow,
         ))?;
 
     // Read the patch once (update only); deactivate has an implicit patch.
     let patch = match &p.patch {
         Some(path) => {
             let patch_json = std::fs::read_to_string(path)?;
-            Some(serde_json::from_str::<did_btc1_client::Patch>(&patch_json)?)
+            Some(serde_json::from_str::<did_btcr2_client::Patch>(
+                &patch_json,
+            )?)
         }
         None => None,
     };
@@ -571,10 +573,10 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
     let signed = match patch.clone() {
         Some(patch) => doc
             .construct_signed_update(patch, target, &p.vm_id, p.update_sk)
-            .map_err(did_btc1_client::Error::from)?,
+            .map_err(did_btcr2_client::Error::from)?,
         None => doc
             .deactivate(&p.vm_id, p.update_sk, target)
-            .map_err(did_btc1_client::Error::from)?,
+            .map_err(did_btcr2_client::Error::from)?,
     };
 
     // --dry-run — build the tx via the facade, print hex + txid, no POST.
@@ -637,7 +639,7 @@ fn parse_change_address(
 }
 
 /// Print a one-paragraph transaction summary before the confirm prompt.
-fn print_tx_summary(tx: &did_btc1::SignedBeaconTx) {
+fn print_tx_summary(tx: &did_btcr2::SignedBeaconTx) {
     let bitcoin_tx = tx.as_tx();
     println!("about to broadcast a beacon-signal transaction:");
     println!("  txid:    {}", bitcoin_tx.txid());
@@ -689,7 +691,7 @@ fn run() -> Result<(), CliRunError> {
             key: KeySource {
                 file: key_file,
                 stdin: key_stdin,
-                env_var: "DIDBTC1_KEY",
+                env_var: "DIDBTCR2_KEY",
             },
             beacon_key_file,
             beacon_key_stdin,
@@ -724,7 +726,7 @@ fn run() -> Result<(), CliRunError> {
             key: KeySource {
                 file: key_file,
                 stdin: key_stdin,
-                env_var: "DIDBTC1_KEY",
+                env_var: "DIDBTCR2_KEY",
             },
             beacon_key_file,
             beacon_key_stdin,
@@ -759,7 +761,7 @@ mod tests {
     use std::ffi::OsString;
 
     const SAMPLE_DID: &str =
-        "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+        "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
 
     fn args_from_strings(strings: &[&str]) -> Vec<OsString> {
         strings.iter().map(OsString::from).collect()
@@ -925,7 +927,7 @@ mod tests {
         // an unknown beacon type is its own typed variant, NOT laundered
         // through UnknownNetwork.
         match beacon_index(Some("bogus")).unwrap_err() {
-            CliRunError::Client(did_btc1_client::Error::UnknownBeaconType(t)) => {
+            CliRunError::Client(did_btcr2_client::Error::UnknownBeaconType(t)) => {
                 assert_eq!(t, "BOGUS");
             }
             other => panic!("expected UnknownBeaconType, got {other:?}"),
@@ -997,7 +999,7 @@ mod tests {
         fn execute(
             &self,
             req: http::Request<Vec<u8>>,
-        ) -> Result<http::Response<Vec<u8>>, did_btc1_client::TransportError> {
+        ) -> Result<http::Response<Vec<u8>>, did_btcr2_client::TransportError> {
             let method = req.method().clone();
             let path = req.uri().path();
 
@@ -1057,9 +1059,9 @@ mod tests {
 
         // Create a genesis DID document via the facade (no I/O).
         let doc = client
-            .create(&pk, did_btc1::identifier::Network::Mutinynet)
+            .create(&pk, did_btcr2::identifier::Network::Mutinynet)
             .expect("create succeeds");
-        let did: did_btc1::identifier::Did = doc.as_ref()["id"]
+        let did: did_btcr2::identifier::Did = doc.as_ref()["id"]
             .as_str()
             .expect("document has a string id")
             .parse()
@@ -1068,7 +1070,7 @@ mod tests {
 
         // Write a benign patch file the dispatch reads.
         let dir = std::env::temp_dir();
-        let patch_path = dir.join(format!("did-btc1-cli-dryrun-{}.json", std::process::id()));
+        let patch_path = dir.join(format!("did-btcr2-cli-dryrun-{}.json", std::process::id()));
         std::fs::write(
             &patch_path,
             serde_json::json!([{"op": "add", "path": "/assertionMethod/-", "value": vm_id}])
@@ -1121,9 +1123,9 @@ mod tests {
         let pk = sk.public_key(&secp);
 
         let doc = client
-            .create(&pk, did_btc1::identifier::Network::Mutinynet)
+            .create(&pk, did_btcr2::identifier::Network::Mutinynet)
             .expect("create succeeds");
-        let did: did_btc1::identifier::Did = doc.as_ref()["id"]
+        let did: did_btcr2::identifier::Did = doc.as_ref()["id"]
             .as_str()
             .expect("document has a string id")
             .parse()
@@ -1132,7 +1134,7 @@ mod tests {
 
         let dir = std::env::temp_dir();
         let patch_path = dir.join(format!(
-            "did-btc1-cli-realwrite-{}.json",
+            "did-btcr2-cli-realwrite-{}.json",
             std::process::id()
         ));
         std::fs::write(

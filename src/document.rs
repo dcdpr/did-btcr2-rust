@@ -6,7 +6,7 @@
 use crate::beacon::{AddressExt as _, Beacon, BeaconType};
 use crate::canonical_hash::CanonicalHash;
 use crate::cryptosuite::CryptoSuite;
-use crate::error::{Btc1Error, ProblemDetails};
+use crate::error::{Btcr2Error, ProblemDetails};
 use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network, Sha256Hash};
 use crate::key::{PublicKey, PublicKeyExt as _};
 use crate::verification::{VerificationMethod, VerificationMethodId};
@@ -32,7 +32,7 @@ const DID_CORE_V1_1_CONTEXT: &str = "https://www.w3.org/TR/did-1.1";
 const DID_BTC1_CONTEXT: &str = "https://did-btc1/TBD/context";
 
 const DID_PLACEHOLDER: &str =
-    "did:btc1:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    "did:btcr2:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
 mod version_id_serde {
     //! Custom serde for `NonZeroU64` ↔ ASCII string.
@@ -74,8 +74,8 @@ pub enum Error {
     /// DID Encoding error
     DidEncoding(#[from] crate::identifier::Error),
 
-    /// DID:BTC1 error
-    Btc1Error(#[from] Btc1Error),
+    /// DID:BTCR2 error
+    Btcr2Error(#[from] Btcr2Error),
 
     /// This should not happen: Only needed to satisfy `String: FromStr` trait bound
     Infallible(#[from] std::convert::Infallible),
@@ -91,7 +91,7 @@ pub enum Error {
 impl ProblemDetails for Error {
     fn details(&self) -> Option<Value> {
         match self {
-            Self::Btc1Error(err) => err.details(),
+            Self::Btcr2Error(err) => err.details(),
             _ => None,
         }
     }
@@ -150,7 +150,7 @@ where
     fn sequence_from_vec(
         items: Vec<U>,
         field_name: &'static str,
-    ) -> Result<Self::Sequence<U>, Btc1Error>;
+    ) -> Result<Self::Sequence<U>, Btcr2Error>;
 }
 
 impl<U> SequenceFromVec<U> for crate::identifier::Did
@@ -160,9 +160,9 @@ where
     fn sequence_from_vec(
         items: Vec<U>,
         field_name: &'static str,
-    ) -> Result<NonEmpty<U>, Btc1Error> {
+    ) -> Result<NonEmpty<U>, Btcr2Error> {
         NonEmpty::from_vec(items).ok_or_else(|| {
-            Btc1Error::InvalidDidDocument(format!(
+            Btcr2Error::InvalidDidDocument(format!(
                 "updatable DID document must contain at least one {field_name}"
             ))
         })
@@ -173,7 +173,7 @@ impl<U> SequenceFromVec<U> for String
 where
     U: Clone + std::fmt::Debug + PartialEq + Eq,
 {
-    fn sequence_from_vec(items: Vec<U>, _field_name: &'static str) -> Result<Vec<U>, Btc1Error> {
+    fn sequence_from_vec(items: Vec<U>, _field_name: &'static str) -> Result<Vec<U>, Btcr2Error> {
         // Intermediate (placeholder-DID) documents are unconstrained.
         Ok(items)
     }
@@ -240,7 +240,7 @@ where
 
         let id: T = string_from_object(value, "id")?.parse()?;
         let network = id.try_network().or(network).ok_or_else(|| {
-            Btc1Error::InvalidDid("no network derivable from id and none provided".into())
+            Btcr2Error::InvalidDid("no network derivable from id and none provided".into())
         })?;
 
         // TODO: Might want to abstract this null-check for required keys.
@@ -266,7 +266,7 @@ where
             vec_from_value(value, "capabilityInvocation")?;
         let capability_delegation = vec_from_value(value, "capabilityDelegation")?;
         // TODO: This will fail when the DID document contains non-Beacon services
-        // https://github.com/dcdpr/did-btc1/issues/170
+        // https://github.com/dcdpr/did-btcr2/issues/170
         let service_vec: Vec<Beacon> = vec_from_object(value, "service", |service| {
             let id = string_from_object(service, "id")?.to_string();
             let ty = string_from_object(service, "type")?.parse()?;
@@ -277,7 +277,7 @@ where
         })?;
 
         // parse-boundary conversion. For T = Did this enforces
-        // NonEmpty (returning Btc1Error::InvalidDidDocument on empty);
+        // NonEmpty (returning Btcr2Error::InvalidDidDocument on empty);
         // for T = String this is a no-op pass-through.
         let capability_invocation =
             <T as SequenceFromVec<VerificationMethodId>>::sequence_from_vec(
@@ -334,7 +334,7 @@ pub struct ResolutionOptions {
     /// than misleadingly returning 0).
     ///
     /// Sans-I/O: the resolver does NOT fetch the tip. The
-    /// did-btc1-cli client crate owns the `/blocks/tip/height` call.
+    /// did-btcr2-cli client crate owns the `/blocks/tip/height` call.
     pub chain_tip_height: Option<u32>,
 
     /// Esplora base URL override (network selector). `None` => resolver falls
@@ -596,7 +596,7 @@ impl Document {
         &self,
         patch: &Patch,
         target_version_id: NonZeroU64,
-    ) -> Result<(UnsecuredUpdate, Sha256Hash, Sha256Hash), Btc1Error> {
+    ) -> Result<(UnsecuredUpdate, Sha256Hash, Sha256Hash), Btcr2Error> {
         let source_hash = self.hash();
 
         // Apply the patch to a clone so `self` is left untouched. The resolver's
@@ -604,11 +604,11 @@ impl Document {
         // two target documents canonicalize to the same JCS bytes.
         let mut target_value = self.json_data.clone();
         json_patch::patch(&mut target_value, patch)
-            .map_err(|_| Btc1Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
+            .map_err(|_| Btcr2Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
 
         // The DID document identifier is immutable across an update.
         if target_value.get("id") != self.json_data.get("id") {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "update may not change the DID document id".into(),
             ));
         }
@@ -616,7 +616,7 @@ impl Document {
         // Re-validate conformance (mirrors apply_update's DocumentFields check)
         // and hash the patched document for the targetHash.
         let target_hash = Document::from_json_value(target_value)
-            .map_err(|_| Btc1Error::InvalidDidUpdate("patched document is non-conformant".into()))?
+            .map_err(|_| Btcr2Error::InvalidDidUpdate("patched document is non-conformant".into()))?
             .hash();
 
         let unsigned =
@@ -652,13 +652,13 @@ impl Document {
         target_version_id: NonZeroU64,
         verification_method_id: &str,
         secret_key: secp256k1::SecretKey,
-    ) -> Result<Update, Btc1Error> {
+    ) -> Result<Update, Btcr2Error> {
         // Guard 0: a deactivated DID is terminal and MUST NOT accept further
         // updates (spec: did-btcr2/src/operations/deactivate.md). The resolver
         // FSM short-circuits on deactivation, but the construction primitive must
         // also refuse so it cannot mint a post-deactivation update on its own.
         if self.fields.deactivated {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "cannot update a deactivated DID document".into(),
             ));
         }
@@ -670,7 +670,7 @@ impl Document {
             .iter()
             .find(|m| m.id.0 == verification_method_id)
             .ok_or_else(|| {
-                Btc1Error::InvalidDidUpdate(
+                Btcr2Error::InvalidDidUpdate(
                     "verificationMethod id not present in the document verificationMethod set"
                         .into(),
                 )
@@ -683,7 +683,7 @@ impl Document {
             .iter()
             .any(|id| id.0 == verification_method_id)
         {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "verificationMethod id not present in the capabilityInvocation set".into(),
             ));
         }
@@ -692,7 +692,7 @@ impl Document {
         // so the produced signature will verify against this document.
         let derived = secret_key.public_key(&secp256k1::Secp256k1::new());
         if derived != method.public_key {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "secret key does not match the verificationMethod public key".into(),
             ));
         }
@@ -733,13 +733,14 @@ impl Document {
         if let Value::Object(map) = &mut signed_json {
             map.insert(
                 "proof".to_string(),
-                serde_json::to_value(&proof)
-                    .map_err(|_| Btc1Error::InvalidDidUpdate("failed to serialize proof".into()))?,
+                serde_json::to_value(&proof).map_err(|_| {
+                    Btcr2Error::InvalidDidUpdate("failed to serialize proof".into())
+                })?,
             );
         }
 
         Update::from_json_value(signed_json).map_err(|_| {
-            Btc1Error::InvalidDidUpdate("constructed signed update failed to parse".into())
+            Btcr2Error::InvalidDidUpdate("constructed signed update failed to parse".into())
         })
     }
 
@@ -751,7 +752,7 @@ impl Document {
     /// over [`Document::construct_signed_update`]. The deactivated-document
     /// guard (Guard 0 in `construct_signed_update`) is inherited for free, so
     /// deactivating an already-deactivated document returns a typed
-    /// `Btc1Error::InvalidDidUpdate` before any signing.
+    /// `Btcr2Error::InvalidDidUpdate` before any signing.
     ///
     /// `target_version_id` is taken explicitly (mirroring
     /// `construct_signed_update`): a sans-I/O method has no resolver state from
@@ -761,7 +762,7 @@ impl Document {
         verification_method_id: &str,
         secret_key: secp256k1::SecretKey,
         target_version_id: NonZeroU64,
-    ) -> Result<Update, Btc1Error> {
+    ) -> Result<Update, Btcr2Error> {
         let patch: Patch = serde_json::from_value(serde_json::json!([
             {"op": "add", "path": "/deactivated", "value": true}
         ]))
@@ -830,7 +831,7 @@ impl AsRef<Value> for Document {
 
 impl CanonicalHash for Document {}
 
-/// Representation of initial DID document, according to did::btc1 specification.
+/// Representation of initial DID document, according to did::btcr2 specification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitialDocument {
     pub(crate) fields: DocumentFields<Did>,
@@ -884,7 +885,7 @@ impl InitialDocument {
             id_type,
         )
         .try_into()
-        .expect("default DidVersion + default Network + 32-byte External hash payload always encode to a valid did:btc1 string");
+        .expect("default DidVersion + default Network + 32-byte External hash payload always encode to a valid did:btcr2 string");
 
         let initial_document = doc.into_initial(&did);
 
@@ -962,7 +963,7 @@ impl InitialDocument {
         let hash_bytes = intermediate_doc.hash();
 
         if hash_bytes != hash {
-            Err(Btc1Error::InvalidDid(
+            Err(Btcr2Error::InvalidDid(
                 "TODO: description for sidecar_initial_validation() hash mismatch".to_string(),
             ))?
         } else {
@@ -971,13 +972,13 @@ impl InitialDocument {
     }
 
     // Spec Section 7.2.2.5
-    pub(crate) fn apply_update(&mut self, update: &Update) -> Result<(), Btc1Error> {
+    pub(crate) fn apply_update(&mut self, update: &Update) -> Result<(), Btcr2Error> {
         // A deactivated DID is terminal and MUST NOT accept further updates
         // (spec: did-btcr2/src/operations/deactivate.md). The resolver FSM
         // short-circuits on deactivation, but the application primitive must also
         // refuse so a post-deactivation update cannot be applied directly.
         if self.fields.deactivated {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "cannot apply an update to a deactivated DID document".into(),
             ));
         }
@@ -986,7 +987,7 @@ impl InitialDocument {
         let did = dereference_root_capability(capability_id)?;
 
         if self.fields.id != did {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "Proof root capability is not for this DID document".into(),
             ));
         }
@@ -1001,7 +1002,7 @@ impl InitialDocument {
             .iter()
             .find_map(|method| (&method.id.0 == verification_method).then_some(method.public_key))
             .ok_or_else(|| {
-                Btc1Error::ProofVerification(format!(
+                Btcr2Error::ProofVerification(format!(
                     "verificationMethod `{verification_method}` not found in document "
                 ))
             })?;
@@ -1014,15 +1015,15 @@ impl InitialDocument {
 
         // Step 11
         json_patch::patch(&mut self.json_data, &update.patch)
-            .map_err(|_| Btc1Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
+            .map_err(|_| Btcr2Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
 
         // Step 12
         self.fields = DocumentFields::try_from((&self.json_data, None)).map_err(|_| {
-            Btc1Error::InvalidDidUpdate("Updated DID document is non-conformant".into())
+            Btcr2Error::InvalidDidUpdate("Updated DID document is non-conformant".into())
         })?;
 
         if self.hash() != update.target_hash {
-            return Err(Btc1Error::InvalidDidUpdate(
+            return Err(Btcr2Error::InvalidDidUpdate(
                 "Hash of updated document does not match target hash".into(),
             ));
         }
@@ -1039,7 +1040,7 @@ impl AsRef<Value> for InitialDocument {
 
 impl CanonicalHash for InitialDocument {}
 
-/// Representation of intermediate DID document, according to did::btc1 specification.
+/// Representation of intermediate DID document, according to did::btcr2 specification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntermediateDocument {
     // Intermediate (placeholder-DID) documents stay unconstrained;
@@ -1110,7 +1111,7 @@ fn find_and_replace(value: &mut Value, from: &str, to: &str) {
         Value::String(s) => {
             // replace only whole DID strings (`s == from`) or DID-fragment
             // strings (`from` followed by `#…`, e.g. a verification-method or
-            // service id `did:btc1:…#key-0`). This rewrites every legitimate DID
+            // service id `did:btcr2:…#key-0`). This rewrites every legitimate DID
             // occurrence — `id`, `controller`, verification-method/service ids —
             // while removing the substring-collision risk of the old
             // unconditional substring substitution (a `from` that merely appeared
@@ -1241,7 +1242,7 @@ mod tests {
             ..Default::default()
         };
 
-        let did: Did = "did:btc1:x1qgcs38429dp7kyr5y90g3l94r6ky85pnppy9aggzgas2kdcldelrk3yfjrf"
+        let did: Did = "did:btcr2:x1qgcs38429dp7kyr5y90g3l94r6ky85pnppy9aggzgas2kdcldelrk3yfjrf"
             .parse()
             .unwrap();
         let hash = did.hash_unchecked();
@@ -1355,21 +1356,21 @@ mod tests {
         // capabilityInvocation entry. Spec: did-btcr2/src/data-structures.md
         // §did-document. Type-level guarantee via DocumentMode::Sequence<U> = NonEmpty<U>.
         //
-        // The error must surface as Btc1Error::InvalidDidDocument with the
+        // The error must surface as Btcr2Error::InvalidDidDocument with the
         // field name in the detail string (the outer Error variant prints
-        // only "DID:BTC1 error" — Btc1Error doc comments are the Display form
+        // only "DID:BTCR2 error" — Btcr2Error doc comments are the Display form
         // so the test pattern-matches the inner variant directly).
         let mut json = valid_resolved_doc_json();
         json["capabilityInvocation"] = serde_json::json!([]);
         let result = DocumentFields::<Did>::try_from((&json, None));
         match result {
-            Err(Error::Btc1Error(Btc1Error::InvalidDidDocument(detail))) => {
+            Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(detail))) => {
                 assert!(
                     detail.contains("capabilityInvocation"),
                     "expected detail mentioning capabilityInvocation, got: {detail}"
                 );
             }
-            Err(other) => panic!("expected Btc1Error::InvalidDidDocument, got: {other:?}"),
+            Err(other) => panic!("expected Btcr2Error::InvalidDidDocument, got: {other:?}"),
             Ok(_) => panic!("expected Err for empty capabilityInvocation, got Ok"),
         }
     }
@@ -1382,13 +1383,13 @@ mod tests {
         json["service"] = serde_json::json!([]);
         let result = DocumentFields::<Did>::try_from((&json, None));
         match result {
-            Err(Error::Btc1Error(Btc1Error::InvalidDidDocument(detail))) => {
+            Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(detail))) => {
                 assert!(
                     detail.contains("beacon") || detail.contains("service"),
                     "expected detail mentioning beacon/service, got: {detail}"
                 );
             }
-            Err(other) => panic!("expected Btc1Error::InvalidDidDocument, got: {other:?}"),
+            Err(other) => panic!("expected Btcr2Error::InvalidDidDocument, got: {other:?}"),
             Ok(_) => panic!("expected Err for empty service, got Ok"),
         }
     }
@@ -1761,7 +1762,7 @@ mod tests {
 
     /// Criterion 3a (deactivate-path twin of `construct_rejects_deactivated_document`):
     /// calling `Document::deactivate` on an already-deactivated document returns
-    /// `Btc1Error::InvalidDidUpdate` whose message mentions "deactivated" BEFORE
+    /// `Btcr2Error::InvalidDidUpdate` whose message mentions "deactivated" BEFORE
     /// any signing — the construct-time Guard 0 is inherited for free (the
     /// typed error originates at construct time, not the resolver).
     ///
@@ -1782,7 +1783,7 @@ mod tests {
             .deactivate(&vm_id, source_secret_key(), version)
             .expect_err("a deactivated document must not produce a deactivate update");
         match err {
-            Btc1Error::InvalidDidUpdate(msg) => assert!(
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
                 msg.contains("deactivated"),
                 "expected a deactivated-document message, got: {msg}"
             ),
@@ -2097,7 +2098,7 @@ mod tests {
         let err = document
             .construct_signed_update(patch, version, &unknown, source_secret_key())
             .expect_err("an unknown verificationMethod id must be rejected");
-        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
     /// update.md:87 — a vm_id present in verificationMethod but absent from
@@ -2135,7 +2136,7 @@ mod tests {
         let err = document
             .construct_signed_update(patch, version, &vm_id, source_secret_key())
             .expect_err("a vm_id absent from capabilityInvocation must be rejected");
-        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
     /// The pre-sign key-match guard: a secret key whose public key does not
@@ -2154,7 +2155,7 @@ mod tests {
             .construct_signed_update(patch, version, &vm_id, wrong_key)
             .expect_err("a key not matching the method public key must be rejected");
         match err {
-            Btc1Error::InvalidDidUpdate(msg) => {
+            Btcr2Error::InvalidDidUpdate(msg) => {
                 assert!(
                     msg.contains("secret key"),
                     "expected a key-mismatch message, got: {msg}"
@@ -2185,7 +2186,7 @@ mod tests {
             .construct_signed_update(patch, version, &vm_id, source_secret_key())
             .expect_err("a deactivated document must not produce a signed update");
         match err {
-            Btc1Error::InvalidDidUpdate(msg) => assert!(
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
                 msg.contains("deactivated"),
                 "expected a deactivated-document message, got: {msg}"
             ),
@@ -2221,7 +2222,7 @@ mod tests {
             .apply_update(&update)
             .expect_err("an update must not apply to a deactivated document");
         match err {
-            Btc1Error::InvalidDidUpdate(msg) => assert!(
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
                 msg.contains("deactivated"),
                 "expected a deactivated-document message, got: {msg}"
             ),
@@ -2236,14 +2237,14 @@ mod tests {
         let (_did, vm_id, _initial, document) = source_documents();
         let version = NonZeroU64::new(2).expect("2 is non-zero");
         let patch: Patch = serde_json::from_value(serde_json::json!([
-            {"op": "replace", "path": "/id", "value": "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx"}
+            {"op": "replace", "path": "/id", "value": "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx"}
         ]))
         .expect("id-change patch is a valid RFC 6902 op array");
 
         let err = document
             .construct_signed_update(patch, version, &vm_id, source_secret_key())
             .expect_err("a patch that changes id must be rejected");
-        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
     /// The constructor does not mutate `self`: the document hash is unchanged
@@ -2343,7 +2344,7 @@ mod tests {
         let err = update
             .confirm_duplicate(&[])
             .expect_err("targetVersionId 1 must fail the resolver duplicate-check");
-        assert!(matches!(err, Btc1Error::InvalidDidUpdate(_)));
+        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
     /// Deterministic golden vector: the produced signed-update JSON matches a
@@ -2354,6 +2355,32 @@ mod tests {
     /// so the bytes are stable.
     ///
     /// The committed fixture uses the four-context unsigned-update set.
+    /// Assert a produced artifact equals a committed golden, or REWRITE the
+    /// golden when `BLESS=1` is set. Hashes/bytes always flow through the
+    /// real code path (`construct_signed_update` → `serde_json`), never
+    /// hand-edited. Read and write both use runtime `std::fs` on the SAME path —
+    /// deliberately NOT `include_str!` (compile-time embed), which cannot observe
+    /// a runtime `fs::write` and would diverge across a stale build.
+    ///
+    /// NOTE: this helper is intentionally duplicated across the unit/integration
+    /// boundary — `tests/conformance.rs` defines its own copy because a
+    /// `#[cfg(test)]` helper in this crate cannot be shared into an external
+    /// integration test crate.
+    fn bless_or_assert(produced: &str, golden_path: &str) {
+        if std::env::var("BLESS").as_deref() == Ok("1") {
+            std::fs::write(golden_path, produced)
+                .unwrap_or_else(|e| panic!("BLESS write {golden_path}: {e}"));
+            return;
+        }
+        let golden = std::fs::read_to_string(golden_path)
+            .unwrap_or_else(|e| panic!("read golden {golden_path} (run BLESS=1 to create): {e}"));
+        assert_eq!(
+            produced,
+            golden.trim_end_matches('\n'),
+            "{golden_path} drift — re-run `BLESS=1 cargo test` if the change is intended"
+        );
+    }
+
     #[test]
     fn golden_signed_update_bytes() {
         let (_did, vm_id, _initial, document) = source_documents();
@@ -2366,12 +2393,11 @@ mod tests {
 
         let produced = serde_json::to_string_pretty(update.as_ref())
             .expect("signed update JSON serializes to pretty string");
-        let golden = include_str!("../fixtures/spec-form/golden-signed-update.json");
-        assert_eq!(
-            produced,
-            golden.trim_end_matches('\n'),
-            "produced signed-update JSON must match the committed golden vector byte-for-byte"
+        let golden_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/spec-form/golden-signed-update.json"
         );
+        bless_or_assert(&produced, golden_path);
     }
 
     /// Build a minimal conformant key-based DID document JSON with a single
