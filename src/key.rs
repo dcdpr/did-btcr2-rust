@@ -1,3 +1,6 @@
+//! secp256k1 key types and BIP340 Multikey encoding used by did:btcr2
+//! identifiers and Data Integrity proofs.
+
 use base58::ToBase58;
 use onlyerror::Error;
 pub use secp256k1::{PublicKey, SecretKey};
@@ -8,6 +11,8 @@ use secp256k1::{Secp256k1, constants::PUBLIC_KEY_SIZE};
 /// [Data Integrity BIP340 Cryptosuites]: https://dcdpr.github.io/data-integrity-schnorr-secp256k1/#multikey
 const MULTIKEY_PREFIX: [u8; 2] = [0xe7, 0x01];
 
+/// Errors arising while constructing keys from bytes or decoding BIP340
+/// Multikey strings.
 #[derive(Error, Debug)]
 pub enum Error {
     /// Failed to create public key from bytes
@@ -26,6 +31,7 @@ pub enum Error {
     MultikeyPrefix,
 }
 
+/// Extension trait adding BIP340 Multikey encode/decode to [`PublicKey`].
 pub trait PublicKeyExt {
     /// Create a `PublicKey` from a BIP-340 Multikey.
     fn from_multikey(multikey: &str) -> Result<Self, Error>
@@ -36,6 +42,7 @@ pub trait PublicKeyExt {
     fn to_multikey(&self) -> String;
 }
 
+/// Extension trait adding key generation to [`SecretKey`].
 pub trait SecretKeyExt {
     /// Generate a new random secret key.
     fn generate() -> Self;

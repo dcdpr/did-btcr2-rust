@@ -22,6 +22,8 @@ pub enum Error {
     InvalidTargetVersionId,
 }
 
+/// A signed DID update: the source/target JSON Document Hashes, the target
+/// version, the BIP340 Data Integrity proof, and the JSON Patch to apply.
 #[derive(Clone, Debug)]
 pub struct Update {
     pub(crate) source_hash: Sha256Hash,
@@ -34,18 +36,21 @@ pub struct Update {
 }
 
 impl Update {
+    /// Read and parse a signed update from a JSON file on disk.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let json = fs::read_to_string(path)?;
 
         Self::from_json_string(&json)
     }
 
+    /// Parse a signed update from a JSON string.
     pub fn from_json_string(json: &str) -> Result<Self, Error> {
         let json = serde_json::from_str(json)?;
 
         Self::from_json_value(json)
     }
 
+    /// Parse a signed update from an already-deserialized JSON [`Value`].
     pub fn from_json_value(json: Value) -> Result<Self, Error> {
         use json_tools::*;
 
@@ -134,7 +139,7 @@ impl Update {
     /// for each input is inferred from its `script_pubkey`:
     /// P2PKH (legacy ECDSA), P2WPKH (segwit-v0 ECDSA), or P2TR (key-path
     /// Schnorr/BIP340). Any other script type yields
-    /// [`AnnounceError::UnsupportedScriptType`].
+    /// [`AnnounceError::UnsupportedScriptType`](crate::AnnounceError::UnsupportedScriptType).
     ///
     /// Outputs are `[change?, op_return]`: a change output is emitted (before the
     /// OP_RETURN) only when `change > dust`; when `change <= dust` the remainder

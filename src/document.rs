@@ -60,6 +60,8 @@ mod version_id_serde {
     }
 }
 
+/// Errors arising while reading, parsing, generating, or updating a DID
+/// document.
 #[derive(Error, Debug)]
 pub enum Error {
     /// Error during document I/O operations
@@ -352,8 +354,11 @@ pub struct ResolutionOptions {
 /// accepts that the crate is not yet published.
 #[derive(Debug)]
 pub struct ResolutionResult {
+    /// The `didResolutionMetadata` describing the resolution process.
     pub resolution_metadata: ResolutionMetadata,
+    /// The resolved DID document.
     pub document: Document,
+    /// The `didDocumentMetadata` describing the resolved document.
     pub document_metadata: DocumentMetadata,
 }
 
@@ -420,7 +425,7 @@ where
 /// constructor). A sidecar produced by another conformant implementation is
 /// consumed without translation.
 ///
-/// `Deserialize` is implemented manually via [`SidecarDataWire`] so
+/// `Deserialize` is implemented manually via a private wire type so
 /// `update_lookup_table` is rebuilt on every serde path and can never be left
 /// stale; wire fields are `pub(crate)` as defense-in-depth.
 #[derive(Debug, Default)]
@@ -525,7 +530,7 @@ impl SidecarData {
 
     /// Deserialize from a JSON [`Value`] and build the `update_lookup_table`.
     ///
-    /// The manual `Deserialize` (via [`SidecarDataWire`] → [`SidecarData::new`])
+    /// The manual `Deserialize` (via the private wire type → [`SidecarData::new`])
     /// already builds the table on the serde path, so the trailing
     /// `rebuild_lookup_table()` is a harmless no-op kept to document intent and
     /// to satisfy the table-rebuild key-link.
@@ -552,7 +557,9 @@ pub struct Document {
 }
 
 impl Document {
-    // Spec section 7.1.1
+    /// Build the DID from its parsed components and begin resolution, returning
+    /// the [`Did`] and a [`Resolver`] primed to drive the sans-I/O resolution
+    /// FSM (did:btcr2 spec section 7.1.1).
     pub fn from_did_components(
         did_components: DidComponents,
         resolution_options: ResolutionOptions,

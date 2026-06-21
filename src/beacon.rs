@@ -1,3 +1,7 @@
+//! Beacon services: the Bitcoin addresses through which a did:btcr2 DID
+//! announces its updates, plus parsing of beacon types and BIP21 service
+//! endpoints.
+
 use crate::identifier::Network;
 use esploda::bitcoin::address::Address;
 use esploda::bitcoin::blockdata::{opcodes::all::OP_RETURN, script::Instruction};
@@ -6,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fmt, str::FromStr};
 
+/// Errors arising while parsing beacon types, BIP21 service endpoints, or
+/// Bitcoin addresses for a beacon descriptor.
 #[derive(Debug, Error)]
 pub enum Error {
     /// Invalid beacon type
@@ -25,6 +31,9 @@ pub enum Error {
 ///
 /// [BIP21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 pub trait AddressExt {
+    /// Parse a Bitcoin address from a `bitcoin:` BIP21 URI, requiring the
+    /// address to belong to the given [`Network`]. Any unrecognized `req-`
+    /// parameter is rejected as required by BIP21.
     fn from_bip21(uri: &str, network: Network) -> Result<Self, Error>
     where
         Self: Sized;
@@ -58,6 +67,8 @@ impl AddressExt for Address {
     }
 }
 
+/// A beacon service declared in a DID document: an identifier, a beacon type,
+/// and the Bitcoin address that announces DID updates for this DID.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Beacon {
     id: String,
@@ -65,12 +76,19 @@ pub struct Beacon {
     pub(crate) descriptor: Address,
 }
 
+/// The kind of beacon a DID uses to announce updates, per the did:btcr2 spec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum BeaconType {
+    /// Singleton beacon: a single Bitcoin address controlled by one party that
+    /// announces updates for exactly one DID.
     #[serde(rename = "SingletonBeacon")]
     Singleton,
+    /// CAS (Content-Addressable Storage) beacon: aggregates updates for many
+    /// DIDs, with payloads retrieved from content-addressed storage.
     #[serde(rename = "CASBeacon")]
     Cas,
+    /// Sparse Merkle Tree beacon: aggregates updates for many DIDs, proving
+    /// inclusion or non-inclusion via an SMT proof.
     #[serde(rename = "SMTBeacon")]
     SparseMerkleTree,
 }
@@ -184,7 +202,7 @@ impl SignedBeaconTx {
 
 /// Errors from building or validating a singleton-beacon announcement.
 ///
-/// A named public type, separate from the BIP21/parse-concerned [`Error`] in
+/// A named public type, separate from the BIP21/parse-concerned [`enum@Error`] in
 /// this module, so a downstream facade caller can name and match the
 /// announce error on its own.
 #[derive(Debug, Error)]

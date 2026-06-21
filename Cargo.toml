@@ -7,7 +7,13 @@ description = "Implementation of DID:BTCR2"
 repository = "https://github.com/dcdpr/did-btcr2.git"
 authors = ["Dan Pape <dpape@dpape.com>", "Jay Oster <jay@blipjoy.com>"]
 keywords = ["did", "did-btcr2", "decentralized"]
+categories = ["cryptography::cryptocurrencies", "authentication", "encoding"]
 readme = "README.md"
+documentation = "https://docs.rs/did-btcr2"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

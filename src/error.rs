@@ -1,7 +1,12 @@
+//! Error types and W3C DID Resolution Problem Details mapping for did:btcr2
+//! operations.
+
 use crate::identifier::Sha256Hash;
 use onlyerror::Error;
 use serde_json::{Value, json};
 
+/// Legacy top-level error type. Retained only for ZCAP errors pending the full
+/// error-vocabulary reconciliation; new spec errors live in [`Btcr2Error`].
 // TODO: Remove this
 #[derive(Error, Debug)]
 pub enum Error {
@@ -10,13 +15,18 @@ pub enum Error {
     Zcap(String),
 }
 
-// Errors defined by the DID:BTCR2 specification and other related specifications.
+/// Maps an error to a W3C DID Resolution Problem Details JSON-LD object, as
+/// returned in `didResolutionMetadata` when a resolution operation fails.
 pub trait ProblemDetails {
+    /// The Problem Details JSON-LD object for this error, or `None` when the
+    /// error carries no spec-defined detail body.
     fn details(&self) -> Option<Value> {
         None
     }
 }
 
+/// Errors defined by the did:btcr2 specification and the related W3C DID
+/// Resolution and Data Integrity specifications.
 #[derive(Error, Debug)]
 pub enum Btcr2Error {
     // Errors from DID Resolution Spec
@@ -41,7 +51,10 @@ pub enum Btcr2Error {
     /// Spec: did-btcr2/src/errors.md:21-23. Added for exactly this variant.
     /// Other non-spec error variants (ProofTransformation, ProofGeneration,
     /// Zcap) remain deferred to a later error-vocabulary cleanup.
-    MissingUpdateData { update_hash: Sha256Hash },
+    MissingUpdateData {
+        /// JSON Document Hash of the update payload that could not be located.
+        update_hash: Sha256Hash,
+    },
 
     /// Invalid Update Proof
     InvalidUpdateProof(String),

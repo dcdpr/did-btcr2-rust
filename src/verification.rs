@@ -1,7 +1,11 @@
+//! Verification methods: the public keys a DID document authorizes for
+//! signing updates, and the trait for resolving them by id.
+
 use crate::{identifier::Did, key::PublicKey};
 use onlyerror::Error;
 use std::{cmp::PartialEq, str::FromStr};
 
+/// Errors arising while parsing or resolving a verification method.
 #[derive(Error, Debug)]
 pub enum Error {
     /// Unsupported verification method type

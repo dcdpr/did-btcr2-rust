@@ -15,6 +15,9 @@ use std::num::NonZeroU64;
 
 const DEFAULT_RPC_BASE_URL: &str = "https://blockstream.info/testnet/api";
 
+/// Errors raised while the resolver FSM walks beacon signals and applies
+/// updates. A module-local sentinel enum; spec-conformant errors are produced
+/// via the [`From<Error>`] conversion into [`Btcr2Error`].
 #[derive(Error, Debug)]
 pub enum Error {
     /// Update hash does not match
@@ -32,16 +35,19 @@ pub enum Error {
     /// can return a typed Err instead of panicking.
     /// Module-local enum only; `Btcr2Error` (the spec-error enum) is untouched
     #[error("unconfirmed beacon transaction (txid={txid})")]
-    UnconfirmedBeaconTx { txid: Txid },
+    UnconfirmedBeaconTx {
+        /// Transaction id of the unconfirmed beacon-signal transaction.
+        txid: Txid,
+    },
 }
 
-/// Boundary conversion from the module-local resolver [`Error`] to the
+/// Boundary conversion from the module-local resolver [`enum@Error`] to the
 /// spec-error vocabulary [`Btcr2Error`]. This lets the resolver hot path
 /// surface spec-conformant Problem Details to callers without leaking the
 /// internal sentinel enum.
 ///
 /// Note: `MISSING_UPDATE_DATA` is NOT produced here. The sidecar-miss site in
-/// [`Resolver::process_beacon_signals`] raises
+/// `Resolver::process_beacon_signals` raises
 /// `Btcr2Error::MissingUpdateData { update_hash }` directly, because only the
 /// call site has the missed `update_hash` (the beacon signal bytes) in scope
 /// Routing it through this `From` impl would lose the hash.
@@ -135,7 +141,10 @@ impl Resolver {
         }
     }
 
-    // Spec section 7.2.2.1
+    /// Advance the resolution FSM one step, returning either a
+    /// [`ResolverState::Requests`] (blockchain data the caller must fetch and
+    /// feed back) or a [`ResolverState::Resolved`] result (did:btcr2 spec
+    /// section 7.2.2.1).
     // TODO: Better name for this?
     pub fn resolve(mut self) -> Result<ResolverState, Error> {
         // Take the FSM state, leaving the default in its place.
@@ -462,6 +471,9 @@ impl Resolver<WaitingForResponses> {
         }
     }
 
+    /// Feed the blockchain transactions requested by a
+    /// [`ResolverState::Requests`] back into the FSM, returning a [`Resolver`]
+    /// ready to be driven another step.
     pub fn process_responses(
         mut self,
         transactions: HashMap<BeaconType, Vec<Transaction>>,
@@ -485,6 +497,8 @@ enum ResolverFsm {
     FindNextSignals(HashMap<BeaconType, Vec<Transaction>>),
 }
 
+/// The result of advancing the resolver FSM one step: either outstanding
+/// blockchain requests the caller must satisfy, or the fully resolved DID.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ResolverState {

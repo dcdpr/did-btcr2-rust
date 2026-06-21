@@ -100,7 +100,9 @@ pub enum Error {
     InvalidHashLength,
 }
 
+/// Extension trait for types that may carry a Bitcoin [`Network`] hint.
 pub trait TryNetworkExt {
+    /// The Bitcoin network this value designates, if any.
     fn try_network(&self) -> Option<Network> {
         None
     }
@@ -108,6 +110,8 @@ pub trait TryNetworkExt {
 
 impl TryNetworkExt for String {}
 
+/// A parsed and validated did:btcr2 identifier: the Bech32m-encoded string
+/// together with its decoded [`DidComponents`] (version, network, id type).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Did {
     encoded: String,
@@ -142,14 +146,18 @@ impl TryFrom<DidComponents> for Did {
 }
 
 impl Did {
+    /// The Bech32m-encoded `did:btcr2:...` string form of this identifier.
     pub fn encode(&self) -> &str {
         &self.encoded
     }
 
+    /// The decoded components (version, network, id type) of this identifier.
     pub fn components(&self) -> &DidComponents {
         &self.components
     }
 
+    /// The genesis public key for a key-based DID, or `None` for an
+    /// external (`x`) identifier.
     pub fn public_key(&self) -> Option<PublicKey> {
         match self.components.id_type {
             IdType::Key(key) => PublicKey::from_slice(&key).ok(),
@@ -178,6 +186,7 @@ impl TryNetworkExt for Did {
 /// DID:BTCR2 encoding version
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum DidVersion {
+    /// Version 1 — the only version defined by the current did:btcr2 spec.
     #[default]
     One = 1,
 }
@@ -400,14 +409,17 @@ impl DidComponents {
         }
     }
 
+    /// The did:btcr2 encoding version.
     pub fn version(&self) -> DidVersion {
         self.version
     }
 
+    /// The Bitcoin network this identifier is anchored to.
     pub fn network(&self) -> Network {
         self.network
     }
 
+    /// The identifier type (key-based or external).
     pub fn id_type(&self) -> IdType {
         self.id_type
     }
