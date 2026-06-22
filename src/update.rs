@@ -420,6 +420,41 @@ mod tests {
         }
     }
 
+    /// resolve.md:169 (`LATE_PUBLISHING` MUST): when the duplicate-check index is
+    /// IN RANGE but the historical update hash at that index differs from this
+    /// update's hash, `confirm_duplicate` MUST raise `LatePublishingError` (a
+    /// previously-published, conflicting update at the same version height is the
+    /// late-publishing condition the spec forbids resolving past).
+    ///
+    /// The first update in `sidecar-two-updates.json` carries
+    /// `targetVersionId: 2` → index 0. A `hash_history` of length 1 whose single
+    /// entry is a DIFFERENT hash makes `0` in range AND mismatching, driving the
+    /// `historical_update_hash != update_hash` branch. Must return
+    /// `Err(Btcr2Error::LatePublishingError(_))`, distinct from the out-of-range
+    /// `InvalidDidUpdate` path asserted above.
+    #[test]
+    fn confirm_duplicate_in_range_mismatch_is_late_publishing() {
+        let raw = include_str!("../fixtures/spec-form/sidecar-two-updates.json");
+        let value: Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let first_update_json = value["updates"][0].clone();
+        let update =
+            Update::from_json_value(first_update_json).expect("first fixture update parses");
+        assert_eq!(u64::from(update.target_version_id), 2);
+
+        // In-range (index 0) but the recorded historical hash differs from this
+        // update's hash → the late-publishing branch.
+        let wrong_hash = Sha256Hash([0xAB; 32]);
+        let hash_history: Vec<Sha256Hash> = vec![wrong_hash];
+        let err = update
+            .confirm_duplicate(&hash_history)
+            .expect_err("an in-range hash mismatch must raise LatePublishingError");
+
+        match err {
+            Btcr2Error::LatePublishingError(_) => {}
+            other => panic!("expected LatePublishingError, got {other:?}"),
+        }
+    }
+
     /// A small RFC 6902 patch used across the construct tests.
     fn sample_patch() -> Patch {
         serde_json::from_value(serde_json::json!([
