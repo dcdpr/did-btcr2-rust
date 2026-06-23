@@ -304,7 +304,7 @@ impl Serialize for Sha256Hash {
 
 impl<'de> Deserialize<'de> for Sha256Hash {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = <&str>::deserialize(deserializer)?;
+        let s = String::deserialize(deserializer)?;
         let bytes = URL_SAFE_NO_PAD
             .decode(s)
             .map_err(|e| D::Error::custom(format!("invalid base64url-no-pad hash: {e}")))?;
@@ -694,5 +694,21 @@ mod sha256_hash_serde_tests {
         // 16-byte hash should be rejected (wrong length).
         let short = "\"QkJCQkJCQkJCQkJCQkJCQg\""; // 16 bytes of 0x42
         assert!(serde_json::from_str::<Sha256Hash>(short).is_err());
+    }
+
+    #[test]
+    fn sha256_hash_deserializes_escaped_string() {
+        // A JSON string carrying an escape sequence cannot be zero-copy-borrowed,
+        // so a borrowed-`&str` deserialize impl would error on the *borrow* before ever
+        // inspecting the hash content. The owned-`String` impl allocates and then
+        // decodes the same valid base64url-no-pad hash. The leading 'Q' (U+0051)
+        // of the canonical [0x42; 32] encoding is written as the JSON escape
+        // `Q`; the decoded content is identical to the unescaped form.
+        let expected = Sha256Hash([0x42u8; 32]);
+        let escaped = "\"\\u0051kJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI\"";
+
+        let parsed: Sha256Hash = serde_json::from_str(escaped)
+            .expect("escaped but valid base64url-no-pad hash must deserialize Ok");
+        assert_eq!(parsed, expected);
     }
 }

@@ -23,11 +23,11 @@
     "capabilityAction": "Write",
     "cryptosuite": "bip340-jcs-2025",
     "proofPurpose": "capabilityInvocation",
-    "proofValue": "z71KKjkrP8nKj6J8cNm9eS9oGk3fYTGQwABFBYvKLRMSo1YXLXZqEdMY3vdrji4sXAUDDxcB4w89nHWDMepxCsQn",
+    "proofValue": "z2xn1R28MCu1pST8dx7dJ2rKoQhAGcDc22rXpp49H3ycSa3v6ARmPDPiMFzEhMgz5HEQkftp9imZUZQjTHzPrUHYr",
     "type": "DataIntegrityProof",
     "verificationMethod": "did:btcr2:k1q5pf38qtwm94vwt3lhymauc7cpkr2c8nyjwka609mq79wcj4jms97mc0qw8ku#initialKey"
   },
-  "sourceHash": "rq4utkBkFGZBYCIAnIUyRT-FYq0hK_p1q0OXmwzvDmc",
-  "targetHash": "0EDRJrOL5tV6yWqp1EH5F2bSy_zTUjKxlAREnguN5b8",
+  "sourceHash": "AVNd7oNqPcesM1o_lbgiAaIIga4fS-jzcx8dJtO_BHo",
+  "targetHash": "C_708H68nLaXKhNCFHzIk4pIDvB5AjpenmkgSj2aioA",
   "targetVersionId": 2
 }

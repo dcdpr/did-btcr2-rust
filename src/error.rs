@@ -75,6 +75,16 @@ pub enum Btcr2Error {
 
     /// Proof generation error
     ProofGeneration(String),
+
+    /// A subject-controlled beacon/CAS path reached an arm not yet implemented
+    /// (CAS Map / Sparse Merkle Tree / genesis-CAS retrieval). Returned instead
+    /// of panicking the resolver, so a remote-published DID reaching these arms
+    /// yields a typed resolution error rather than crashing the process.
+    ///
+    /// PROVISIONAL problem-details code — subject to the deferred error-
+    /// vocabulary audit, which replaces these arms with real implementations
+    /// and may keep or rename this variant and its code.
+    Unsupported(String),
 }
 
 impl Btcr2Error {
@@ -101,7 +111,8 @@ impl ProblemDetails for Btcr2Error {
             | Self::InvalidDidUpdate(_)
             | Self::ProofVerification(_)
             | Self::ProofTransformation(_)
-            | Self::ProofGeneration(_) => "https://btc1.dev/context/v1",
+            | Self::ProofGeneration(_)
+            | Self::Unsupported(_) => "https://btc1.dev/context/v1",
         };
 
         let name = match self {
@@ -116,6 +127,10 @@ impl ProblemDetails for Btcr2Error {
             Self::ProofVerification(_) => "PROOF_VERIFICATION_ERROR",
             Self::ProofTransformation(_) => "PROOF_TRANSFORMATION_ERROR",
             Self::ProofGeneration(_) => "PROOF_GENERATION_ERROR",
+            // PROVISIONAL — no spec "unsupported" code exists (errors.md); this
+            // btcr2-namespaced code is subject to the deferred error-vocabulary
+            // audit, which may rename it.
+            Self::Unsupported(_) => "UNSUPPORTED_BEACON",
         };
 
         Some(json!({
@@ -135,7 +150,30 @@ impl ProblemDetails for Btcr2Error {
                 Self::ProofVerification(detail) => detail.clone(),
                 Self::ProofTransformation(detail) => detail.clone(),
                 Self::ProofGeneration(detail) => detail.clone(),
+                Self::Unsupported(detail) => detail.clone(),
             },
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared `Unsupported` variant is fully wired into `problem_details`:
+    /// the `type` carries the provisional `UNSUPPORTED_BEACON` code and the
+    /// `detail` is the arm-naming message. Proves all three match arms (prefix,
+    /// name, detail) are present.
+    #[test]
+    fn unsupported_problem_details_carries_provisional_code_and_detail() {
+        let message = "CAS Map beacon resolution is not yet implemented";
+        let err = Btcr2Error::Unsupported(message.into());
+        let details = err.details().expect("Unsupported yields problem details");
+
+        assert_eq!(
+            details["type"],
+            "https://btc1.dev/context/v1#UNSUPPORTED_BEACON",
+        );
+        assert_eq!(details["detail"], message);
     }
 }

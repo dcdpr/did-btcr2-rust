@@ -29,10 +29,13 @@ pub enum Error {
     /// DID:BTCR2 error
     Btcr2Error(#[from] crate::error::Btcr2Error),
 
-    /// Beacon-signal transaction is not confirmed; the spec resolver works in
-    /// confirmed-block terms. Unconfirmed-tx feature support is Out of Scope
-    /// per PROJECT.md; this variant exists so the singleton-beacon happy path
-    /// can return a typed Err instead of panicking.
+    /// A *needed* beacon-signal transaction — one whose announced hash matches a
+    /// sidecar update we are expecting — is still unconfirmed; the spec resolver
+    /// works in confirmed-block terms. Raised only for needed signals: unrelated
+    /// unconfirmed txs on a beacon address are skipped, not surfaced.
+    /// Unconfirmed-tx *handling* (waiting on / applying mempool updates) remains
+    /// Out of scope; this variant exists so the singleton-beacon happy
+    /// path returns a typed Err instead of panicking.
     /// Module-local enum only; `Btcr2Error` (the spec-error enum) is untouched
     #[error("unconfirmed beacon transaction (txid={txid})")]
     UnconfirmedBeaconTx {
@@ -164,7 +167,7 @@ impl Resolver {
                 // Step 2, 3: unnecessary
 
                 // Step 4. (Create RPC requests)
-                Ok(self.next_signals_requests())
+                self.next_signals_requests()
             }
 
             ResolverFsm::FindNextSignals(responses) => {
@@ -208,8 +211,13 @@ impl Resolver {
                 {
                     // Step 10.1.
                     if update.target_version_id <= self.current_version_id {
-                        self.update_hash_history.push(contemporary_hash);
-
+                        // confirm_duplicate indexes update_hash_history at
+                        // [targetVersionId - 2], where each entry is an UPDATE
+                        // hash appended by the apply branch (step 10.2.7 below).
+                        // Do NOT push the contemporary DOCUMENT hash here: it
+                        // would grow the history out from under confirm_duplicate
+                        // and displace a later version's entry, turning a benign
+                        // duplicate signal into a false LATE_PUBLISHING.
                         update.confirm_duplicate(&self.update_hash_history)?;
                     }
 
@@ -280,7 +288,7 @@ impl Resolver {
                 // Step 11: unnecessary
 
                 // Step 12.
-                let ResolverState::Requests(fsm, signals) = self.next_signals_requests() else {
+                let ResolverState::Requests(fsm, signals) = self.next_signals_requests()? else {
                     unreachable!()
                 };
                 if signals.is_empty() {
@@ -324,7 +332,18 @@ impl Resolver {
 
                 let (block_time, block_height) = match tx.status {
                     Status::Unconfirmed => {
-                        return Err(Error::UnconfirmedBeaconTx { txid: tx.txid });
+                        // only a *needed* signal — one whose announced hash is
+                        // present in the sidecar update-lookup table — blocks resolution
+                        // while its beacon tx is unconfirmed. Unrelated unconfirmed txs on
+                        // the beacon address (ordinary mempool traffic) are skipped so the
+                        // confirmed history still resolves; a beacon address routinely
+                        // carries mempool txs that are not DID updates we hold data for.
+                        // Unconfirmed-tx *handling* (waiting on / applying mempool updates)
+                        // remains out of scope.
+                        if self.update_lookup_table.contains_key(&signal_bytes) {
+                            return Err(Error::UnconfirmedBeaconTx { txid: tx.txid });
+                        }
+                        continue;
                     }
                     Status::Confirmed {
                         block_time,
@@ -344,7 +363,7 @@ impl Resolver {
         Ok(signals)
     }
 
-    fn next_signals_requests(mut self) -> ResolverState {
+    fn next_signals_requests(mut self) -> Result<ResolverState, Error> {
         let mut map: HashMap<_, Vec<_>> = HashMap::new();
 
         for beacon in &self.contemporary_doc.fields.service {
@@ -367,12 +386,20 @@ impl Resolver {
                         map.entry(beacon.ty).or_default().push(req);
                     }
                 }
-                BeaconType::Cas => todo!(),
-                BeaconType::SparseMerkleTree => todo!(),
+                BeaconType::Cas => {
+                    return Err(Error::Btcr2Error(Btcr2Error::Unsupported(
+                        "CAS Map beacon resolution is not yet implemented".into(),
+                    )));
+                }
+                BeaconType::SparseMerkleTree => {
+                    return Err(Error::Btcr2Error(Btcr2Error::Unsupported(
+                        "Sparse Merkle Tree beacon resolution is not yet implemented".into(),
+                    )));
+                }
             }
         }
 
-        ResolverState::Requests(Resolver::from_init(self), map)
+        Ok(ResolverState::Requests(Resolver::from_init(self), map))
     }
 
     // Spec section 7.2.2.3
@@ -400,8 +427,16 @@ impl Resolver {
                                 update_hash: beacon_signal.signal_bytes,
                             }))?
                     }
-                    BeaconType::Cas => todo!(),
-                    BeaconType::SparseMerkleTree => todo!(),
+                    BeaconType::Cas => {
+                        return Err(Error::Btcr2Error(Btcr2Error::Unsupported(
+                            "CAS Map beacon resolution is not yet implemented".into(),
+                        )));
+                    }
+                    BeaconType::SparseMerkleTree => {
+                        return Err(Error::Btcr2Error(Btcr2Error::Unsupported(
+                            "Sparse Merkle Tree beacon resolution is not yet implemented".into(),
+                        )));
+                    }
                 };
 
                 Ok(AppliedSignal {
@@ -771,14 +806,14 @@ mod tests {
     /// COVERAGE SCOPE (narrower than the name implies):
     /// the metadata whitelist + `didDocument`-parse runs for ALL 6 vectors, but the
     /// full FSM drive + `didDocument` content-equality assertion runs ONLY for the
-    /// version-1 `k1` (KEY) vectors. Two distinct exclusions:
-    ///   - **x1 (EXTERNAL)** vectors are skipped because they carry the NEW
-    ///     `did:btcr2:_` genesis-document placeholder while the crate still
-    ///     substitutes the OLD 60-char placeholder (spec-owned, out of scope
-    ///     for now).
-    ///   - **version-2** vectors are skipped because their resolution requires
-    ///     applying on-chain beacon signals that are absent from the offline vector
-    ///     tree. Driving them would require bridging synthetic signals (as the
+    /// version-1 vectors — both `k1` (KEY) and `x1` (EXTERNAL). For x1 the
+    /// externally-authored genesis document (spec-form `did:btcr2:_` placeholder)
+    /// is supplied as sidecar `initial_document`; for k1 it is generated
+    /// deterministically from the DID's public key. One exclusion remains:
+    ///   - **version-2** vectors only run the metadata whitelist + `didDocument`
+    ///     parse, not the FSM drive, because their resolution requires applying
+    ///     on-chain beacon signals that are absent from the offline vector tree.
+    ///     Driving them would require bridging synthetic signals (as the
     ///     `announce_round_trip` / `create_update_deactivate_reresolve` round-trip
     ///     tests do). That bridging is NOT attempted here; the version-2
     ///     resolve-vector content equality is an explicit, tracked deferral
@@ -794,7 +829,8 @@ mod tests {
     /// whitelist + didDocument-parse are asserted for those.
     #[test]
     fn op_vectors_resolve_matches_output() {
-        use crate::identifier::Did;
+        use crate::document::IntermediateDocument;
+        use crate::identifier::{Did, Network};
 
         for (kind, short_id, _has_update) in VECTORS {
             let Some(input) =
@@ -843,59 +879,56 @@ mod tests {
                 continue;
             }
 
-            // EXTERNAL (x1) vectors carry the NEW `did:btcr2:_` genesis-document
-            // placeholder. The crate still substitutes the OLD 60-char
-            // `did:btcr2:xxxx…` placeholder (the placeholder change is
-            // spec-owned and out of scope), so an external
-            // resolve cannot bind the genesisDocument to the real DID yet. Skip
-            // the FSM drive for EXTERNAL here (metadata whitelist + didDocument
-            // parse above still run); the KEY vectors are fully driven.
-            // 2026-06-22 gap6-placeholder-pending (spec-owned, teammate).
-            if *kind == "x1" {
-                continue;
-            }
-
             let did: Did = input["did"].as_str().unwrap().parse().unwrap();
 
-            let resolution_options = ResolutionOptions {
-                sidecar_data: Some(SidecarData::default()),
-                ..Default::default()
+            // KEY (k1) resolution generates the genesis document deterministically
+            // from the DID's embedded public key, so no sidecar initial document is
+            // needed. EXTERNAL (x1) resolution instead binds the externally-authored
+            // genesis document supplied as sidecar data: the vector carries it under
+            // `resolutionOptions.sidecar.genesisDocument` with the spec-form
+            // `did:btcr2:_` placeholder, which `into_initial` substitutes for the
+            // real DID.
+            let resolution_options = if *kind == "x1" {
+                let genesis = &input["resolutionOptions"]["sidecar"]["genesisDocument"];
+                let intermediate =
+                    IntermediateDocument::from_json_value(genesis.clone(), Network::Regtest)
+                        .unwrap();
+                let initial_doc = intermediate.into_initial(&did);
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData {
+                        initial_document: Some(initial_doc),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+            } else {
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::default()),
+                    ..Default::default()
+                }
             };
 
             let resolver = Document::resolve(&did, resolution_options).unwrap();
             let result = resolve_with_no_signals(resolver);
 
-            // The crate's deterministically-generated KEY document and the
-            // spec test vector agree on EVERY content field — id,
-            // verificationMethod (incl. publicKeyMultibase), all three
-            // SingletonBeacon services + endpoints, and the four relationship
-            // sets — EXCEPT two pre-existing create-path conformance residuals:
-            //   (1) the top-level `@context` constants are stale placeholders
-            //       (`www.w3.org/TR/did-1.1` / `did-btc1/TBD/context`) rather
-            //       than the spec URLs (`www.w3.org/ns/did/v1.1` /
-            //       `btcr2.dev/context/v1`), and
-            //   (2) the crate emits a top-level `controller` array the spec
-            //       template omits.
-            // Both are create-path gaps out of scope (fixture
-            // re-homing) and carry golden-vector blast radius; they are logged in
-            // for a future create-conformance plan. We normalize the two residual
-            // fields out of BOTH documents and assert the full remaining
-            // didDocument content matches exactly — not a weakened smoke check.
-            let mut got: serde_json::Value =
+            // The resolved document and the spec test vector agree on EVERY
+            // content field — id, the top-level `@context`, verificationMethod
+            // (incl. publicKeyMultibase), the SingletonBeacon services +
+            // endpoints, and the four relationship sets. Both the KEY (k1) path
+            // (genesis generated deterministically) and the EXTERNAL (x1) path
+            // (genesis supplied verbatim) now emit the spec `@context`
+            // (`www.w3.org/ns/did/v1.1` / `btcr2.dev/context/v1`) and no
+            // top-level `controller`, so the full content matches with no
+            // field masking.
+            let got: serde_json::Value =
                 serde_json::from_str(&serde_json::to_string(result.document.as_ref()).unwrap())
                     .unwrap();
-            let mut want: serde_json::Value =
+            let want: serde_json::Value =
                 serde_json::from_str(&output["didDocument"].to_string()).unwrap();
-            for doc in [&mut got, &mut want] {
-                if let Some(obj) = doc.as_object_mut() {
-                    obj.remove("@context");
-                    obj.remove("controller");
-                }
-            }
             assert_eq!(
                 got, want,
-                "{kind}/{short_id}: resolved didDocument content (excluding the documented \
-                 create-path @context/controller residuals) must equal resolve/output.json.didDocument"
+                "{kind}/{short_id}: resolved didDocument content (incl. @context) \
+                 must equal resolve/output.json.didDocument"
             );
             // The two normalized-out fields are the ONLY divergence: the spec
             // vector still parsed into a Document above (`expected_doc`).
@@ -1007,50 +1040,100 @@ mod tests {
         }
     }
 
-    /// the hidden unconfirmed-tx panic previously at
-    /// resolver.rs:227 must now be a typed
-    /// `Err(resolver::Error::UnconfirmedBeaconTx { txid })`. This test
-    /// constructs a singleton-beacon transaction with `Status::Unconfirmed`
-    /// (taken from the existing fixtures and overridden to `confirmed:false`)
-    /// and asserts the variant is returned with the txid preserved.
+    /// The in-crate transactions fixture, shared by the two unconfirmed-tx tests.
+    /// A generic singleton-beacon tx carrying a valid OP_RETURN signal output;
+    /// confirmed by default, overridden to `confirmed:false` per test.
+    const UNCONFIRMED_FIXTURE: &str = include_str!(
+        "../fixtures/k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp-transactions.json"
+    );
+
+    /// a *needed* unconfirmed signal — one whose
+    /// announced hash is present in the sidecar update-lookup table — must raise a
+    /// typed `Err(resolver::Error::UnconfirmedBeaconTx { txid })` (the hidden panic
+    /// previously at resolver.rs:227), preserving the txid.
     ///
     /// `Btcr2Error` is untouched.
     #[test]
-    fn unconfirmed_beacon_tx_returns_err() {
-        // Start from the real on-disk fixture so the OP_RETURN signal extraction
-        // path succeeds, then overwrite the status of the first Singleton tx to
-        // unconfirmed via raw JSON before deserializing.
-        let raw = include_str!(
-            "../fixtures/k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp-transactions.json"
-        );
-        let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let first_tx = &mut json["SingletonBeacon"][0];
-        let expected_txid_str = first_tx["txid"].as_str().unwrap().to_string();
-        first_tx["status"] = serde_json::json!({ "confirmed": false });
-
-        let transactions: HashMap<BeaconType, Vec<Transaction>> =
-            serde_json::from_value(json).unwrap();
-
-        // Set up a minimal resolver to call find_next_signals on. `find_next_signals`
-        // iterates the supplied `transactions` map and inspects each tx's last
-        // output + confirmation status; it does NOT cross-check the tx against the
-        // resolver's beacon addresses (the address coupling only governs request
-        // *generation* in `next_signals_requests`). The resolver doc is therefore
+    fn unconfirmed_needed_signal_returns_err() {
+        // `find_next_signals` iterates the supplied `transactions` map and inspects
+        // each tx's last output + confirmation status; it does NOT cross-check the
+        // tx against the resolver's beacon addresses (that coupling only governs
+        // request *generation* in `next_signals_requests`). The resolver doc is
         // re-homed onto the regtest k1 qgpakaw4 vector purely so a valid resolver
-        // exists — the in-crate transactions fixture (a generic tx carrying a valid
-        // OP_RETURN signal output) drives the unconfirmed-status branch directly,
-        // with no regtest-doc/tx mismatch.
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
+        // exists.
+        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
             return;
         };
 
-        let err = resolver.find_next_signals(transactions).unwrap_err();
+        // Confirmed pass: discover the update hash this beacon tx announces, reusing
+        // the production extraction path rather than re-parsing the OP_RETURN.
+        let confirmed_txs: HashMap<BeaconType, Vec<Transaction>> =
+            serde_json::from_str(UNCONFIRMED_FIXTURE).unwrap();
+        let confirmed_signals = resolver
+            .find_next_signals(confirmed_txs)
+            .expect("confirmed fixture yields a beacon signal");
+        let announced = confirmed_signals[0].signal_bytes;
+
+        // Make that announced hash a *needed* signal by inserting it into the
+        // lookup table. find_next_signals only checks key presence, so the mapped
+        // Update value is immaterial — borrow a real one from the spec-form fixture.
+        let sidecar = SidecarData::from_json_value(
+            serde_json::from_str(include_str!(
+                "../fixtures/spec-form/sidecar-two-updates.json"
+            ))
+            .unwrap(),
+        )
+        .expect("sidecar deserializes");
+        resolver
+            .update_lookup_table
+            .insert(announced, sidecar.updates[0].clone());
+
+        // Unconfirmed pass: the same tx, now in the mempool. A *needed* unconfirmed
+        // signal must hard-fail resolution with the txid preserved.
+        let mut json: serde_json::Value = serde_json::from_str(UNCONFIRMED_FIXTURE).unwrap();
+        let first_tx = &mut json["SingletonBeacon"][0];
+        let expected_txid_str = first_tx["txid"].as_str().unwrap().to_string();
+        first_tx["status"] = serde_json::json!({ "confirmed": false });
+        let unconfirmed_txs: HashMap<BeaconType, Vec<Transaction>> =
+            serde_json::from_value(json).unwrap();
+
+        let err = resolver.find_next_signals(unconfirmed_txs).unwrap_err();
         match err {
             Error::UnconfirmedBeaconTx { txid } => {
                 assert_eq!(txid.to_string(), expected_txid_str);
             }
             other => panic!("expected UnconfirmedBeaconTx, got {other:?}"),
         }
+    }
+
+    /// an unconfirmed beacon tx whose announced hash is NOT a needed signal
+    /// (no matching sidecar update) must be SKIPPED, not abort resolution. A real
+    /// beacon address routinely carries unrelated mempool txs; one must not hard-
+    /// fail an otherwise-resolvable DID.
+    #[test]
+    fn unconfirmed_unneeded_signal_is_skipped() {
+        // Isolate a single beacon tx (the fixture carries several confirmed ones)
+        // and mark it unconfirmed, so the only signal in play is the skippable one.
+        let json: serde_json::Value = serde_json::from_str(UNCONFIRMED_FIXTURE).unwrap();
+        let mut first_tx = json["SingletonBeacon"][0].clone();
+        first_tx["status"] = serde_json::json!({ "confirmed": false });
+        let json = serde_json::json!({ "SingletonBeacon": [first_tx] });
+        let transactions: HashMap<BeaconType, Vec<Transaction>> =
+            serde_json::from_value(json).unwrap();
+
+        // Empty sidecar → the announced hash is not present in the lookup table, so
+        // the unconfirmed tx is not a signal we are waiting on.
+        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
+            return;
+        };
+
+        let signals = resolver
+            .find_next_signals(transactions)
+            .expect("an unconfirmed tx we hold no sidecar for is skipped, not an error");
+        assert!(
+            signals.is_empty(),
+            "the sole unconfirmed beacon tx was skipped, so no signals are produced"
+        );
     }
 
     // this legacy test drives a full multi-block FSM traversal
@@ -1548,5 +1631,92 @@ mod tests {
             }
             other => panic!("expected MissingUpdateData, got {other:?}"),
         }
+    }
+
+    /// a `CASBeacon` signal reaching `process_beacon_signals` (a
+    /// subject-controlled beacon type) returns the typed `Btcr2Error::Unsupported`
+    /// instead of panicking — no remote DoS.
+    #[test]
+    fn cas_signal_returns_unsupported() {
+        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
+            return;
+        };
+
+        let signal = NextSignal {
+            beacon_type: BeaconType::Cas,
+            signal_bytes: Sha256Hash([1u8; 32]),
+            block_time: Utc::now(),
+            block_height: 1,
+        };
+
+        let err = resolver
+            .process_beacon_signals(vec![signal])
+            .expect_err("CAS beacon must error, not panic");
+        assert!(
+            matches!(err, Error::Btcr2Error(Btcr2Error::Unsupported(_))),
+            "expected Unsupported, got {err:?}"
+        );
+    }
+
+    /// an `SMTBeacon` signal reaching `process_beacon_signals` returns
+    /// the typed `Btcr2Error::Unsupported` instead of panicking.
+    #[test]
+    fn smt_signal_returns_unsupported() {
+        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
+            return;
+        };
+
+        let signal = NextSignal {
+            beacon_type: BeaconType::SparseMerkleTree,
+            signal_bytes: Sha256Hash([2u8; 32]),
+            block_time: Utc::now(),
+            block_height: 1,
+        };
+
+        let err = resolver
+            .process_beacon_signals(vec![signal])
+            .expect_err("SMT beacon must error, not panic");
+        assert!(
+            matches!(err, Error::Btcr2Error(Btcr2Error::Unsupported(_))),
+            "expected Unsupported, got {err:?}"
+        );
+    }
+
+    /// a contemporary document carrying a `CASBeacon` service drives
+    /// the request-building path (`next_signals_requests`, via the Init FSM step)
+    /// to the typed `Btcr2Error::Unsupported` instead of a panic.
+    #[test]
+    fn cas_service_request_returns_unsupported() {
+        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
+            return;
+        };
+        // Subject-controlled: flip the genesis beacon to an unimplemented type.
+        resolver.contemporary_doc.fields.service.head.ty = BeaconType::Cas;
+
+        let err = resolver
+            .resolve()
+            .expect_err("CAS beacon request build must error, not panic");
+        assert!(
+            matches!(err, Error::Btcr2Error(Btcr2Error::Unsupported(_))),
+            "expected Unsupported, got {err:?}"
+        );
+    }
+
+    /// a contemporary document carrying an `SMTBeacon` service drives
+    /// the request-building path to the typed `Btcr2Error::Unsupported`.
+    #[test]
+    fn smt_service_request_returns_unsupported() {
+        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
+            return;
+        };
+        resolver.contemporary_doc.fields.service.head.ty = BeaconType::SparseMerkleTree;
+
+        let err = resolver
+            .resolve()
+            .expect_err("SMT beacon request build must error, not panic");
+        assert!(
+            matches!(err, Error::Btcr2Error(Btcr2Error::Unsupported(_))),
+            "expected Unsupported, got {err:?}"
+        );
     }
 }

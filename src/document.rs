@@ -27,12 +27,14 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs, num::NonZeroU64, path::Path, str::FromStr};
 
-const DID_CORE_V1_1_CONTEXT: &str = "https://www.w3.org/TR/did-1.1";
-// TODO: Needs to be updated (eventually) to "https://btc1.dev/context/v1"
-const DID_BTC1_CONTEXT: &str = "https://did-btc1/TBD/context";
+const DID_CORE_V1_1_CONTEXT: &str = "https://www.w3.org/ns/did/v1.1";
+const DID_BTC1_CONTEXT: &str = "https://btcr2.dev/context/v1";
 
-const DID_PLACEHOLDER: &str =
-    "did:btcr2:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+// The genesis-document placeholder DID. Externally-prepared intermediate
+// documents are authored with this placeholder in every `id` position; binding
+// to a real DID substitutes it for the encoded `did:btcr2:…` string. Spec:
+// did-btcr2/src/data-structures.md:49, terminology.md:148-149.
+const DID_PLACEHOLDER: &str = "did:btcr2:_";
 
 mod version_id_serde {
     //! Custom serde for `NonZeroU64` ↔ ASCII string.
@@ -289,13 +291,22 @@ where
         let service =
             <T as SequenceFromVec<Beacon>>::sequence_from_vec(service_vec, "beacon service")?;
 
-        // defaults to false for initial documents (which never carry the
-        // field). The deactivate JSON Patch flips it to true via the normal
-        // apply_update re-parse path — no special case here.
-        let deactivated = value
-            .get("deactivated")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // an absent field defaults to false for initial documents (which
+        // never carry it); the deactivate JSON Patch flips it to true via the
+        // normal apply_update re-parse path — no special case here. A present
+        // field MUST be a JSON boolean (data-structures.md:339): a
+        // present-but-non-boolean value (e.g. `"true"`, `1`, `null`) is rejected
+        // rather than silently coerced to false (active), which would let a
+        // crafted `deactivated` mask a deactivated DID as active.
+        let deactivated = match value.get("deactivated") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(_) => {
+                return Err(
+                    Btcr2Error::InvalidDidDocument("deactivated must be a boolean".into()).into(),
+                );
+            }
+        };
 
         Ok(DocumentFields {
             id,
@@ -547,6 +558,37 @@ impl SidecarData {
     }
 }
 
+impl DocumentFields<Did> {
+    /// The single definition of the capabilityInvocation-membership rule, shared
+    /// by both the construction primitive (`Document::construct_signed_update`)
+    /// and the resolve path (`InitialDocument::apply_update`) so the spec rule has
+    /// one home and cannot drift between the two sides.
+    ///
+    /// A proof's `verificationMethod` id MUST appear in this document's
+    /// `capabilityInvocation` set — only a key the document authorized to invoke
+    /// its root capability may sign an update. A non-member is rejected with the
+    /// spec-literal INVALID_DID_UPDATE (`Btcr2Error::InvalidDidUpdate`), matching
+    /// did-btcr2/src/operations/update.md (construction) and
+    /// did-btcr2/src/operations/resolve.md:198 (resolution) — the same code on
+    /// both sides, so no interop-visible divergence ships.
+    fn ensure_capability_invocation_member(
+        &self,
+        verification_method_id: &str,
+    ) -> Result<(), Btcr2Error> {
+        if self
+            .capability_invocation
+            .iter()
+            .any(|id| id.0 == verification_method_id)
+        {
+            Ok(())
+        } else {
+            Err(Btcr2Error::InvalidDidUpdate(
+                "verificationMethod id not present in the capabilityInvocation set".into(),
+            ))
+        }
+    }
+}
+
 /// Represents a JSON or JSON-LD document
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
@@ -683,17 +725,10 @@ impl Document {
                 )
             })?;
 
-        // Guard 2: the id must also appear in the capabilityInvocation set.
-        if !self
-            .fields
-            .capability_invocation
-            .iter()
-            .any(|id| id.0 == verification_method_id)
-        {
-            return Err(Btcr2Error::InvalidDidUpdate(
-                "verificationMethod id not present in the capabilityInvocation set".into(),
-            ));
-        }
+        // Guard 2: the id must also appear in the capabilityInvocation set
+        // (shared with apply_update via the single membership helper).
+        self.fields
+            .ensure_capability_invocation_member(verification_method_id)?;
 
         // Guard 3: the caller key must match the matched method's public key,
         // so the produced signature will verify against this document.
@@ -924,7 +959,6 @@ impl InitialDocument {
         Self::from_json_value(json!({
             "id": did.encode(),
             "@context": [DID_CORE_V1_1_CONTEXT, DID_BTC1_CONTEXT],
-            "controller": [did.encode()],
             "verificationMethod": [{
                 "id": verification_method_id,
                 "type": "Multikey",
@@ -953,7 +987,9 @@ impl InitialDocument {
                     .as_ref()
                     .map(|doc| doc.sidecar_initial_validation(hash))
             })
-            .unwrap_or_else(|| todo!("Sans I/O CAS retrieval"))?;
+            .ok_or(Btcr2Error::Unsupported(
+                "genesis-CAS retrieval is not yet implemented".into(),
+            ))??;
 
         // Step 3: Validate conformant DID document according to the DID Core 1.1 specification
 
@@ -1014,6 +1050,22 @@ impl InitialDocument {
                 ))
             })?;
 
+        // The proof's verificationMethod MUST be an authorized invoker — a member
+        // of this document's capabilityInvocation set (resolve.md:198). Shared with
+        // construct_signed_update via the single membership helper, mapped to the
+        // spec-literal INVALID_DID_UPDATE.
+        self.fields
+            .ensure_capability_invocation_member(verification_method)?;
+
+        // NOTE (resolve-path proof checks, O-1/O-2): proof.expires and
+        // proof.capabilityAction are NOT enforced here — they appear nowhere in
+        // resolve.md or any migrated resolve vector (the spec is silent on them on
+        // the resolve path). Enforcing one now would bake an interop divergence in
+        // before the Rust/JS/Java implementations agree (a T7-class hazard), so the
+        // open question is escalated to QUESTIONS.txt rather than invented here.
+        // capabilityAction == "Write" remains a CONSTRUCTION must (data-structures.md);
+        // only its resolve-path enforcement is deferred.
+
         crypto_suite.data_integrity_verify_proof(
             public_key,
             update,
@@ -1028,6 +1080,17 @@ impl InitialDocument {
         self.fields = DocumentFields::try_from((&self.json_data, None)).map_err(|_| {
             Btcr2Error::InvalidDidUpdate("Updated DID document is non-conformant".into())
         })?;
+
+        // The document identifier is immutable across an update: the post-patch
+        // document id MUST still equal this DID (resolve.md:187). `did` is the DID
+        // decoded from the proof's root capability above; rejecting a mismatch
+        // stops a patch from re-pointing the document identity. Spec-literal
+        // INVALID_DID_UPDATE, matching the pre-patch capability check above.
+        if self.fields.id != did {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "post-patch document id does not equal the DID".into(),
+            ));
+        }
 
         if self.hash() != update.target_hash {
             return Err(Btcr2Error::InvalidDidUpdate(
@@ -1288,19 +1351,13 @@ mod tests {
         assert_eq!(doc.fields.verification_method.len(), 1);
     }
 
-    // Re-homed onto the EXTERNAL x1 q26jeds9 vector. The old flat
-    // regtest/x1qgcs.../initialDidDoc.json was deleted by the upstream
-    // restructure. The vector's `other.json.genesisDocument` carries the NEW
-    // `did:btcr2:_` genesis-document placeholder, but the crate still substitutes
-    // the OLD 60-char `did:btcr2:xxxx…` placeholder (the placeholder change is
-    // spec-owned and out of scope). `into_initial`
-    // therefore leaves `did:btcr2:_` in place and the doc fails to parse as a real
-    // DID. The read is re-homed onto the surviving x1 q26jeds9 path so this test
-    // compiles and is runnable on demand; it un-gates once the placeholder change lands the
-    // placeholder change.
-    #[ignore = "2026-06-22 gap6-placeholder-pending (spec-owned, teammate): migrated external \
-                vectors use did:btcr2:_; crate still substitutes the 60-char placeholder. \
-                Un-gate when the placeholder change lands."]
+    // Drives the EXTERNAL x1 q26jeds9 vector. The vector's
+    // `other.json.genesisDocument` is authored with the spec-form `did:btcr2:_`
+    // genesis placeholder; `into_initial` substitutes it for the real DID, and
+    // `sidecar_initial_validation` confirms the rebuilt intermediate hash matches
+    // the External `genesisBytes`. (The old flat regtest/x1qgcs.../initialDidDoc.json
+    // was deleted by the upstream restructure; this read is homed on the surviving
+    // q26jeds9 path.)
     #[test]
     fn test_sidecar_initial_validation() {
         let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
@@ -1330,6 +1387,64 @@ mod tests {
         let hash = did.hash_unchecked();
         let initial_doc = InitialDocument::resolve_external(hash, &resolution_options).unwrap();
         assert_eq!(initial_doc.fields.id, did);
+    }
+
+    // `sidecar_initial_validation` recomputes the intermediate-document hash from
+    // the supplied initial document and rejects it when that hash does not equal
+    // the External `genesisBytes`. Here the bound initial document is correct; the
+    // only divergence is a deliberately corrupted hash argument (one byte flipped
+    // in the External genesisBytes), so the failure is isolated to the hash check
+    // and the error must be `InvalidDid`.
+    #[test]
+    fn test_sidecar_initial_validation_hash_mismatch() {
+        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
+            return;
+        };
+        let other: Value = serde_json::from_str(&other).unwrap();
+
+        let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
+            .parse()
+            .unwrap();
+
+        let intermediate = IntermediateDocument::from_json_value(
+            other["genesisDocument"].clone(),
+            Network::Regtest,
+        )
+        .unwrap();
+        let initial_doc = intermediate.into_initial(&did);
+
+        // Flip one byte of the genuine External genesisBytes so the only thing
+        // wrong is the hash passed to validation.
+        let mut wrong = did.hash_unchecked();
+        wrong.0[0] ^= 0xff;
+
+        let result = initial_doc.sidecar_initial_validation(wrong);
+        assert!(
+            matches!(result, Err(Error::Btcr2Error(Btcr2Error::InvalidDid(_)))),
+            "hash mismatch must error InvalidDid, got: {result:?}"
+        );
+    }
+
+    // when `resolve_external` is given no sidecar initial document, the
+    // genesis-CAS retrieval fallback is not yet implemented. It must return the
+    // typed `Btcr2Error::Unsupported` rather than panicking — a remote-published
+    // External DID with no sidecar genesis cannot crash the resolver.
+    #[test]
+    fn external_genesis_cas_fallback_returns_unsupported() {
+        let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
+            .parse()
+            .unwrap();
+
+        // No sidecar genesis document supplied → the `.and_then` chain yields
+        // None and the genesis-CAS fallback fires.
+        let resolution_options = ResolutionOptions::default();
+
+        let hash = did.hash_unchecked();
+        let result = InitialDocument::resolve_external(hash, &resolution_options);
+        assert!(
+            matches!(result, Err(Error::Btcr2Error(Btcr2Error::Unsupported(_)))),
+            "genesis-CAS fallback must error Unsupported, got: {result:?}"
+        );
     }
 
     #[test]
@@ -1525,19 +1640,17 @@ mod tests {
         );
     }
 
-    // Re-homed onto the x1 q26jeds9 vector. The old flat
-    // regtest/x1qgcs.../{intermediateDidDoc.json,did.txt,initialDidDoc.json}
-    // were all deleted. The vector's `other.json.genesisDocument` is the external
-    // intermediate document; its hash IS the External genesisBytes, so
-    // `from_external_intermediate` re-derives the q26jeds9 DID. The produced
-    // initial document, however, still contains the NEW `did:btcr2:_` placeholder
-    // (the crate substitutes the OLD 60-char placeholder, which is spec-owned
-    // and out of scope), so the bound initial doc cannot parse as a
-    // real DID. Read re-homed onto the surviving path so this compiles; un-gates
-    // when the placeholder change lands.
-    #[ignore = "2026-06-22 gap6-placeholder-pending (spec-owned, teammate): migrated external \
-                vectors use did:btcr2:_; crate still substitutes the 60-char placeholder. \
-                Un-gate when the placeholder change lands."]
+    // Drives the x1 q26jeds9 vector. The vector's `other.json.genesisDocument`
+    // is the external intermediate document; its hash IS the External
+    // `genesisBytes`, so `from_external_intermediate` re-derives the q26jeds9 DID.
+    // Because the genesis document is authored with the spec-form `did:btcr2:_`
+    // placeholder, `into_initial` substitutes it for the real DID, producing the
+    // bound genesis (version-1) document. The re-derived DID must equal the
+    // create output, and reversing the binding (`from_initial`) and re-hashing the
+    // intermediate must reproduce the External `genesisBytes` — the round-trip the
+    // External `did:btcr2` identity is built on. (The old flat
+    // regtest/x1qgcs.../{intermediateDidDoc.json,did.txt,initialDidDoc.json} were
+    // deleted upstream; this read is homed on the surviving q26jeds9 path.)
     #[test]
     fn test_from_external_intermediate() {
         let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
@@ -1547,13 +1660,8 @@ mod tests {
         else {
             return;
         };
-        let Some(resolve_output) = read_fixture_or_skip("regtest/x1/q26jeds9/resolve/output.json")
-        else {
-            return;
-        };
         let other: Value = serde_json::from_str(&other).unwrap();
         let create_output: Value = serde_json::from_str(&create_output).unwrap();
-        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
 
         let intermediate_doc = IntermediateDocument::from_json_value(
             other["genesisDocument"].clone(),
@@ -1569,10 +1677,14 @@ mod tests {
         // The re-derived DID must equal create/output.json.did.
         assert_eq!(did.encode(), create_output["did"].as_str().unwrap());
 
-        // The produced initial document must hash to the resolved didDocument.
-        let expected_doc =
-            Document::from_json_string(&resolve_output["didDocument"].to_string()).unwrap();
-        assert_eq!(initial_doc.hash(), expected_doc.hash());
+        // The bound initial document must carry the real DID (placeholder
+        // substituted), not the genesis placeholder.
+        assert_eq!(initial_doc.fields.id, did);
+
+        // Reversing the binding and re-hashing the intermediate must reproduce the
+        // External genesisBytes encoded in the DID — the identity round-trip.
+        let rebuilt = IntermediateDocument::from_initial(&initial_doc);
+        assert_eq!(rebuilt.hash(), did.hash_unchecked());
     }
 
     /// Smoke: the empty spec-form fixture deserializes into
@@ -2090,6 +2202,123 @@ mod tests {
         );
     }
 
+    /// True DUPLICATE beacon signals (already-applied updates announced twice)
+    /// must NOT raise a false LATE_PUBLISHING — the resolver must still resolve
+    /// to the latest updated document. Regression for the spurious DOCUMENT-hash
+    /// push in the duplicate-update branch (resolver step 10.1): pushing the
+    /// contemporary document hash before `confirm_duplicate` grows the update-hash
+    /// history out from under `confirm_duplicate`, which indexes it at
+    /// `[targetVersionId - 2]`. A duplicate of an EARLIER version shifts a later
+    /// version's index onto the spurious document hash, so the later duplicate's
+    /// in-range comparison mismatches and raises a false late-publishing.
+    ///
+    /// Drive: two real updates (v2 then v3), each announced and delivered on the
+    /// beacon TWICE in a single batch. With the bug, the v2 duplicate's spurious
+    /// push displaces the v3 entry so the v3 duplicate reads a document hash and
+    /// errors; without it, both duplicates confirm-as-duplicate and resolution
+    /// reaches version 3.
+    #[test]
+    fn duplicate_signals_do_not_raise_false_late_publishing() {
+        use crate::beacon::BeaconType;
+        use crate::resolver::{Resolver, ResolverState};
+        use std::collections::HashMap;
+
+        let (did, vm_id, genesis, genesis_doc) = source_documents();
+
+        // Update #1 (v2) against the genesis document.
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+        let update1 = genesis_doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, source_secret_key())
+            .expect("update #1 constructs against the genesis document");
+
+        // Apply #1 to get the contemporary document for update #2.
+        let mut after_update1 = genesis.clone();
+        after_update1
+            .apply_update(&update1)
+            .expect("update #1 applies to the genesis document");
+        let doc_after_update1 = Document::from(after_update1);
+
+        // Update #2 (v3) against the post-update-1 document (another benign patch).
+        let v3 = NonZeroU64::new(3).expect("3 is non-zero");
+        let update2 = doc_after_update1
+            .construct_signed_update(benign_patch(&vm_id), v3, &vm_id, source_secret_key())
+            .expect("update #2 constructs against the post-update-1 document");
+
+        // Announce both from the P2WPKH default beacon and bridge each twice
+        // (the duplicate confirmation carries the identical update / signal hash).
+        let (beacon_address, prevout1) =
+            beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
+        let signed1 = update1
+            .announce_singleton(
+                &beacon_address,
+                &[prevout1],
+                1_000,
+                &beacon_address,
+                source_secret_key(),
+            )
+            .expect("announce update #1");
+        let (_addr2, prevout2) =
+            beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
+        let signed2 = update2
+            .announce_singleton(
+                &beacon_address,
+                &[prevout2],
+                1_000,
+                &beacon_address,
+                source_secret_key(),
+            )
+            .expect("announce update #2");
+        let b1 = bridge_to_esplora(&signed1, 100, 1_700_000_000);
+        let b1_dup = bridge_to_esplora(&signed1, 100, 1_700_000_000);
+        let b2 = bridge_to_esplora(&signed2, 101, 1_700_000_100);
+        let b2_dup = bridge_to_esplora(&signed2, 101, 1_700_000_100);
+
+        let sidecar = SidecarData::new(None, vec![update1.clone(), update2.clone()], None, None);
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(genesis.clone(), resolution_options);
+
+        let ResolverState::Requests(next_state, _requests) = resolver
+            .resolve()
+            .expect("Init step yields beacon requests")
+        else {
+            panic!("expected Requests from Init step");
+        };
+        let mut transactions: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
+            HashMap::new();
+        // Each update arrives TWICE on the Singleton beacon: the dups must not
+        // trip a false late-publishing.
+        transactions.insert(BeaconType::Singleton, vec![b1, b1_dup, b2, b2_dup]);
+        let fsm = next_state.process_responses(transactions);
+
+        let mut state = fsm.resolve().expect(
+            "processing the duplicate beacon signals resolves a step without late-publishing",
+        );
+        let result = loop {
+            match state {
+                ResolverState::Resolved(result) => break result,
+                ResolverState::Requests(next, _requests) => {
+                    let empty: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
+                        HashMap::new();
+                    state = next
+                        .process_responses(empty)
+                        .resolve()
+                        .expect("empty-signal step resolves without a false late-publishing");
+                }
+            }
+        };
+
+        // The duplicate signals did not derail resolution: it reached version 3.
+        assert_eq!(result.document.fields.id.encode(), did.encode());
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            3,
+            "duplicate beacon signals must not derail resolution to a false LATE_PUBLISHING"
+        );
+    }
+
     /// Criterion 4: create a key-based DID, apply one update and then a
     /// deactivate update, and re-resolve — the terminal state has
     /// `deactivated == true` and `version_id == 3` (genesis 1 -> update 2 ->
@@ -2220,6 +2449,146 @@ mod tests {
         assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
+    /// resolve.md:198 — apply_update MUST reject an update whose proof
+    /// verificationMethod is NOT a member of the document's capabilityInvocation
+    /// set (an update signed by a key the document never authorized to invoke its
+    /// root capability). The same membership rule the construction side enforces
+    /// is enforced on the resolve path via a shared helper, mapped to the
+    /// spec-literal INVALID_DID_UPDATE (`Btcr2Error::InvalidDidUpdate`).
+    #[test]
+    fn apply_update_rejects_vm_not_in_capability_invocation() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // A valid signed update against the conformant genesis document (its
+        // capabilityInvocation DOES contain vm_id, so construction succeeds).
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("a valid signed update is produced");
+
+        // Build the apply target: same id and same verificationMethod (so the
+        // proof's VM resolves to a public key and the signature still verifies),
+        // but capabilityInvocation references a DIFFERENT method id — so the
+        // proof's VM is NOT an authorized invoker.
+        let secp = Secp256k1::new();
+        let other_key = SecretKey::generate().public_key(&secp);
+        let other_vm_id = format!("{}#otherKey", did.encode());
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"]
+            .as_array_mut()
+            .expect("verificationMethod is an array")
+            .push(serde_json::json!({
+                "id": other_vm_id,
+                "type": "Multikey",
+                "controller": did.encode(),
+                "publicKeyMultibase": other_key.to_multikey(),
+            }));
+        json["capabilityInvocation"] = serde_json::json!([other_vm_id]);
+        json["capabilityDelegation"] = serde_json::json!([other_vm_id]);
+
+        let mut target = InitialDocument::from_json_value(json)
+            .expect("the apply target is a conformant document");
+        let err = target
+            .apply_update(&update)
+            .expect_err("a proof VM absent from capabilityInvocation must be rejected on apply");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("capabilityInvocation"),
+                "rejection must be the capabilityInvocation-membership check, not an \
+                 incidental hash/parse failure; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// resolve.md:187 — apply_update MUST reject an update whose patch changes the
+    /// document `id` (a post-patch `id != did`): a patch cannot re-point the
+    /// document identity. Mapped to the spec-literal INVALID_DID_UPDATE
+    /// (`Btcr2Error::InvalidDidUpdate`).
+    ///
+    /// The construction primitive refuses an id-changing patch, so this builds the
+    /// signed id-changing update directly (mirroring construct_signed_update but
+    /// without the construct-side id-immutability guard), then applies it: the
+    /// signature verifies against the genesis VM, the patch re-parses to a
+    /// conformant (but re-identified) document whose hash matches the update's
+    /// targetHash, and the new resolve-path id==did check is the rejecting gate.
+    #[test]
+    fn apply_update_rejects_post_patch_id_change() {
+        let (did, vm_id, initial, _document) = source_documents();
+
+        // A DIFFERENT, valid key-based DID string to re-point `id` at.
+        let secp = Secp256k1::new();
+        let other_public_key = SecretKey::from_slice(&[5u8; 32])
+            .expect("[5u8; 32] is a valid secp256k1 secret key")
+            .public_key(&secp);
+        let other_did: Did = DidComponents::new(
+            DidVersion::One,
+            Network::Mutinynet,
+            IdType::from(other_public_key),
+        )
+        .try_into()
+        .expect("a second key-based did encodes");
+        assert_ne!(other_did.encode(), did.encode());
+
+        // An id-changing patch (replaces the document id). The vm/controller ids
+        // are left referencing the ORIGINAL did so the document still parses.
+        let id_change_patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "replace", "path": "/id", "value": other_did.encode()}
+        ]))
+        .expect("id-change patch is a valid RFC 6902 op array");
+
+        // Build the signed update by hand (construct_signed_update would reject
+        // the id change). target_hash is computed from the patched document so the
+        // resolve-path hash check passes and the id check is what fires.
+        let source_hash = initial.hash();
+        let mut target_value = initial.as_ref().clone();
+        json_patch::patch(&mut target_value, &id_change_patch)
+            .expect("the id-change patch applies to the genesis json");
+        let target_hash = Document::from_json_value(target_value)
+            .expect("the re-identified document still parses as conformant")
+            .hash();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let unsigned =
+            UnsecuredUpdate::construct(&id_change_patch, source_hash, target_hash, version);
+
+        let capability = derive_root_capability(initial.fields.id.clone());
+        let inner = ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: vm_id.clone(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability,
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        };
+        let proof = CryptoSuite
+            .create_proof(&unsigned, inner, source_secret_key())
+            .expect("the id-changing update signs");
+        let mut signed_json = unsigned.as_ref().clone();
+        if let Value::Object(map) = &mut signed_json {
+            map.insert(
+                "proof".to_string(),
+                serde_json::to_value(&proof).expect("proof serializes"),
+            );
+        }
+        let update =
+            Update::from_json_value(signed_json).expect("the signed id-changing update parses");
+
+        let mut target = initial.clone();
+        let err = target
+            .apply_update(&update)
+            .expect_err("a patch that changes the document id must be rejected on apply");
+        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
+    }
+
     /// update.md:87 — a vm_id present in verificationMethod but absent from
     /// capabilityInvocation is rejected before signing.
     #[test]
@@ -2346,6 +2715,74 @@ mod tests {
                 "expected a deactivated-document message, got: {msg}"
             ),
             other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// the `deactivated` parse boundary distinguishes three cases on
+    /// subject-controlled JSON (data-structures.md:339 — `deactivated` is a
+    /// REQUIRED boolean):
+    ///   - absent  -> defaults to `false` (legitimate for initial documents,
+    ///     which never carry the field),
+    ///   - boolean -> carries its value,
+    ///   - present-but-non-boolean -> rejected with `InvalidDidDocument`, NOT
+    ///     silently coerced to `false` (active). A crafted `deactivated: "true"`
+    ///     can no longer mask a deactivated DID as active.
+    #[test]
+    fn deactivated_parse_distinguishes_absent_bool_non_bool() {
+        let (did, vm_id, _initial, _document) = source_documents();
+
+        // absent -> false: the base document JSON carries no `deactivated` key.
+        let absent = document_json(&did, &vm_id);
+        assert!(
+            !absent
+                .as_object()
+                .expect("document_json builds an object")
+                .contains_key("deactivated"),
+            "the base fixture must not carry a deactivated key"
+        );
+        let document =
+            Document::from_json_value(absent).expect("a document with no deactivated key parses");
+        assert!(
+            !document.fields.deactivated,
+            "an absent deactivated field defaults to false"
+        );
+
+        // bool -> value: an explicit `true` is carried through.
+        let mut active_true = document_json(&did, &vm_id);
+        active_true
+            .as_object_mut()
+            .expect("document_json builds an object")
+            .insert("deactivated".to_string(), serde_json::json!(true));
+        let document =
+            Document::from_json_value(active_true).expect("a boolean deactivated field parses");
+        assert!(
+            document.fields.deactivated,
+            "a present boolean deactivated field carries its value"
+        );
+
+        // non-bool -> Err(InvalidDidDocument): string, number, and null are all
+        // rejected rather than coerced to active.
+        for non_bool in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            let mut json = document_json(&did, &vm_id);
+            json.as_object_mut()
+                .expect("document_json builds an object")
+                .insert("deactivated".to_string(), non_bool.clone());
+
+            let err = Document::from_json_value(json)
+                .expect_err("a present-but-non-boolean deactivated field must be rejected");
+            match err {
+                Error::Btcr2Error(Btcr2Error::InvalidDidDocument(msg)) => assert!(
+                    msg.contains("deactivated"),
+                    "expected a deactivated type message, got: {msg}"
+                ),
+                other => panic!(
+                    "expected InvalidDidDocument for deactivated = {non_bool}, got {other:?}"
+                ),
+            }
         }
     }
 
@@ -2517,6 +2954,46 @@ mod tests {
             "/fixtures/spec-form/golden-signed-update.json"
         );
         bless_or_assert(&produced, golden_path);
+    }
+
+    /// the deterministically generated genesis document is
+    /// spec-conformant on `@context`/`controller`, matching the migrated
+    /// test-suite resolve vectors (the interop oracle) and the
+    /// `key-based-initial-did-document-template.hbs` template:
+    ///   (a) `@context` is exactly
+    ///       `["https://www.w3.org/ns/did/v1.1","https://btcr2.dev/context/v1"]`,
+    ///   (b) there is NO top-level `controller` key, and
+    ///   (c) the per-verification-method `controller` is still present as a
+    ///       string.
+    #[test]
+    fn deterministically_generate() {
+        let (_did, _vm_id, _initial, document) = source_documents();
+        let json: Value = serde_json::from_str(
+            &serde_json::to_string(document.as_ref()).expect("genesis document serializes to JSON"),
+        )
+        .expect("serialized genesis document parses as JSON value");
+
+        // (a) @context is the exact two-element spec array, in order.
+        assert_eq!(
+            json["@context"],
+            serde_json::json!([
+                "https://www.w3.org/ns/did/v1.1",
+                "https://btcr2.dev/context/v1"
+            ]),
+            "genesis @context must match the migrated resolve vectors"
+        );
+
+        // (b) no top-level controller (the .hbs template and vectors omit it).
+        assert!(
+            json.get("controller").is_none(),
+            "genesis document must NOT emit a top-level controller"
+        );
+
+        // (c) the per-VM controller stays, and is a string (not an array).
+        assert!(
+            json["verificationMethod"][0]["controller"].is_string(),
+            "the per-verification-method controller must remain a string"
+        );
     }
 
     /// Build a minimal conformant key-based DID document JSON with a single
