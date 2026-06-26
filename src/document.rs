@@ -441,15 +441,11 @@ where
 /// stale; wire fields are `pub(crate)` as defense-in-depth.
 #[derive(Debug, Default)]
 pub struct SidecarData {
-    /// Wire-form field only. The `x`-HRP genesis-document resolution path
-    /// remains a visible `todo!()`; this field carries the raw wire
-    /// value forward without interpreting it.
-    ///
-    /// Demoting from `pub` to `pub(crate)` exposed this
-    /// forward-compat carrier as in-crate-unread; the `x`-HRP path is its
-    /// consumer. `#[allow(dead_code)]` with this note (the `JsonError::Base58`
-    /// precedent) keeps it until then.
-    #[allow(dead_code)]
+    /// Spec wire-form `genesisDocument` field: the intermediate (placeholder-DID)
+    /// document for an external (`x`-HRP) DID. Consumed by `resolve_external`,
+    /// which bridges it into an initial document (substituting the DID and
+    /// validating against the External `genesisBytes`) when no in-memory
+    /// `initial_document` is supplied.
     pub(crate) genesis_document: Option<Value>,
 
     /// DID Update Payloads, in spec wire form. The lookup table is built from
@@ -943,7 +939,7 @@ impl InitialDocument {
     pub fn from_did(did: &Did, resolution_options: &ResolutionOptions) -> Result<Self, Error> {
         match did.components().id_type() {
             IdType::Key(_) => Self::deterministically_generate(did, resolution_options),
-            IdType::External(hash) => Self::resolve_external(hash, resolution_options),
+            IdType::External(hash) => Self::resolve_external(did, hash, resolution_options),
         }
     }
 
@@ -975,21 +971,40 @@ impl InitialDocument {
 
     // Spec section 7.2.1.2
     fn resolve_external(
+        did: &Did,
         hash: Sha256Hash,
         resolution_options: &ResolutionOptions,
     ) -> Result<Self, Error> {
-        // Step 1
-        let initial_document = resolution_options
-            .sidecar_data
-            .as_ref()
-            .and_then(|data| {
-                data.initial_document
-                    .as_ref()
-                    .map(|doc| doc.sidecar_initial_validation(hash))
-            })
-            .ok_or(Btcr2Error::Unsupported(
+        let sidecar = resolution_options.sidecar_data.as_ref();
+
+        // Step 1: obtain the initial document. Precedence:
+        //   1. an in-memory `initial_document` supplied programmatically (legacy /
+        //      test-harness path), OR
+        //   2. the spec wire-form `genesisDocument` — the intermediate
+        //      (placeholder-DID) document — bridged into an initial document by
+        //      substituting this DID's own identifier and validated against the
+        //      External `genesisBytes`. This is the production sidecar path a CLI
+        //      `resolve --sidecar <file>` deserializes (`initial_document: None`,
+        //      `genesis_document: Some(..)`).
+        // If neither is present (no sidecar, or both fields None) the genesis-CAS
+        // retrieval path is not yet implemented — preserve the typed error.
+        let initial_document = if let Some(doc) =
+            sidecar.and_then(|data| data.initial_document.as_ref())
+        {
+            doc.sidecar_initial_validation(hash)?
+        } else if let Some(genesis) = sidecar.and_then(|data| data.genesis_document.as_ref()) {
+            // Build the initial document from the genesis (intermediate) document
+            // using this DID's own network — NOT a hardcoded network. Structural
+            // errors in the genesis document propagate as typed errors (no unwrap).
+            let intermediate =
+                IntermediateDocument::from_json_value(genesis.clone(), did.components().network())?;
+            let initial = intermediate.into_initial(did);
+            initial.sidecar_initial_validation(hash)?
+        } else {
+            return Err(Btcr2Error::Unsupported(
                 "genesis-CAS retrieval is not yet implemented".into(),
-            ))??;
+            ))?;
+        };
 
         // Step 3: Validate conformant DID document according to the DID Core 1.1 specification
 
@@ -1385,7 +1400,50 @@ mod tests {
         };
 
         let hash = did.hash_unchecked();
-        let initial_doc = InitialDocument::resolve_external(hash, &resolution_options).unwrap();
+        let initial_doc =
+            InitialDocument::resolve_external(&did, hash, &resolution_options).unwrap();
+        assert_eq!(initial_doc.fields.id, did);
+    }
+
+    // Production sidecar path: a `SidecarData` deserialized from the spec wire form
+    // `{"genesisDocument": <intermediate placeholder doc>}` carries
+    // `initial_document: None` and `genesis_document: Some(..)`. `resolve_external`
+    // must bridge the genesis document into the initial document (substituting the
+    // DID and using the DID's OWN network) and pass `sidecar_initial_validation`.
+    // This exercises the serde/CLI path — NOT the in-code struct-literal
+    // `initial_document` shortcut used by `test_sidecar_initial_validation`.
+    #[test]
+    fn resolve_external_bridges_genesis_document_from_serde_path() {
+        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
+            return;
+        };
+        let other: Value = serde_json::from_str(&other).unwrap();
+
+        let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
+            .parse()
+            .unwrap();
+
+        // Deserialize the sidecar from the wire form. This is the exact shape a CLI
+        // `--sidecar-out` writes and `resolve --sidecar` reads back: the serde path
+        // leaves `initial_document` None and only fills `genesis_document`.
+        let sidecar = SidecarData::from_json_value(json!({
+            "genesisDocument": other["genesisDocument"].clone(),
+        }))
+        .unwrap();
+        assert!(
+            sidecar.initial_document.is_none(),
+            "serde path must leave initial_document None; the bridge must build it from genesis_document"
+        );
+        assert!(sidecar.genesis_document.is_some());
+
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+
+        let hash = did.hash_unchecked();
+        let initial_doc =
+            InitialDocument::resolve_external(&did, hash, &resolution_options).unwrap();
         assert_eq!(initial_doc.fields.id, did);
     }
 
@@ -1440,7 +1498,7 @@ mod tests {
         let resolution_options = ResolutionOptions::default();
 
         let hash = did.hash_unchecked();
-        let result = InitialDocument::resolve_external(hash, &resolution_options);
+        let result = InitialDocument::resolve_external(&did, hash, &resolution_options);
         assert!(
             matches!(result, Err(Error::Btcr2Error(Btcr2Error::Unsupported(_)))),
             "genesis-CAS fallback must error Unsupported, got: {result:?}"

@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
-use did_btcr2::document::{Document, InitialDocument, ResolutionOptions, ResolutionResult};
+use did_btcr2::document::{
+    Document, InitialDocument, IntermediateDocument, ResolutionOptions, ResolutionResult,
+};
 use did_btcr2::identifier::{Did, DidComponents, DidVersion, IdType, Network};
 use did_btcr2::key::PublicKey;
 use did_btcr2::resolver::ResolverState;
@@ -68,6 +70,31 @@ impl<T: BtcTransport> Client<T> {
         let did = Did::try_from(components)?;
         let initial = InitialDocument::from_did(&did, &ResolutionOptions::default())?;
         Ok(Document::from(initial))
+    }
+
+    /// Create an external (`x1`) DID + initial document from an externally-authored
+    /// intermediate document.
+    ///
+    /// Pure composition over the sans-I/O core — it makes ZERO transport calls,
+    /// and takes `&self` only to keep the facade's entry surface uniform with
+    /// [`Client::create`]; no field is read. The DID is fixed to version 1
+    /// ([`DidVersion::One`]) per the spec. Returns `Result` for signature
+    /// uniformity with `create`; the underlying core call is infallible.
+    ///
+    /// The resulting `x1` DID is NOT deterministically resolvable: resolving it
+    /// requires the genesis (intermediate) document to be supplied as sidecar
+    /// data (`resolve --sidecar <file>`).
+    pub fn create_external(
+        &self,
+        intermediate_document: IntermediateDocument,
+        network: Network,
+    ) -> Result<(Did, Document), Error> {
+        let (did, initial) = InitialDocument::from_external_intermediate(
+            intermediate_document,
+            Some(DidVersion::One),
+            Some(network),
+        );
+        Ok((did, Document::from(initial)))
     }
 
     /// Resolve a `did:btcr2` identifier to the spec resolution triple.
@@ -520,6 +547,70 @@ mod tests {
         );
         // create makes ZERO transport calls.
         assert_eq!(client.transport.call_count(), 0, "create performs no I/O");
+    }
+
+    /// A self-contained x1 intermediate (placeholder-DID) document. Mirrors the
+    /// spec `did:btcr2:_` genesis-document shape (cf. the x1 q26jeds9 test
+    /// vector); inlined so the client-crate test does not depend on the
+    /// `did-btcr2` crate's test-suite submodule.
+    fn x1_intermediate_document() -> IntermediateDocument {
+        let json = serde_json::json!({
+            "id": "did:btcr2:_",
+            "@context": [
+                "https://www.w3.org/ns/did/v1.1",
+                "https://btcr2.dev/context/v1"
+            ],
+            "verificationMethod": [{
+                "id": "did:btcr2:_#key-0",
+                "type": "Multikey",
+                "controller": "did:btcr2:_",
+                "publicKeyMultibase": "zQ3shTHn9hZ1BHtoZayz4VmPAZT97p2v8swmuPEUwBKHCanTL"
+            }],
+            "authentication": ["did:btcr2:_#key-0"],
+            "assertionMethod": ["did:btcr2:_#key-0"],
+            "capabilityInvocation": ["did:btcr2:_#key-0"],
+            "capabilityDelegation": ["did:btcr2:_#key-0"],
+            "service": [{
+                "id": "did:btcr2:_#service-0",
+                "serviceEndpoint": "bitcoin:mnDXvNsFTf9cs4hWigPkENCBDp9eJpfyxF",
+                "type": "SingletonBeacon"
+            }]
+        });
+        IntermediateDocument::from_json_value(json, Network::Regtest)
+            .expect("the inline intermediate document is structurally valid")
+    }
+
+    #[test]
+    fn create_external_does_no_io() {
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://unused".to_string(), transport);
+
+        let (did, doc) = client
+            .create_external(x1_intermediate_document(), Network::Regtest)
+            .expect("create_external succeeds");
+
+        // The minted DID is an external (x1) identifier.
+        assert!(
+            did.encode().starts_with("did:btcr2:x1"),
+            "external create must mint an x1 DID, got: {}",
+            did.encode()
+        );
+        assert!(
+            matches!(did.components().id_type(), IdType::External(_)),
+            "id type must be External"
+        );
+        // The returned document is bound to the minted DID (its `id` is the
+        // substituted x1 DID, not the `did:btcr2:_` placeholder).
+        assert_eq!(
+            doc.as_ref().get("id").and_then(|v| v.as_str()),
+            Some(did.encode())
+        );
+        // create_external makes ZERO transport calls.
+        assert_eq!(
+            client.transport.call_count(),
+            0,
+            "create_external performs no I/O"
+        );
     }
 
     #[test]

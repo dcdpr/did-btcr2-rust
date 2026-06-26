@@ -8,7 +8,10 @@
 //! announce/broadcast logic of its own; the sans-I/O core (`did-btcr2`) makes no
 //! network calls, and all HTTP lives behind the facade's transport seam.
 
-use did_btcr2::{ResolutionResult, document::SidecarData};
+use did_btcr2::{
+    ResolutionResult,
+    document::{IntermediateDocument, SidecarData},
+};
 use did_btcr2_client::{BtcTransport, Client, Fee, ResolutionOptions, UreqTransport};
 use error_iter::ErrorIter as _;
 use onlyargs::{CliError, OnlyArgs, traits::*};
@@ -28,6 +31,19 @@ use keyload::KeySource;
 /// [`Client`] and dispatches into the facade.
 #[derive(Debug)]
 enum Command {
+    Create {
+        network: Option<String>,
+        key_file: Option<PathBuf>,
+        key_stdin: bool,
+        generate: bool,
+        /// External (`x1`) creation: an externally-authored intermediate DID
+        /// document. Mutually exclusive with `--generate`/key sources (this mode
+        /// consumes NO signing key).
+        intermediate_document: Option<PathBuf>,
+        /// Write a ready-to-use `{"genesisDocument": ..}` sidecar for
+        /// `resolve --sidecar` to this path (external mode only).
+        sidecar_out: Option<PathBuf>,
+    },
     Resolve {
         did: String,
         network: Option<String>,
@@ -138,6 +154,15 @@ enum CliRunError {
         "--key-stdin cannot be combined with an interactive confirm prompt; pass --yes or use --key-file"
     )]
     StdinConflict,
+
+    /// `create` was given both `--generate` and a key source
+    /// (`--key-file`/`--key-stdin`/`DIDBTCR2_KEY`). The two key modes are
+    /// mutually exclusive: `--generate` mints a fresh secret, while a key source
+    /// derives the public key from a secret you already hold.
+    #[error(
+        "use either --generate or a key source (--key-file/--key-stdin/DIDBTCR2_KEY), not both"
+    )]
+    CreateKeySourceConflict,
 }
 
 impl OnlyArgs for Args {
@@ -155,6 +180,29 @@ impl OnlyArgs for Args {
             "  -h --help     Show this help message.\n",
             "  -V --version  Show the application version.\n",
             "\nCommands:\n",
+            "  create                       Mint a did:btcr2 document OFFLINE and print\n",
+            "                               it. No broadcast; no network calls. Prints the\n",
+            "                               DID identifier and the document as JSON.\n",
+            "                               Key-based (default) mints a k1 DID; external\n",
+            "                               (--intermediate-document) mints an x1 DID.\n",
+            "    --generate                  Mint a fresh secp256k1 key; the generated\n",
+            "                                secret is printed (store it — it controls\n",
+            "                                the DID).\n",
+            "    --key-file <file>           Derive the pubkey from this secret key file\n",
+            "                                (raw 32-byte lowercase hex); no secret echoed.\n",
+            "    --key-stdin                 Read that secret key from stdin instead\n",
+            "                                (or set DIDBTCR2_KEY).\n",
+            "    --intermediate-document <f> Mint an external x1 DID from this\n",
+            "                                externally-authored intermediate document.\n",
+            "                                Consumes NO signing key (mutually exclusive\n",
+            "                                with --generate/--key-file/--key-stdin). The\n",
+            "                                x1 DID is not deterministically resolvable.\n",
+            "    --sidecar-out <file>        (external mode) Write a {\"genesisDocument\":..}\n",
+            "                                sidecar for a later `resolve --sidecar <file>`.\n",
+            "                                An OUTPUT, distinct from resolve's --sidecar.\n",
+            "    --network <net>             Network: testnet (default), signet, mainnet,\n",
+            "                                or mutinynet.\n",
+            "\n",
             "  resolve <did>                Resolve a did:btcr2 identifier and print the\n",
             "                               DID resolution result as JSON.\n",
             "    --network <net>             Network: testnet (default), signet, mainnet,\n",
@@ -210,7 +258,7 @@ impl OnlyArgs for Args {
 
         if positional_args.is_empty() {
             return Err(CliError::MissingRequired(String::from(
-                "A command is required ('resolve', 'update', or 'deactivate')",
+                "A command is required ('create', 'resolve', 'update', or 'deactivate')",
             )));
         }
 
@@ -218,17 +266,117 @@ impl OnlyArgs for Args {
         let sub_args = positional_args.into_iter().skip(1);
 
         let command = match subcommand.as_ref() {
+            "create" => parse_create(sub_args)?,
             "resolve" => parse_resolve(sub_args)?,
             "update" => parse_write(sub_args, WriteKind::Update)?,
             "deactivate" => parse_write(sub_args, WriteKind::Deactivate)?,
             _ => {
                 return Err(CliError::MissingRequired(String::from(
-                    "Unknown command. Expected 'resolve', 'update', or 'deactivate'",
+                    "Unknown command. Expected 'create', 'resolve', 'update', or 'deactivate'",
                 )));
             }
         };
 
         Ok(Self { command })
+    }
+}
+
+/// Parse the `create` subcommand.
+///
+/// Two creation modes:
+/// - key-based (default): `--network <net>`, the key-input trio (`--key-file
+///   <path>` / `--key-stdin`, with `DIDBTCR2_KEY` consulted at run time), and
+///   `--generate`.
+/// - external (`x1`): `--intermediate-document <file>` mints an `x1` DID from an
+///   externally-authored intermediate document and consumes NO signing key
+///   (combining it with `--generate` or any key source is a conflict).
+///   `--sidecar-out <file>` optionally writes a `{"genesisDocument": ..}` sidecar
+///   for a later `resolve --sidecar <file>`.
+///
+/// There is NO positional `<did>` and NO `--key <hex>` arm (argv-secret hygiene).
+/// `--sidecar-out` is an OUTPUT distinct from resolve's `--sidecar` INPUT; other
+/// funding/broadcast flags (`--esplora-url`, `--patch`, `--fee`, …) do not apply
+/// to the offline `create` and are rejected as Unknown.
+fn parse_create(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command, CliError> {
+    let mut network: Option<String> = None;
+    let mut key_file: Option<PathBuf> = None;
+    let mut key_stdin = false;
+    let mut generate = false;
+    let mut intermediate_document: Option<PathBuf> = None;
+    let mut sidecar_out: Option<PathBuf> = None;
+    while let Some(arg) = sub_args.next() {
+        match arg.to_str() {
+            Some(p @ "--network") => network = Some(sub_args.next().parse_str(p)?),
+            Some(p @ "--key-file") => key_file = Some(sub_args.next().parse_path(p)?),
+            Some("--key-stdin") => key_stdin = true,
+            Some("--generate") => generate = true,
+            Some(p @ "--intermediate-document") => {
+                intermediate_document = Some(sub_args.next().parse_path(p)?)
+            }
+            Some(p @ "--sidecar-out") => sidecar_out = Some(sub_args.next().parse_path(p)?),
+            _ => return Err(CliError::Unknown(arg)),
+        }
+    }
+    Ok(Command::Create {
+        network,
+        key_file,
+        key_stdin,
+        generate,
+        intermediate_document,
+        sidecar_out,
+    })
+}
+
+/// Map a `--network` string to a [`did_btcr2::identifier::Network`].
+///
+/// `None` and `"testnet"` both map to `TestnetV3` (the CLI default); `"signet"`,
+/// `"mainnet"`, and `"mutinynet"` map to their variants. Anything else is a
+/// typed [`did_btcr2_client::Error::UnknownNetwork`] (surfaced via
+/// `CliRunError::Client`), mirroring how [`beacon_index`] handles an unknown
+/// beacon type — the unknown string is NOT laundered through another variant.
+fn network_from_str(network: Option<&str>) -> Result<did_btcr2::identifier::Network, CliRunError> {
+    use did_btcr2::identifier::Network;
+    match network {
+        None | Some("testnet") => Ok(Network::TestnetV3),
+        Some("signet") => Ok(Network::Signet),
+        Some("mainnet") => Ok(Network::Mainnet),
+        Some("mutinynet") => Ok(Network::Mutinynet),
+        Some(other) => Err(CliRunError::Client(
+            did_btcr2_client::Error::UnknownNetwork(other.to_string()),
+        )),
+    }
+}
+
+/// Which key the offline `create` uses: a freshly generated keypair
+/// (`--generate`) or a public key derived from a supplied secret (the key-input
+/// trio). The two are mutually exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateKeyMode {
+    /// `--generate`: mint a fresh keypair; print the generated secret.
+    Generate,
+    /// A key source was supplied: derive the public key from it; no secret
+    /// echoed.
+    Supplied,
+}
+
+/// Decide the key mode for `create` from the two boolean inputs, keeping the
+/// conflict/missing-source logic in one pure, directly-testable place.
+///
+/// - both `--generate` and a key source → [`CliRunError::CreateKeySourceConflict`].
+/// - neither → the typed missing-source error (reusing
+///   [`keyload::KeyError::MissingSource`] so the wording matches
+///   `update`/`deactivate`).
+fn resolve_create_key_mode(
+    generate: bool,
+    key_source_given: bool,
+) -> Result<CreateKeyMode, CliRunError> {
+    match (generate, key_source_given) {
+        (true, true) => Err(CliRunError::CreateKeySourceConflict),
+        (true, false) => Ok(CreateKeyMode::Generate),
+        (false, true) => Ok(CreateKeyMode::Supplied),
+        (false, false) => Err(CliRunError::Key(keyload::KeyError::MissingSource(
+            "DIDBTCR2_KEY",
+        ))),
     }
 }
 
@@ -417,6 +565,149 @@ fn run_resolve(
     let result = client.resolve(&did, opts)?;
     let out = build_resolution_json(&result);
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Mint a genesis document via the facade and print the DID identifier + the
+/// document as pretty JSON.
+///
+/// Generic over the transport so the dispatch test can inject an in-process fake
+/// and assert that `create` issues ZERO transport calls — the facade's
+/// `create` is pure composition and never touches the transport. Returns the
+/// parsed [`did_btcr2::identifier::Did`] (already printed) so a caller/test can
+/// assert on it.
+fn create_and_print<T: BtcTransport>(
+    client: &Client<T>,
+    public_key: &did_btcr2::key::PublicKey,
+    network: did_btcr2::identifier::Network,
+) -> Result<did_btcr2::identifier::Did, CliRunError> {
+    let doc = client.create(public_key, network)?;
+    let id = doc.as_ref()["id"].as_str().ok_or_else(|| {
+        CliRunError::DidParse(did_btcr2::identifier::Error::InvalidDidFormat(
+            "genesis document has no string \"id\" field".to_string(),
+        ))
+    })?;
+    let did: did_btcr2::identifier::Did = id.parse()?;
+    println!("{id}");
+    println!("{}", serde_json::to_string_pretty(doc.as_ref())?);
+    Ok(did)
+}
+
+/// Mint an external (`x1`) DID via the facade and print the DID identifier + the
+/// initial document as pretty JSON, plus a stderr note that the `x1` DID is not
+/// deterministically resolvable and must be resolved with `resolve --sidecar`.
+///
+/// If `sidecar_out` is `Some`, writes a `{"genesisDocument": <intermediate
+/// placeholder doc>}` payload — the INTERMEDIATE (placeholder-DID) document the
+/// facade was given, NOT the placeholder-substituted initial document — which is
+/// exactly what `SidecarData`'s `genesisDocument` wire key and the resolve-side
+/// bridge consume. No secret is printed (external mode has none).
+///
+/// Generic over the transport so tests can inject an in-process fake and assert
+/// zero transport calls. Returns the minted DID (already printed).
+fn create_external_and_print<T: BtcTransport>(
+    client: &Client<T>,
+    intermediate_json: serde_json::Value,
+    network: did_btcr2::identifier::Network,
+    sidecar_out: Option<PathBuf>,
+) -> Result<did_btcr2::identifier::Did, CliRunError> {
+    // A structural error in the intermediate document is a core document error;
+    // route it through the facade's `Error::Core` so it surfaces as a typed
+    // `CliRunError::Client` (no new CLI error variant, no panic).
+    let intermediate = IntermediateDocument::from_json_value(intermediate_json.clone(), network)
+        .map_err(did_btcr2_client::Error::from)?;
+    let (did, doc) = client.create_external(intermediate, network)?;
+    println!("{}", did.encode());
+    println!("{}", serde_json::to_string_pretty(doc.as_ref())?);
+    eprintln!(
+        "this x1 DID is not deterministically resolvable; resolve it with: \
+         did-btcr2 resolve --sidecar <file>"
+    );
+
+    if let Some(out) = sidecar_out {
+        let sidecar = serde_json::json!({ "genesisDocument": intermediate_json });
+        let mut file = File::create(out)?;
+        file.write_all(serde_json::to_string_pretty(&sidecar)?.as_bytes())?;
+    }
+
+    Ok(did)
+}
+
+/// Run the `create` subcommand: mint a genesis `did:btcr2` document OFFLINE and
+/// print the DID + document (+ the generated secret with `--generate`).
+///
+/// `create` makes ZERO transport calls — the facade's `create`/`create_external`
+/// are pure composition — so the `Client` is built only to reach those methods;
+/// its URL and transport are never used.
+///
+/// `--intermediate-document` selects the external (`x1`) mode, which consumes no
+/// signing key; combining it with `--generate` or any key source is a conflict.
+fn run_create(
+    network: Option<&str>,
+    key_file: Option<PathBuf>,
+    key_stdin: bool,
+    generate: bool,
+    intermediate_document: Option<PathBuf>,
+    sidecar_out: Option<PathBuf>,
+) -> Result<(), CliRunError> {
+    // A key source is "given" if any of file/stdin/env is present, mirroring
+    // KeySource precedence (file > stdin > env) and the conflict/missing
+    // semantics.
+    let key_source_given = key_file.is_some() || key_stdin || std::env::var("DIDBTCR2_KEY").is_ok();
+
+    // External (x1) mode: mint from an intermediate document with NO signing key.
+    if let Some(path) = intermediate_document {
+        // A key source or --generate is a conflict: the external document is
+        // prepared out-of-band and takes no key. Reject BEFORE reading any key.
+        if generate || key_source_given {
+            return Err(CliRunError::CreateKeySourceConflict);
+        }
+        let net = network_from_str(network)?;
+        // Load the raw intermediate JSON (typed Io/Json errors, no panic). The
+        // facade re-parses/validates it into an IntermediateDocument; the raw
+        // value is also what a --sidecar-out genesisDocument carries verbatim.
+        let intermediate_json: serde_json::Value = serde_json::from_reader(File::open(path)?)?;
+        // The external facade never touches the transport, so URL/transport are
+        // unused; build the client the same way the other arms do.
+        let client =
+            Client::with_network(network.unwrap_or("testnet"), None, UreqTransport::new())?;
+        create_external_and_print(&client, intermediate_json, net, sidecar_out)?;
+        return Ok(());
+    }
+
+    let mode = resolve_create_key_mode(generate, key_source_given)?;
+
+    let secp = secp256k1::Secp256k1::new();
+    // `generated_secret` is `Some` only in the --generate path, printed last.
+    let (public_key, generated_secret) = match mode {
+        CreateKeyMode::Generate => {
+            let kp = did_btcr2::key::KeyPair::generate();
+            (kp.public_key, Some(kp.secret_key))
+        }
+        CreateKeyMode::Supplied => {
+            let sk = KeySource {
+                file: key_file,
+                stdin: key_stdin,
+                env_var: "DIDBTCR2_KEY",
+            }
+            .load()?;
+            (sk.public_key(&secp), None)
+        }
+    };
+
+    let net = network_from_str(network)?;
+
+    // `create` invokes no transport, so the URL/transport are never touched;
+    // build the client the same way the other arms do rather than adding a
+    // bespoke no-transport constructor.
+    let client = Client::with_network(network.unwrap_or("testnet"), None, UreqTransport::new())?;
+
+    create_and_print(&client, &public_key, net)?;
+
+    if let Some(secret_key) = generated_secret {
+        eprintln!("store this secret — it controls the DID and is shown only once:");
+        println!("{}", hex::encode(secret_key.secret_bytes()));
+    }
     Ok(())
 }
 
@@ -662,6 +953,21 @@ fn confirm_broadcast() -> Result<bool, CliRunError> {
 fn run() -> Result<(), CliRunError> {
     let args: Args = onlyargs::parse()?;
     match args.command {
+        Command::Create {
+            network,
+            key_file,
+            key_stdin,
+            generate,
+            intermediate_document,
+            sidecar_out,
+        } => run_create(
+            network.as_deref(),
+            key_file,
+            key_stdin,
+            generate,
+            intermediate_document,
+            sidecar_out,
+        ),
         Command::Resolve {
             did,
             network,
@@ -1171,6 +1477,342 @@ mod tests {
             1,
             "a real write funds (fetches /utxo) exactly once — the previewed tx \
              is the broadcast tx, not a rebuild"
+        );
+    }
+
+    // ── create: parse paths ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_create_generate() {
+        let parsed = Args::parse(args_from_strings(&["create", "--generate"])).unwrap();
+        let Command::Create {
+            generate,
+            key_file,
+            key_stdin,
+            network,
+            intermediate_document,
+            sidecar_out,
+        } = parsed.command
+        else {
+            panic!("expected a Create command");
+        };
+        assert!(generate);
+        assert_eq!(key_file, None);
+        assert!(!key_stdin);
+        assert_eq!(network, None);
+        assert_eq!(intermediate_document, None);
+        assert_eq!(sidecar_out, None);
+    }
+
+    #[test]
+    fn parse_create_supplied_key_and_network() {
+        let parsed = Args::parse(args_from_strings(&[
+            "create",
+            "--key-file",
+            "k.hex",
+            "--network",
+            "signet",
+        ]))
+        .unwrap();
+        let Command::Create {
+            generate,
+            key_file,
+            network,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected a Create command");
+        };
+        assert!(!generate);
+        assert_eq!(key_file, Some(PathBuf::from("k.hex")));
+        assert_eq!(network, Some("signet".to_string()));
+    }
+
+    #[test]
+    fn parse_create_rejects_positional() {
+        // create takes no positional <did>.
+        assert!(matches!(
+            Args::parse(args_from_strings(&["create", SAMPLE_DID])).unwrap_err(),
+            CliError::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn parse_create_rejects_inapplicable_flags() {
+        // funding/resolution flags do not apply to the offline create.
+        assert!(matches!(
+            Args::parse(args_from_strings(&[
+                "create",
+                "--esplora-url",
+                "https://node.example/api"
+            ]))
+            .unwrap_err(),
+            CliError::Unknown(_)
+        ));
+        assert!(matches!(
+            Args::parse(args_from_strings(&["create", "--sidecar", "/tmp/s.json"])).unwrap_err(),
+            CliError::Unknown(_)
+        ));
+    }
+
+    // ── create: network mapping ──────────────────────────────────────────────
+
+    #[test]
+    fn network_from_str_maps_known_and_default() {
+        use did_btcr2::identifier::Network;
+        assert!(matches!(
+            network_from_str(None).unwrap(),
+            Network::TestnetV3
+        ));
+        assert!(matches!(
+            network_from_str(Some("testnet")).unwrap(),
+            Network::TestnetV3
+        ));
+        assert!(matches!(
+            network_from_str(Some("signet")).unwrap(),
+            Network::Signet
+        ));
+        assert!(matches!(
+            network_from_str(Some("mainnet")).unwrap(),
+            Network::Mainnet
+        ));
+        assert!(matches!(
+            network_from_str(Some("mutinynet")).unwrap(),
+            Network::Mutinynet
+        ));
+        // an unknown network is its own typed variant.
+        match network_from_str(Some("bogus")).unwrap_err() {
+            CliRunError::Client(did_btcr2_client::Error::UnknownNetwork(n)) => {
+                assert_eq!(n, "bogus");
+            }
+            other => panic!("expected UnknownNetwork, got {other:?}"),
+        }
+    }
+
+    // ── create: key-mode truth table (pure helper, no env touch) ──────────────
+
+    #[test]
+    fn resolve_create_key_mode_truth_table() {
+        assert_eq!(
+            resolve_create_key_mode(true, false).unwrap(),
+            CreateKeyMode::Generate
+        );
+        assert_eq!(
+            resolve_create_key_mode(false, true).unwrap(),
+            CreateKeyMode::Supplied
+        );
+        // neither --generate nor a key source → typed missing-source error.
+        assert!(matches!(
+            resolve_create_key_mode(false, false).unwrap_err(),
+            CliRunError::Key(keyload::KeyError::MissingSource(_))
+        ));
+        // both → typed conflict.
+        assert!(matches!(
+            resolve_create_key_mode(true, true).unwrap_err(),
+            CliRunError::CreateKeySourceConflict
+        ));
+    }
+
+    // ── create: zero-transport dispatch yields a parseable genesis DID ────────
+
+    #[test]
+    fn create_makes_zero_transport_calls() {
+        let post_count = Rc::new(Cell::new(0usize));
+        let utxo_count = Rc::new(Cell::new(0usize));
+        // A counter the fake bumps on EVERY execute() call. create must never
+        // reach the transport at all, so this stays 0.
+        let transport =
+            FakeTransport::with_utxo_counter(Rc::clone(&post_count), Rc::clone(&utxo_count));
+        let client = Client::new("http://fake".to_string(), transport);
+
+        let sk = test_secret_key();
+        let secp = secp256k1::Secp256k1::new();
+        let pk = sk.public_key(&secp);
+
+        let did = create_and_print(&client, &pk, did_btcr2::identifier::Network::Mutinynet)
+            .expect("create dispatch succeeds offline");
+
+        drop(client);
+        // create is pure composition — it issues no POST /tx and no /utxo GET.
+        assert_eq!(post_count.get(), 0, "create broadcasts nothing");
+        assert_eq!(utxo_count.get(), 0, "create funds nothing");
+        // The produced document yields a parseable did:btcr2: identifier.
+        assert!(did.encode().starts_with("did:btcr2:"));
+    }
+
+    // ── create: external (x1) mode ────────────────────────────────────────────
+
+    /// A self-contained x1 intermediate (placeholder-DID) document JSON, matching
+    /// the spec `did:btcr2:_` genesis-document shape. Inlined so the CLI test does
+    /// not depend on the `did-btcr2` crate's test-suite submodule.
+    fn x1_intermediate_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "did:btcr2:_",
+            "@context": [
+                "https://www.w3.org/ns/did/v1.1",
+                "https://btcr2.dev/context/v1"
+            ],
+            "verificationMethod": [{
+                "id": "did:btcr2:_#key-0",
+                "type": "Multikey",
+                "controller": "did:btcr2:_",
+                "publicKeyMultibase": "zQ3shTHn9hZ1BHtoZayz4VmPAZT97p2v8swmuPEUwBKHCanTL"
+            }],
+            "authentication": ["did:btcr2:_#key-0"],
+            "assertionMethod": ["did:btcr2:_#key-0"],
+            "capabilityInvocation": ["did:btcr2:_#key-0"],
+            "capabilityDelegation": ["did:btcr2:_#key-0"],
+            "service": [{
+                "id": "did:btcr2:_#service-0",
+                "serviceEndpoint": "bitcoin:mnDXvNsFTf9cs4hWigPkENCBDp9eJpfyxF",
+                "type": "SingletonBeacon"
+            }]
+        })
+    }
+
+    /// A unique path under the OS temp dir (no `tempfile` dev-dep in this crate).
+    fn unique_temp_path(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        std::env::temp_dir().join(format!("did-btcr2-cli-test-{tag}-{pid}-{n}.json"))
+    }
+
+    #[test]
+    fn parse_create_accepts_intermediate_and_sidecar_out() {
+        let parsed = Args::parse(args_from_strings(&[
+            "create",
+            "--intermediate-document",
+            "genesis.json",
+            "--sidecar-out",
+            "sc.json",
+        ]))
+        .unwrap();
+        let Command::Create {
+            intermediate_document,
+            sidecar_out,
+            generate,
+            key_file,
+            key_stdin,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected a Create command");
+        };
+        assert_eq!(intermediate_document, Some(PathBuf::from("genesis.json")));
+        assert_eq!(sidecar_out, Some(PathBuf::from("sc.json")));
+        assert!(!generate);
+        assert_eq!(key_file, None);
+        assert!(!key_stdin);
+    }
+
+    #[test]
+    fn external_create_rejects_generate_conflict() {
+        // --intermediate-document + --generate → CreateKeySourceConflict, and the
+        // conflict is detected before any key is read.
+        let err = run_create(
+            Some("regtest"),
+            None,
+            false,
+            true, // --generate
+            Some(unique_temp_path("noexist")),
+            None,
+        )
+        .expect_err("external mode + --generate must conflict");
+        assert!(
+            matches!(err, CliRunError::CreateKeySourceConflict),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn external_create_rejects_key_source_conflict() {
+        // --intermediate-document + a key source (here a key file) → conflict,
+        // before any file is opened.
+        let err = run_create(
+            Some("regtest"),
+            Some(PathBuf::from("some-key.hex")),
+            false,
+            false,
+            Some(unique_temp_path("noexist")),
+            None,
+        )
+        .expect_err("external mode + key source must conflict");
+        assert!(
+            matches!(err, CliRunError::CreateKeySourceConflict),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn external_create_missing_file_is_typed_io_error() {
+        let missing = unique_temp_path("definitely-missing");
+        let err = run_create(Some("signet"), None, false, false, Some(missing), None)
+            .expect_err("a missing intermediate-document file must error");
+        assert!(matches!(err, CliRunError::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn external_create_malformed_json_is_typed_json_error() {
+        let path = unique_temp_path("malformed");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let err = run_create(Some("signet"), None, false, false, Some(path.clone()), None)
+            .expect_err("malformed intermediate-document JSON must error");
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(err, CliRunError::Json(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn external_create_roundtrip_resolves_via_sidecar() {
+        use did_btcr2::identifier::Network;
+
+        // 1. Mint an x1 DID from the intermediate document and write a
+        //    --sidecar-out payload, all offline through a fake transport.
+        let sidecar_path = unique_temp_path("sidecar-out");
+        let post_count = Rc::new(Cell::new(0usize));
+        let utxo_count = Rc::new(Cell::new(0usize));
+        let transport =
+            FakeTransport::with_utxo_counter(Rc::clone(&post_count), Rc::clone(&utxo_count));
+        let client = Client::new("http://fake".to_string(), transport);
+
+        let did = create_external_and_print(
+            &client,
+            x1_intermediate_json(),
+            Network::Regtest,
+            Some(sidecar_path.clone()),
+        )
+        .expect("external create succeeds offline");
+
+        assert!(
+            did.encode().starts_with("did:btcr2:x1"),
+            "external create must mint an x1 DID, got {}",
+            did.encode()
+        );
+        // Minting touches no transport.
+        assert_eq!(post_count.get(), 0);
+        assert_eq!(utxo_count.get(), 0);
+
+        // The sidecar carries the genesisDocument wire key = the INTERMEDIATE doc
+        // (placeholder id), NOT the substituted initial document.
+        let written: serde_json::Value =
+            serde_json::from_reader(File::open(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(written["genesisDocument"], x1_intermediate_json());
+        assert_eq!(written["genesisDocument"]["id"], "did:btcr2:_");
+
+        // 2. Feed the written sidecar back through load_sidecar + the facade's
+        //    resolve (offline, empty /txs → genesis version 1). This exercises the
+        //    REAL serde/CLI path and the resolve-side genesis→initial bridge.
+        let opts = load_sidecar(Some(sidecar_path.clone())).expect("load_sidecar");
+        let result = client
+            .resolve(&did, opts)
+            .expect("x1 resolve via genesisDocument sidecar succeeds");
+        let _ = std::fs::remove_file(&sidecar_path);
+
+        // The resolved document is the minted x1 DID's initial document.
+        assert_eq!(
+            result.document.as_ref().get("id").and_then(|v| v.as_str()),
+            Some(did.encode())
         );
     }
 }

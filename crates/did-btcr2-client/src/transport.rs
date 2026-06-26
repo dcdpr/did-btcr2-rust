@@ -47,7 +47,7 @@ fn build_agent() -> ureq::Agent {
         .into()
 }
 
-/// The production transport: a `ureq::Agent` configured per [`build_agent`].
+/// The production transport: a `ureq::Agent` configured per `build_agent`.
 pub struct UreqTransport {
     agent: ureq::Agent,
 }
