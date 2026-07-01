@@ -681,8 +681,16 @@ fn run_create(
     // `generated_secret` is `Some` only in the --generate path, printed last.
     let (public_key, generated_secret) = match mode {
         CreateKeyMode::Generate => {
-            let kp = did_btcr2::key::KeyPair::generate();
-            (kp.public_key, Some(kp.secret_key))
+            // Generate a raw secp256k1 key here (not did_btcr2::key::KeyPair):
+            // the --generate path must print the secret bytes as hex, and the
+            // crate newtype intentionally does not expose its bytes publicly.
+            // Keeping the secret-bytes-printing local to the CLI avoids widening
+            // the newtype's public surface. Mint from OsRng (the OS CSPRNG),
+            // matching the crate newtype's SecretKey::generate — one RNG source
+            // for the "mint a signing key" operation, not thread_rng here and
+            // OsRng there.
+            let sk = secp256k1::SecretKey::new(&mut secp256k1::rand::rngs::OsRng);
+            (sk.public_key(&secp), Some(sk))
         }
         CreateKeyMode::Supplied => {
             let sk = KeySource {
@@ -755,7 +763,12 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
         // coexist — surface the same typed conflict rather than reading twice.
         return Err(CliRunError::StdinConflict);
     }
-    let update_sk = d.key.load()?;
+    // The DID-update key is loaded as a raw secp key by keyload, then converted
+    // to the crate-owned newtype at this boundary (the update-signing path takes
+    // the newtype). The beacon key signs the Bitcoin announcement tx and stays a
+    // raw secp key; when no separate beacon key is given it reuses the loaded
+    // update key (secp `SecretKey` is `Copy`).
+    let loaded_update_sk = d.key.load()?;
     let beacon_sk = if beacon_key_source_given {
         KeySource {
             file: d.beacon_key_file,
@@ -764,8 +777,16 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
         }
         .load()?
     } else {
-        update_sk
+        loaded_update_sk
     };
+    // `loaded_update_sk` is already a valid secp256k1 secret key, so its 32
+    // bytes are a valid scalar and this conversion cannot fail. Use the array
+    // constructor (not `.to_vec()`): a heap `Vec<u8>` of raw secret bytes would
+    // be dropped by the ordinary `Vec` destructor, which does NOT scrub its
+    // buffer, leaving a copy of the secret on the heap. The array form copies
+    // only onto the stack (unavoidable, since `secret_bytes()` returns an array).
+    let update_sk = did_btcr2::key::SecretKey::try_from(loaded_update_sk.secret_bytes())
+        .expect("bytes from a valid secp256k1::SecretKey are a valid secret key");
 
     let did: did_btcr2::identifier::Did = d.did.parse()?;
     let vm_id = d
@@ -816,7 +837,7 @@ struct WriteParams {
     /// `Some(path)` for update; `None` for deactivate.
     patch: Option<PathBuf>,
     vm_id: String,
-    update_sk: secp256k1::SecretKey,
+    update_sk: did_btcr2::key::SecretKey,
     beacon_sk: secp256k1::SecretKey,
     beacon_idx: usize,
     fee: Fee,
@@ -1354,6 +1375,12 @@ mod tests {
         secp256k1::SecretKey::from_slice(&[0x07; 32]).expect("[7u8; 32] is valid")
     }
 
+    /// The same key material as [`test_secret_key`] but as the crate-owned
+    /// newtype `WriteParams.update_sk` now takes.
+    fn test_update_sk() -> did_btcr2::key::SecretKey {
+        did_btcr2::key::SecretKey::try_from([0x07; 32]).expect("[7u8; 32] is valid")
+    }
+
     #[test]
     fn dry_run_no_broadcast() {
         let post_count = Rc::new(Cell::new(0usize));
@@ -1390,7 +1417,7 @@ mod tests {
                 did,
                 patch: Some(patch_path.clone()),
                 vm_id,
-                update_sk: sk,
+                update_sk: test_update_sk(),
                 beacon_sk: sk,
                 beacon_idx: 1, // P2WPKH default beacon (spendable by the DID key)
                 fee: Fee::Absolute(1_000),
@@ -1456,7 +1483,7 @@ mod tests {
                 did,
                 patch: Some(patch_path.clone()),
                 vm_id,
-                update_sk: sk,
+                update_sk: test_update_sk(),
                 beacon_sk: sk,
                 beacon_idx: 1,
                 fee: Fee::Absolute(1_000),

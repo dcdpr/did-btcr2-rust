@@ -696,7 +696,7 @@ impl Document {
         patch: Patch,
         target_version_id: NonZeroU64,
         verification_method_id: &str,
-        secret_key: secp256k1::SecretKey,
+        secret_key: crate::key::SecretKey,
     ) -> Result<Update, Btcr2Error> {
         // Guard 0: a deactivated DID is terminal and MUST NOT accept further
         // updates (spec: did-btcr2/src/operations/deactivate.md). The resolver
@@ -728,7 +728,9 @@ impl Document {
 
         // Guard 3: the caller key must match the matched method's public key,
         // so the produced signature will verify against this document.
-        let derived = secret_key.public_key(&secp256k1::Secp256k1::new());
+        let derived = secret_key
+            .as_inner()
+            .public_key(&secp256k1::Secp256k1::new());
         if derived != method.public_key {
             return Err(Btcr2Error::InvalidDidUpdate(
                 "secret key does not match the verificationMethod public key".into(),
@@ -761,8 +763,10 @@ impl Document {
             invocation_target: None,
         };
 
-        // Sign over the unsigned update with the caller's key.
-        let proof = CryptoSuite.create_proof(&unsigned, inner, secret_key)?;
+        // Sign over the unsigned update with the caller's key. Pass by shared
+        // borrow: this method owns `secret_key` and drops (scrubs) it on return,
+        // so the signing chain never needs to consume or duplicate the secret.
+        let proof = CryptoSuite.create_proof(&unsigned, inner, &secret_key)?;
 
         // Assemble the signed update: the unsigned JSON with "proof" inserted.
         // Parsing it back through Update::from_json_value yields exactly the
@@ -798,7 +802,7 @@ impl Document {
     pub fn deactivate(
         &self,
         verification_method_id: &str,
-        secret_key: secp256k1::SecretKey,
+        secret_key: crate::key::SecretKey,
         target_version_id: NonZeroU64,
     ) -> Result<Update, Btcr2Error> {
         let patch: Patch = serde_json::from_value(serde_json::json!([
@@ -1932,8 +1936,8 @@ mod tests {
     // project's internal requirement ids.
     // ──────────────────────────────────────────────────────────────────────
 
-    use crate::key::SecretKeyExt as _;
-    use secp256k1::{Secp256k1, SecretKey};
+    use crate::key::SecretKey;
+    use secp256k1::Secp256k1;
 
     /// Fixed secret key for the construction tests. Any fixed valid secp256k1
     /// key works; `[7u8; 32]` is chosen for reproducibility (its public key
@@ -1942,7 +1946,16 @@ mod tests {
     const SOURCE_SECRET_KEY_BYTES: [u8; 32] = [7u8; 32];
 
     fn source_secret_key() -> SecretKey {
-        SecretKey::from_slice(&SOURCE_SECRET_KEY_BYTES)
+        SecretKey::try_from(SOURCE_SECRET_KEY_BYTES)
+            .expect("[7u8; 32] is a valid secp256k1 secret key")
+    }
+
+    /// The same key material as [`source_secret_key`] but as the raw
+    /// `secp256k1::SecretKey` the Bitcoin beacon-signing path
+    /// (`announce_singleton`) expects — that path signs the on-chain
+    /// transaction and is deliberately NOT the crate-owned newtype.
+    fn source_beacon_secret_key() -> secp256k1::SecretKey {
+        secp256k1::SecretKey::from_slice(&SOURCE_SECRET_KEY_BYTES)
             .expect("[7u8; 32] is a valid secp256k1 secret key")
     }
 
@@ -1954,7 +1967,7 @@ mod tests {
     /// the same JSON and hash identically.
     fn source_documents() -> (Did, String, InitialDocument, Document) {
         let secp = Secp256k1::new();
-        let public_key = source_secret_key().public_key(&secp);
+        let public_key = source_secret_key().as_inner().public_key(&secp);
         let id_type = IdType::from(public_key);
         let did: Did = DidComponents::new(DidVersion::One, Network::Mutinynet, id_type)
             .try_into()
@@ -2202,7 +2215,7 @@ mod tests {
                 &[prevout],
                 1_000,
                 &beacon_address,
-                source_secret_key(),
+                source_beacon_secret_key(),
             )
             .expect("announce_singleton produces a signed beacon tx");
 
@@ -2312,7 +2325,7 @@ mod tests {
                 &[prevout1],
                 1_000,
                 &beacon_address,
-                source_secret_key(),
+                source_beacon_secret_key(),
             )
             .expect("announce update #1");
         let (_addr2, prevout2) =
@@ -2323,7 +2336,7 @@ mod tests {
                 &[prevout2],
                 1_000,
                 &beacon_address,
-                source_secret_key(),
+                source_beacon_secret_key(),
             )
             .expect("announce update #2");
         let b1 = bridge_to_esplora(&signed1, 100, 1_700_000_000);
@@ -2422,7 +2435,7 @@ mod tests {
                 &[prevout1],
                 1_000,
                 &beacon_address,
-                source_secret_key(),
+                source_beacon_secret_key(),
             )
             .expect("announce update #1");
         let (_addr2, prevout2) =
@@ -2433,7 +2446,7 @@ mod tests {
                 &[prevout2],
                 1_000,
                 &beacon_address,
-                source_secret_key(),
+                source_beacon_secret_key(),
             )
             .expect("announce the deactivate update");
         let bridged1 = bridge_to_esplora(&signed1, 100, 1_700_000_000);
@@ -2529,7 +2542,7 @@ mod tests {
         // but capabilityInvocation references a DIFFERENT method id — so the
         // proof's VM is NOT an authorized invoker.
         let secp = Secp256k1::new();
-        let other_key = SecretKey::generate().public_key(&secp);
+        let other_key = SecretKey::generate().as_inner().public_key(&secp);
         let other_vm_id = format!("{}#otherKey", did.encode());
         let mut json = document_json(&did, &vm_id);
         json["verificationMethod"]
@@ -2576,8 +2589,9 @@ mod tests {
 
         // A DIFFERENT, valid key-based DID string to re-point `id` at.
         let secp = Secp256k1::new();
-        let other_public_key = SecretKey::from_slice(&[5u8; 32])
+        let other_public_key = SecretKey::try_from([5u8; 32])
             .expect("[5u8; 32] is a valid secp256k1 secret key")
+            .as_inner()
             .public_key(&secp);
         let other_did: Did = DidComponents::new(
             DidVersion::One,
@@ -2628,7 +2642,7 @@ mod tests {
             invocation_target: None,
         };
         let proof = CryptoSuite
-            .create_proof(&unsigned, inner, source_secret_key())
+            .create_proof(&unsigned, inner, &source_secret_key())
             .expect("the id-changing update signs");
         let mut signed_json = unsigned.as_ref().clone();
         if let Value::Object(map) = &mut signed_json {
@@ -2659,7 +2673,7 @@ mod tests {
         // and key are valid for `vm_id`; only the capabilityInvocation
         // membership fails.
         let secp = Secp256k1::new();
-        let other_key = SecretKey::generate().public_key(&secp);
+        let other_key = SecretKey::generate().as_inner().public_key(&secp);
         let other_vm_id = format!("{}#otherKey", did.encode());
 
         let mut json = document_json(&did, &vm_id);
@@ -2695,7 +2709,7 @@ mod tests {
 
         // A different, valid key than the one matching the method.
         let wrong_key =
-            SecretKey::from_slice(&[9u8; 32]).expect("[9u8; 32] is a valid secp256k1 secret key");
+            SecretKey::try_from([9u8; 32]).expect("[9u8; 32] is a valid secp256k1 secret key");
 
         let err = document
             .construct_signed_update(patch, version, &vm_id, wrong_key)
@@ -3060,7 +3074,7 @@ mod tests {
     /// test which needs to manipulate the raw document shape.
     fn document_json(did: &Did, vm_id: &str) -> Value {
         let secp = Secp256k1::new();
-        let public_key = source_secret_key().public_key(&secp);
+        let public_key = source_secret_key().as_inner().public_key(&secp);
         let did_str = did.encode();
         serde_json::json!({
             "id": did_str,
@@ -3087,5 +3101,67 @@ mod tests {
         let initial = InitialDocument::from_did(did, &resolution_options)
             .expect("key DID generates its initial document");
         initial.as_ref()["service"].clone()
+    }
+
+    /// `proofValue` on a beacon-signalled update is
+    /// attacker-influenceable — a tampered signature MUST be rejected by
+    /// `apply_update`. This reuses the exact golden signed update
+    /// (`source_documents()` + `construct_signed_update`, the same bytes
+    /// `golden_signed_update_bytes` pins) and corrupts a single byte of the
+    /// detached signature rather than minting a fresh update. This asserts
+    /// REJECTION only — it neither creates nor re-blesses any golden vector.
+    ///
+    /// NOTE (deviation from plan text): the plan's must-have named
+    /// `ProofVerification` as the expected variant. The corruption here keeps the
+    /// proofValue a well-formed 64-byte base58-btc signature (decode → flip one
+    /// signature byte → re-encode), so `multibase_decode` succeeds and the
+    /// rejection lands one step deeper at BIP340 verification, whose CONCRETE
+    /// variant is `Btcr2Error::InvalidUpdateProof` (cryptosuite.rs:228). This is
+    /// the stronger forgery-rejection path (a structurally-valid but wrong
+    /// signature); the `ProofVerification` decode-length class is covered by
+    /// `test_multibase_decode_rejects_wrong_length` in cryptosuite.rs. We assert
+    /// the variant the code actually returns.
+    #[test]
+    fn test_apply_update_rejects_corrupted_proof_value() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // The golden signed update (identical bytes to golden_signed_update_bytes).
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction of the golden signed update must succeed");
+
+        // Corrupt the signature: decode the base58-btc proofValue to its 64-byte
+        // detached signature, flip one byte, re-encode. The result stays a valid
+        // 64-byte base58-btc multibase string, so it reaches BIP340 verification.
+        let (base, mut sig_bytes) = multibase::decode(&update.proof.proof_value.0)
+            .expect("golden proofValue is valid multibase");
+        assert_eq!(
+            sig_bytes.len(),
+            64,
+            "detached Schnorr signature is 64 bytes"
+        );
+        sig_bytes[10] ^= 0x01;
+        let corrupted_proof_value = multibase::encode(base, &sig_bytes);
+
+        // Rewrite the proofValue in the update JSON and re-parse via the real
+        // parse path, so the tampered signature flows through apply_update exactly
+        // as an attacker-supplied one would.
+        let mut json = update.as_ref().clone();
+        json["proof"]["proofValue"] = Value::String(corrupted_proof_value);
+        let corrupted = Update::from_json_value(json)
+            .expect("a proofValue-only byte flip stays well-formed enough to re-parse");
+
+        // Apply against the same source document the update was built for.
+        let mut target = InitialDocument::from_did(&_did, &ResolutionOptions::default())
+            .expect("key DID regenerates its initial document");
+        let err = target
+            .apply_update(&corrupted)
+            .expect_err("a corrupted-proofValue update must be rejected");
+        match err {
+            Btcr2Error::InvalidUpdateProof(_) => {}
+            other => panic!("expected InvalidUpdateProof, got {other:?}"),
+        }
     }
 }

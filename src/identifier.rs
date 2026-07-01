@@ -655,6 +655,83 @@ mod tests {
         let components = parse_did_identifier(&did).unwrap();
         assert_eq!(components.network, Network::Custom(15));
     }
+
+    // ---- parse-edge negative tests -----------------
+    //
+    // Bech32m identifiers are attacker-supplied strings; malformed inputs must
+    // fail closed with a typed error, never a panic. Variants confirmed against
+    // source: version-nibble -> InvalidVersion (identifier.rs:200 via
+    // parse_did_identifier's `version.try_into()` at :476), malformed bech32 ->
+    // Bech32 (decode at :464), from_sha256_hash wrong length -> the UNIT variant
+    // InvalidHashLength (identifier.rs:378), distinct from InvalidGenesisLength
+    // (the bech32-decode length path at :341).
+
+    /// A first byte with a non-zero high nibble decodes to version >= 2
+    /// (`version = (high_nibble) + 1`, identifier.rs:471), which `DidVersion::try_from`
+    /// rejects (identifier.rs:200) as `InvalidVersion`. The payload is a VALID
+    /// curve point so parsing reaches the version check AFTER `IdType::try_from`
+    /// (identifier.rs:467) succeeds.
+    #[test]
+    fn test_id_type_rejects_invalid_version() {
+        let key = valid_secp256k1_pubkey_bytes();
+        // High nibble 1 -> version 2; low nibble 0 -> Mainnet.
+        let mut data = Vec::with_capacity(1 + key.len());
+        data.push(0x10);
+        data.extend_from_slice(&key);
+
+        let bech32_part = encode(HRP_KEY, &data).expect("HRP and data are valid bech32m inputs");
+        let did_str = format!("{DID_BTCR2_PREFIX}{bech32_part}");
+
+        let result = parse_did_identifier(&did_str);
+        assert!(
+            matches!(result, Err(Error::InvalidVersion(_))),
+            "version >= 2 must be rejected, got {result:?}"
+        );
+    }
+
+    /// A `did:btcr2:` string whose bech32 body has a corrupted checksum
+    /// fails at `decode` (identifier.rs:464) -> `Error::Bech32`. Mirrors
+    /// `test_invalid_prefix`'s shape but drives the bech32 decode path, not the
+    /// prefix path.
+    #[test]
+    fn test_from_str_rejects_malformed_bech32() {
+        // Valid prefix + valid HRP `k1`, but the payload/checksum is corrupt.
+        let result = parse_did_identifier("did:btcr2:k1qqqqqqqqqqqqqqqqqqqqqqqqqqq");
+        assert!(
+            matches!(result, Err(Error::Bech32(_))),
+            "malformed bech32 must be rejected as Bech32, got {result:?}"
+        );
+    }
+
+    /// `IdType::from_sha256_hash` with a wrong-length slice hits
+    /// `hash.try_into().map_err(|_| Error::InvalidHashLength)` (identifier.rs:378),
+    /// returning the UNIT variant `InvalidHashLength` — distinct from
+    /// `InvalidGenesisLength(_, _)`, which belongs to the bech32-decode path.
+    #[test]
+    fn test_from_sha256_hash_rejects_wrong_length() {
+        assert!(
+            matches!(
+                IdType::from_sha256_hash(&[0u8; 31]),
+                Err(Error::InvalidHashLength)
+            ),
+            "a 31-byte slice must be rejected as InvalidHashLength"
+        );
+    }
+
+    /// `Did::public_key` returns `None` for an External (`x1…`) id —
+    /// there is no genesis public key for an external identifier. Positive-shape
+    /// assertion pinning the discriminated behavior (identifier.rs:161-166).
+    #[test]
+    fn test_public_key_none_for_external_id() {
+        let hash = IdType::from(&[0xAB_u8; SHA256_HASH_LEN][..]);
+        let did_str = encode_did_identifier(DidVersion::One, Network::Signet, hash)
+            .expect("external id encodes");
+        let did: Did = did_str.parse().expect("external DID parses");
+        assert!(
+            did.public_key().is_none(),
+            "an External id must have no genesis public key"
+        );
+    }
 }
 
 #[cfg(test)]

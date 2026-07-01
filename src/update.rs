@@ -147,6 +147,20 @@ impl Update {
     /// has value 0); an absolute `fee` is used with no vsize/feerate estimation
     /// Broadcasting the returned transaction is the caller's
     /// responsibility (sans-I/O purity).
+    ///
+    /// # Secret-key handling (deliberate scope)
+    ///
+    /// `beacon_secret_key` is a raw [`secp256k1::SecretKey`] (a `Copy` type with
+    /// no `Drop`), NOT the crate's zeroize-on-drop [`crate::key::SecretKey`].
+    /// This is a known, deliberate asymmetry: the update-signing key was
+    /// hardened to zeroize-on-drop, but the beacon key — which signs the Bitcoin
+    /// announcement inputs and is at least as sensitive — is not yet. Because it
+    /// is `Copy` and never scrubbed, its 32 bytes are copied at every call
+    /// boundary and left in memory on drop. Migrating the beacon path to the
+    /// zeroizing newtype (extracting `.as_inner()` at each signing site, as the
+    /// update path does) is tracked follow-up work; it touches the facade and
+    /// CLI signatures too, so it is intentionally out of scope here rather than
+    /// left as a silent gap.
     pub fn announce_singleton(
         &self,
         beacon_address: &esploda::bitcoin::Address,
@@ -251,6 +265,40 @@ impl Update {
         for (idx, prevout) in prevouts.iter().enumerate() {
             let spk = &prevout.script_pubkey;
             let value = prevout.value;
+
+            // Ownership cross-check: derive the script that `beacon_secret_key`
+            // actually controls for this scheme and require it to match the
+            // prevout's scriptPubKey. Without this, a prevout locked to a
+            // foreign key would be "signed" with a wrong-key signature and
+            // yield a silently invalid, fund-committing transaction. This
+            // mirrors Guard 3 on the update-signing path (a secret key that
+            // does not match the method's public key is rejected). It cannot
+            // reject a prevout the key genuinely owns: a matching script still
+            // matches. Unsupported script types fall through to the existing
+            // `UnsupportedScriptType` arm below (nothing to cross-check).
+            let expected_spk = if spk.is_p2pkh() {
+                Some(ScriptBuf::new_p2pkh(&bitcoin_pubkey.pubkey_hash()))
+            } else if spk.is_v0_p2wpkh() {
+                match bitcoin_pubkey.wpubkey_hash() {
+                    Some(wpkh) => Some(ScriptBuf::new_v0_p2wpkh(&wpkh)),
+                    // A compressed key (which this always is) has a wpubkey_hash;
+                    // treat the absence defensively as a non-owning mismatch.
+                    None => return Err(AnnounceError::KeyDoesNotOwnPrevout { index: idx }),
+                }
+            } else if spk.is_v1_p2tr() {
+                // new_v1_p2tr applies the BIP341 key-path tweak internally, so
+                // this compares the *tweaked* output key — the same key the
+                // signing branch below signs with.
+                let internal_key = beacon_secret_key.x_only_public_key(&secp).0;
+                Some(ScriptBuf::new_v1_p2tr(&secp, internal_key, None))
+            } else {
+                None
+            };
+            if let Some(expected_spk) = expected_spk
+                && &expected_spk != spk
+            {
+                return Err(AnnounceError::KeyDoesNotOwnPrevout { index: idx });
+            }
 
             if spk.is_p2pkh() {
                 let sighash = SighashCache::new(&tx)
@@ -386,6 +434,7 @@ impl CanonicalHash for UnsecuredUpdate {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json_tools::JsonError;
 
     /// `confirm_duplicate` must NOT panic when the
     /// caller-supplied sidecar drives a duplicate-check index past the end of the
@@ -537,6 +586,148 @@ mod tests {
             !source_hash.contains(['+', '/', '=']),
             "sourceHash must be base64url-no-pad (no '+', '/', or '='): {source_hash}"
         );
+    }
+
+    // ---- from_json_value rejection-class tests -----------------
+    //
+    // `Update::from_json_value` (update.rs:54) consumes the signed-update JSON
+    // pulled from an OP_RETURN / sidecar, which is attacker-controllable. Each
+    // test below starts from the golden signed update (a real, valid update),
+    // mutates ONE field into a malformed value, and asserts the CONCRETE typed
+    // variant `from_json_value` returns — proving every malformed field class is
+    // rejected, never partially applied. Variants were confirmed by reading the
+    // control flow (update.rs:54-86, json_tools.rs hash_from_object/int_from_object).
+
+    /// The golden signed update as a mutable JSON [`Value`] — a valid base to
+    /// corrupt one field at a time.
+    fn valid_update_value() -> Value {
+        let raw = include_str!("../fixtures/spec-form/golden-signed-update.json");
+        serde_json::from_str(raw).expect("golden signed update is valid JSON")
+    }
+
+    /// `targetVersionId: 0` — the field deserializes to `NonZeroU64`, so 0 is
+    /// rejected at the `.try_into()` step (update.rs:71) as `InvalidTargetVersionId`.
+    #[test]
+    fn test_from_json_value_rejects_target_version_id_zero() {
+        let mut bad = valid_update_value();
+        bad["targetVersionId"] = serde_json::json!(0);
+        let err = Update::from_json_value(bad).expect_err("targetVersionId 0 must be rejected");
+        match err {
+            Error::InvalidTargetVersionId => {}
+            other => panic!("expected InvalidTargetVersionId, got {other:?}"),
+        }
+    }
+
+    /// `targetVersionId: -1` — a negative IS a valid JSON number, so `as_i64`
+    /// succeeds and the value reaches `u64::try_from(-1)` (update.rs:69), which
+    /// fails -> `InvalidTargetVersionId`. Confirmed against source: the u64
+    /// conversion, NOT `UnexpectedJsonType`, is the rejection path (matches
+    /// the must_haves note).
+    #[test]
+    fn test_from_json_value_rejects_target_version_id_negative() {
+        let mut bad = valid_update_value();
+        bad["targetVersionId"] = serde_json::json!(-1);
+        let err =
+            Update::from_json_value(bad).expect_err("negative targetVersionId must be rejected");
+        match err {
+            Error::InvalidTargetVersionId => {}
+            other => panic!("expected InvalidTargetVersionId, got {other:?}"),
+        }
+    }
+
+    /// `targetVersionId` absent — `int_from_object` returns `JsonMissingKey`,
+    /// surfaced through the `JsonValue` variant.
+    #[test]
+    fn test_from_json_value_rejects_target_version_id_missing() {
+        let mut bad = valid_update_value();
+        bad.as_object_mut()
+            .expect("update is a JSON object")
+            .remove("targetVersionId");
+        let err =
+            Update::from_json_value(bad).expect_err("missing targetVersionId must be rejected");
+        match err {
+            Error::JsonValue(JsonError::JsonMissingKey(_)) => {}
+            other => panic!("expected JsonValue(JsonMissingKey), got {other:?}"),
+        }
+    }
+
+    /// `proof` absent — `json["proof"]` is `Null`, and `serde_json::from_value`
+    /// into the typed `Proof` fails, surfaced through the `Json` variant.
+    /// Confirmed: the missing/null proof routes to `Error::Json`, NOT a
+    /// `JsonMissingKey` (there is no explicit key-presence check for proof/patch).
+    #[test]
+    fn test_from_json_value_rejects_missing_proof() {
+        let mut bad = valid_update_value();
+        bad.as_object_mut()
+            .expect("update is a JSON object")
+            .remove("proof");
+        let err = Update::from_json_value(bad).expect_err("missing proof must be rejected");
+        match err {
+            Error::Json(_) => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    /// `patch` absent — `json["patch"]` is `Null`, and `serde_json::from_value`
+    /// into the typed `Patch` fails -> `Error::Json` (same mechanism as proof).
+    #[test]
+    fn test_from_json_value_rejects_missing_patch() {
+        let mut bad = valid_update_value();
+        bad.as_object_mut()
+            .expect("update is a JSON object")
+            .remove("patch");
+        let err = Update::from_json_value(bad).expect_err("missing patch must be rejected");
+        match err {
+            Error::Json(_) => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    /// `sourceHash` absent — `hash_from_object` -> `string_from_object` returns
+    /// `JsonMissingKey`, surfaced through `JsonValue`.
+    #[test]
+    fn test_from_json_value_rejects_source_hash_missing() {
+        let mut bad = valid_update_value();
+        bad.as_object_mut()
+            .expect("update is a JSON object")
+            .remove("sourceHash");
+        let err = Update::from_json_value(bad).expect_err("missing sourceHash must be rejected");
+        match err {
+            Error::JsonValue(JsonError::JsonMissingKey(_)) => {}
+            other => panic!("expected JsonValue(JsonMissingKey), got {other:?}"),
+        }
+    }
+
+    /// `sourceHash` present but not base64url-no-pad — the `URL_SAFE_NO_PAD`
+    /// decode fails, yielding `JsonError::InvalidHash` through `JsonValue`.
+    #[test]
+    fn test_from_json_value_rejects_source_hash_not_base64url() {
+        let mut bad = valid_update_value();
+        bad["sourceHash"] = serde_json::json!("!!!not base64!!!");
+        let err =
+            Update::from_json_value(bad).expect_err("non-base64url sourceHash must be rejected");
+        match err {
+            Error::JsonValue(JsonError::InvalidHash(_)) => {}
+            other => panic!("expected JsonValue(InvalidHash), got {other:?}"),
+        }
+    }
+
+    /// `targetHash` decodes cleanly but to the wrong length (31 bytes, not 32)
+    /// — the `try_into::<[u8; 32]>()` fails, yielding `JsonError::InvalidHash`
+    /// through `JsonValue` (the decoded-length class, distinct from a decode error).
+    #[test]
+    fn test_from_json_value_rejects_target_hash_wrong_length() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut bad = valid_update_value();
+        // base64url-no-pad of a 31-byte buffer: decodes fine, wrong length.
+        bad["targetHash"] = serde_json::json!(URL_SAFE_NO_PAD.encode([0u8; 31]));
+        let err =
+            Update::from_json_value(bad).expect_err("wrong-length targetHash must be rejected");
+        match err {
+            Error::JsonValue(JsonError::InvalidHash(_)) => {}
+            other => panic!("expected JsonValue(InvalidHash), got {other:?}"),
+        }
     }
 
     // ---- announce_singleton tests -----------------
@@ -1028,6 +1219,128 @@ mod tests {
                 inputs: 500,
                 fee: 1_000
             }
+        ));
+    }
+
+    // -- ownership cross-check: a prevout locked to a foreign key is rejected
+    //    BEFORE signing, instead of yielding a silently invalid transaction.
+    //    The signing key is 0x07; the prevout is locked to a different key
+    //    (0x08), so the beacon key does not own it.
+
+    /// A distinct key whose scripts do NOT match `test_secret_key` (0x07).
+    fn foreign_secret_key() -> BtcSecretKey {
+        BtcSecretKey::from_slice(&[0x08; 32]).expect("0x08.. is a valid secret key")
+    }
+
+    #[test]
+    fn announce_rejects_foreign_p2pkh_prevout() {
+        let update = sample_signed_update();
+        let signing_sk = test_secret_key();
+        let foreign = foreign_secret_key();
+        // scriptPubKey belongs to the foreign key, but we sign with 0x07.
+        let prevouts = vec![Prevout {
+            outpoint: outpoint(0),
+            value: 100_000,
+            script_pubkey: p2pkh_address(&foreign).script_pubkey(),
+        }];
+        let err = update
+            .announce_singleton(
+                &p2pkh_address(&signing_sk),
+                &prevouts,
+                1_000,
+                &change_address(),
+                signing_sk,
+            )
+            .expect_err("a P2PKH prevout the beacon key does not own must be rejected");
+        assert!(matches!(
+            err,
+            AnnounceError::KeyDoesNotOwnPrevout { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn announce_rejects_foreign_p2wpkh_prevout() {
+        let update = sample_signed_update();
+        let signing_sk = test_secret_key();
+        let foreign = foreign_secret_key();
+        let prevouts = vec![Prevout {
+            outpoint: outpoint(0),
+            value: 100_000,
+            script_pubkey: p2wpkh_address(&foreign).script_pubkey(),
+        }];
+        let err = update
+            .announce_singleton(
+                &p2wpkh_address(&signing_sk),
+                &prevouts,
+                1_000,
+                &change_address(),
+                signing_sk,
+            )
+            .expect_err("a P2WPKH prevout the beacon key does not own must be rejected");
+        assert!(matches!(
+            err,
+            AnnounceError::KeyDoesNotOwnPrevout { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn announce_rejects_foreign_p2tr_prevout() {
+        let update = sample_signed_update();
+        let signing_sk = test_secret_key();
+        let foreign = foreign_secret_key();
+        // The P2TR check compares the *tweaked* output key, so a foreign
+        // internal key yields a different output key and must be rejected.
+        let prevouts = vec![Prevout {
+            outpoint: outpoint(0),
+            value: 100_000,
+            script_pubkey: p2tr_address(&foreign).script_pubkey(),
+        }];
+        let err = update
+            .announce_singleton(
+                &p2tr_address(&signing_sk),
+                &prevouts,
+                1_000,
+                &change_address(),
+                signing_sk,
+            )
+            .expect_err("a P2TR prevout the beacon key does not own must be rejected");
+        assert!(matches!(
+            err,
+            AnnounceError::KeyDoesNotOwnPrevout { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn announce_reports_offending_prevout_index() {
+        let update = sample_signed_update();
+        let signing_sk = test_secret_key();
+        let foreign = foreign_secret_key();
+        // Input 0 is owned by the signing key; input 1 is foreign. The guard
+        // must reject at index 1, proving the reported index is the offender's.
+        let prevouts = vec![
+            Prevout {
+                outpoint: outpoint(0),
+                value: 100_000,
+                script_pubkey: p2wpkh_address(&signing_sk).script_pubkey(),
+            },
+            Prevout {
+                outpoint: outpoint(1),
+                value: 100_000,
+                script_pubkey: p2wpkh_address(&foreign).script_pubkey(),
+            },
+        ];
+        let err = update
+            .announce_singleton(
+                &p2wpkh_address(&signing_sk),
+                &prevouts,
+                1_000,
+                &change_address(),
+                signing_sk,
+            )
+            .expect_err("the second, foreign-owned prevout must be rejected");
+        assert!(matches!(
+            err,
+            AnnounceError::KeyDoesNotOwnPrevout { index: 1 }
         ));
     }
 }

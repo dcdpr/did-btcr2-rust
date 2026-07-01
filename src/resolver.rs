@@ -961,8 +961,8 @@ mod tests {
     #[test]
     fn op_vectors_update_signs_to_expected_hashes() {
         use crate::document::InitialDocument;
+        use crate::key::SecretKey;
         use json_patch::Patch;
-        use secp256k1::SecretKey;
 
         for (kind, short_id, has_update) in VECTORS {
             if !*has_update {
@@ -992,8 +992,8 @@ mod tests {
             let target_version_id =
                 NonZeroU64::new(signed["targetVersionId"].as_u64().unwrap()).unwrap();
             let vm_id = input["verificationMethodId"].as_str().unwrap();
-            let secret = SecretKey::from_slice(
-                &hex::decode(input["signingMaterial"].as_str().unwrap()).unwrap(),
+            let secret = SecretKey::try_from(
+                hex::decode(input["signingMaterial"].as_str().unwrap()).unwrap(),
             )
             .unwrap();
 

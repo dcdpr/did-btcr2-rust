@@ -46,6 +46,12 @@ fn test_secret_key() -> SecretKey {
     SecretKey::from_slice(&TEST_SK_BYTES).expect("[7u8; 32] is a valid secret key")
 }
 
+/// The same key material as [`test_secret_key`] but as the crate-owned newtype
+/// the DID-update signing path (`update_sk`) now takes.
+fn test_update_sk() -> did_btcr2::key::SecretKey {
+    did_btcr2::key::SecretKey::try_from(TEST_SK_BYTES).expect("[7u8; 32] is a valid secret key")
+}
+
 fn test_public_key() -> PublicKey {
     let secp = Secp256k1::new();
     test_secret_key().public_key(&secp)
@@ -247,14 +253,14 @@ fn e2e_four_operations_roundtrip() {
     //    from it), then drive the broadcast through the facade.
     let update = first
         .document
-        .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, sk)
+        .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
         .expect("the update constructs against the genesis document");
     let _txid = client
         .update(
             &first.document,
             benign_patch(&vm_id),
             &vm_id,
-            sk,
+            test_update_sk(),
             sk,
             v1,
             1, // the P2WPKH default beacon (spendable by the DID key)
@@ -287,10 +293,19 @@ fn e2e_four_operations_roundtrip() {
     // chains to update1's target_hash — building it against genesis would not
     // chain), then drive the broadcast through the facade.
     let deactivate = doc_v2
-        .deactivate(&vm_id, sk, v3)
+        .deactivate(&vm_id, test_update_sk(), v3)
         .expect("the deactivate constructs against the version-2 document");
     let _txid2 = client
-        .deactivate(&doc_v2, &vm_id, sk, sk, v2, 1, Fee::Absolute(1_000), None)
+        .deactivate(
+            &doc_v2,
+            &vm_id,
+            test_update_sk(),
+            sk,
+            v2,
+            1,
+            Fee::Absolute(1_000),
+            None,
+        )
         .expect("the deactivate broadcasts");
 
     // 5. Final re-resolve with BOTH updates in the sidecar → version 3,

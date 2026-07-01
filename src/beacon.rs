@@ -159,12 +159,18 @@ impl Beacon {
 /// `script_pubkey` (`is_p2pkh()` / `is_p2wpkh()` / `is_p2tr()`) — single source
 /// of truth, no separate kind tag.
 ///
-/// API contract (GIGO): every `Prevout` passed to
+/// API contract: every `Prevout` passed to
 /// [`Update::announce_singleton`](crate::Update::announce_singleton) is signed
-/// with the SAME `beacon_secret_key`. The caller MUST pass only prevouts
-/// spendable by that key; a prevout locked to a foreign key produces a silently
-/// invalid transaction. This is a sans-I/O primitive — it performs no runtime
-/// key/scriptPubKey cross-check (UTXO ownership is the caller's I/O concern).
+/// with the SAME `beacon_secret_key`, so each must be spendable by that key.
+/// This is a sans-I/O primitive — it does not perform any UTXO I/O — but before
+/// signing it DOES cross-check ownership: for each prevout it derives the
+/// expected script from `beacon_secret_key`'s public key (the key-hash for
+/// P2PKH/P2WPKH, the tweaked output key for P2TR) and compares it against
+/// `script_pubkey`, returning
+/// [`AnnounceError::KeyDoesNotOwnPrevout`](crate::AnnounceError::KeyDoesNotOwnPrevout)
+/// on mismatch rather than emitting a silently invalid, fund-committing
+/// transaction. (Whether the outpoint is unspent is still the caller's I/O
+/// concern.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prevout {
     /// The outpoint (txid + vout) being spent.
@@ -231,6 +237,16 @@ pub enum AnnounceError {
 
     /// A prevout scriptPubKey is not one of P2PKH / P2WPKH / P2TR.
     UnsupportedScriptType,
+
+    /// A prevout's scriptPubKey is not spendable by `beacon_secret_key`: the
+    /// script the beacon key derives (P2PKH/P2WPKH key-hash, or the P2TR tweaked
+    /// output key) does not match `prevout.script_pubkey`. Signing it would
+    /// produce a silently invalid, fund-committing transaction, so it is
+    /// rejected before signing.
+    KeyDoesNotOwnPrevout {
+        /// Index of the offending prevout within the supplied slice.
+        index: usize,
+    },
 
     /// Sighash computation or signing failed.
     Signing(String),
@@ -307,6 +323,28 @@ mod tests {
         let uri = "bitcoin:mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU?amount=0.1&label=beacon";
         Address::from_bip21(uri, Network::Regtest)
             .expect("a BIP21 URI with only benign parameters parses to its address");
+    }
+
+    /// A beacon `serviceEndpoint` BIP21 URI is
+    /// attacker-controllable; a well-formed URI carrying a valid MAINNET address
+    /// parsed with `Network::Regtest` must be rejected as `AddressParse` (the
+    /// network-validation failure), NOT `InvalidBip21` (a shape failure, which
+    /// `test_invalid_beacon_address_uri` covers). This prevents a beacon from
+    /// being watched on the wrong chain.
+    ///
+    /// The URI carries a valid mainnet bech32 address (BIP173 test vector), so it
+    /// clears the `bitcoin:`-prefix + `req-` shape checks FIRST (beacon.rs:44-62,
+    /// confirmed to precede network validation); the failure lands at
+    /// `require_network(Regtest)` (beacon.rs:66), surfaced as `AddressParse`.
+    /// (The `multibase_decode` length half of this rule lives in cryptosuite.rs.)
+    #[test]
+    fn test_from_bip21_rejects_network_mismatched_address() {
+        let uri = "bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let result = Address::from_bip21(uri, Network::Regtest);
+        assert!(
+            matches!(result, Err(Error::AddressParse(_))),
+            "mainnet address parsed with Regtest must be AddressParse, got {result:?}"
+        );
     }
 
     #[test]

@@ -77,6 +77,45 @@ mod tests {
         assert!(dereference_root_capability("invalid:zcap:root:test").is_err());
     }
 
+    // ---- dereference bad-payload negative tests -----------------
+    //
+    // A `urn:zcap:root:` capability id is attacker-supplied; a crafted id must
+    // NOT dereference to a bogus/authorized Did — it must fail closed. ALL
+    // dereference failure paths return `Btcr2Error::Zcap(_)` (zcap.rs:47/51/54),
+    // so both tests bind + match that variant.
+
+    /// A valid `urn:zcap:root:` prefix wrapping a percent-encoded
+    /// NON-DID payload (`not%2Da%2Ddid` decodes to `not-a-did`) is rejected —
+    /// the inner `did.parse()` fails (zcap.rs:53-54) -> `Btcr2Error::Zcap`.
+    #[test]
+    fn test_dereference_rejects_non_did_payload() {
+        let err = dereference_root_capability("urn:zcap:root:not%2Da%2Ddid")
+            .expect_err("a non-DID payload must not dereference");
+        assert!(
+            matches!(err, Btcr2Error::Zcap(_)),
+            "expected Btcr2Error::Zcap, got {err:?}"
+        );
+    }
+
+    /// A `urn:zcap:root:` prefix wrapping a bad percent-escape (`%ZZ`)
+    /// is rejected with `Btcr2Error::Zcap`. MECHANISM (verified): `urlencoding::decode`
+    /// is LENIENT — on `%ZZ` it passes the literal `%` through and yields the
+    /// valid-UTF-8 string `%ZZ`, returning `Ok` (it only errors on non-UTF-8
+    /// bytes). So this input does NOT trip the decode-error arm (zcap.rs:51); the
+    /// rejection arrives one step later when the decoded string fails to parse as
+    /// a Did (zcap.rs:53). This test binds fail-closed REJECTION via the downstream
+    /// DID-parse path — it does NOT exercise a percent-decode failure (so it does
+    /// not overclaim the decode-failure mechanism).
+    #[test]
+    fn test_dereference_rejects_bad_percent_encoding() {
+        let err = dereference_root_capability("urn:zcap:root:%ZZ")
+            .expect_err("a bad-percent-encoding payload must not dereference");
+        assert!(
+            matches!(err, Btcr2Error::Zcap(_)),
+            "expected Btcr2Error::Zcap, got {err:?}"
+        );
+    }
+
     #[test]
     fn test_round_trip() {
         // Derive capability from DID

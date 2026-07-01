@@ -292,7 +292,7 @@ impl<T: BtcTransport> Client<T> {
         doc: &Document,
         patch: Patch,
         vm_id: &str,
-        update_sk: SecretKey,
+        update_sk: did_btcr2::key::SecretKey,
         beacon_sk: SecretKey,
         current_version_id: NonZeroU64,
         beacon_idx: usize,
@@ -319,7 +319,7 @@ impl<T: BtcTransport> Client<T> {
         &self,
         doc: &Document,
         vm_id: &str,
-        update_sk: SecretKey,
+        update_sk: did_btcr2::key::SecretKey,
         beacon_sk: SecretKey,
         current_version_id: NonZeroU64,
         beacon_idx: usize,
@@ -680,6 +680,12 @@ mod tests {
         SecretKey::from_slice(&TEST_SK_BYTES).expect("[7u8; 32] is a valid secret key")
     }
 
+    /// The same key material as [`test_secret_key`] but as the crate-owned
+    /// newtype the DID-update signing path (`update_sk`) now takes.
+    fn test_update_sk() -> did_btcr2::key::SecretKey {
+        did_btcr2::key::SecretKey::try_from(TEST_SK_BYTES).expect("[7u8; 32] is a valid secret key")
+    }
+
     fn test_keyed_sk_pk() -> (SecretKey, PublicKey) {
         let secp = Secp256k1::new();
         let sk = test_secret_key();
@@ -724,7 +730,7 @@ mod tests {
                 &doc,
                 benign_patch(&vm_id),
                 &vm_id,
-                sk,
+                test_update_sk(),
                 sk,
                 v1,
                 1, // the P2WPKH default beacon (spendable by the DID key)
@@ -759,7 +765,7 @@ mod tests {
                 &doc,
                 benign_patch(&vm_id),
                 &vm_id,
-                sk,
+                test_update_sk(),
                 sk,
                 v1,
                 1,
@@ -789,7 +795,7 @@ mod tests {
         let v2 = NonZeroU64::new(2).expect("2 is non-zero");
 
         let signed = doc
-            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, sk)
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
             .expect("a signed update constructs against the genesis document");
         let tx = client
             .build_update_tx(&doc, signed, 1, Fee::Absolute(1_000), None, sk)
@@ -827,7 +833,7 @@ mod tests {
         let v2 = NonZeroU64::new(2).expect("2 is non-zero");
 
         let signed = doc
-            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, sk)
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
             .expect("a signed update constructs against the genesis document");
         // A rate fee drives the two-build measure-then-rebuild path.
         let tx = client
@@ -868,7 +874,7 @@ mod tests {
         let v2 = NonZeroU64::new(2).expect("2 is non-zero");
 
         let signed = doc
-            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, sk)
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
             .expect("a signed update constructs against the genesis document");
 
         let err = client
@@ -909,7 +915,7 @@ mod tests {
                 &deactivated,
                 benign_patch(&vm_id),
                 &vm_id,
-                sk,
+                test_update_sk(),
                 sk,
                 v1,
                 1,
@@ -940,7 +946,7 @@ mod tests {
                 &doc,
                 benign_patch(&vm_id),
                 &vm_id,
-                sk,
+                test_update_sk(),
                 sk,
                 v1,
                 1,

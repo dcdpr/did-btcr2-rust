@@ -7,10 +7,14 @@
 
 use crate::update::{UnsecuredUpdate, Update};
 use crate::zcap::proof::{Proof, ProofInner, ProofPurpose, ProofValue};
-use crate::{error::Btcr2Error, identifier::Sha256Hash, key::PublicKey};
+use crate::{
+    error::Btcr2Error,
+    identifier::Sha256Hash,
+    key::{PublicKey, SecretKey},
+};
 use multibase::{Base, decode, encode};
 use secp256k1::schnorr::Signature;
-use secp256k1::{KeyPair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{KeyPair, Message, Secp256k1, XOnlyPublicKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -22,7 +26,7 @@ impl CryptoSuite {
         &self,
         unsecured_update: &UnsecuredUpdate,
         mut inner: ProofInner,
-        secret_key: SecretKey,
+        secret_key: &SecretKey,
     ) -> Result<Proof, Btcr2Error> {
         // Add document context to proof if present
         if let Some(context) = unsecured_update.as_ref()["@context"].as_array() {
@@ -168,7 +172,7 @@ impl CryptoSuite {
     fn serialize_proof(
         &self,
         hash_data: Sha256Hash,
-        secret_key: SecretKey,
+        secret_key: &SecretKey,
     ) -> Result<Signature, Btcr2Error> {
         bip340_sign(hash_data, secret_key)
     }
@@ -186,15 +190,17 @@ impl CryptoSuite {
 }
 
 /// Sign data using BIP340 Schnorr signatures
-fn bip340_sign(message_hash: Sha256Hash, secret_key: SecretKey) -> Result<Signature, Btcr2Error> {
+fn bip340_sign(message_hash: Sha256Hash, secret_key: &SecretKey) -> Result<Signature, Btcr2Error> {
     let secp = Secp256k1::new();
 
     // Create message object from hash
     let message = Message::from_slice(&message_hash.0)
         .expect("Sha256Hash is exactly 32 bytes; Message::from_slice requires 32");
 
-    // Sign with BIP340 Schnorr
-    let keypair = KeyPair::from_secret_key(&secp, &secret_key);
+    // Sign with BIP340 Schnorr. This is the ONLY place the inner secp key is
+    // unwrapped (the final point of use). `KeyPair` here is secp256k1's own
+    // type, unrelated to crate::key::KeyPair.
+    let keypair = KeyPair::from_secret_key(&secp, secret_key.as_inner());
 
     // Deterministic signing (no fresh auxiliary randomness): the signature is a
     // pure function of (secret key, message), so a given signed update is
@@ -254,8 +260,8 @@ mod tests {
     // Construct a deterministic PublicKey for tests where the signature path
     // is never reached (the context-binding check fires first, before
     // multibase_decode). `PublicKey` is re-exported from secp256k1 (see
-    // crate::key: `pub use secp256k1::{PublicKey, SecretKey}`), so
-    // sk.public_key(&secp) returns exactly the type verify_proof expects.
+    // crate::key: `pub use secp256k1::PublicKey`), so sk.public_key(&secp)
+    // returns exactly the type verify_proof expects.
     fn dummy_public_key() -> secp256k1::PublicKey {
         let secp = secp256k1::Secp256k1::new();
         let sk = secp256k1::SecretKey::from_slice(&[1u8; 32])
@@ -300,7 +306,7 @@ mod tests {
 
     // A SecretKey derived from a non-constant, valid byte array. NOT a zero key.
     fn test_secret_key() -> SecretKey {
-        SecretKey::from_slice(&[1u8; 32]).expect("[1u8; 32] is a valid secp256k1 secret key")
+        SecretKey::try_from([1u8; 32]).expect("[1u8; 32] is a valid secp256k1 secret key")
     }
 
     // A minimal unsigned update (four contexts) to sign over.
@@ -342,7 +348,7 @@ mod tests {
         // Schnorr signature.
         let suite = CryptoSuite;
         let proof = suite
-            .create_proof(&unsigned_update(), proof_inner(), test_secret_key())
+            .create_proof(&unsigned_update(), proof_inner(), &test_secret_key())
             .expect("signing with a valid key must succeed");
 
         assert!(
@@ -367,10 +373,10 @@ mod tests {
         // signing the same update twice yields byte-identical proofValues.
         let suite = CryptoSuite;
         let first = suite
-            .create_proof(&unsigned_update(), proof_inner(), test_secret_key())
+            .create_proof(&unsigned_update(), proof_inner(), &test_secret_key())
             .expect("first signing must succeed");
         let second = suite
-            .create_proof(&unsigned_update(), proof_inner(), test_secret_key())
+            .create_proof(&unsigned_update(), proof_inner(), &test_secret_key())
             .expect("second signing must succeed");
 
         assert_eq!(
@@ -499,5 +505,76 @@ mod tests {
             .verify_proof(dummy_public_key(), &update)
             .expect_err("proof with @context but update without must be rejected");
         assert!(matches!(err, Btcr2Error::InvalidUpdateProof(_)));
+    }
+
+    // The BIP340 sign/verify core. `bip340_sign`/`bip340_verify` are
+    // private, so these test them directly via `super::`. proofValue is
+    // attacker-influenceable, so a mutated signature must not verify.
+
+    #[test]
+    fn test_bip340_sign_verify_round_trip() {
+        // A signature produced by bip340_sign over a message verifies against the
+        // signer's x-only public key.
+        let sk = test_secret_key();
+        let secp = Secp256k1::new();
+        let xonly = sk.as_inner().public_key(&secp).x_only_public_key().0;
+        let msg = Sha256Hash([0x11u8; 32]);
+
+        let sig = bip340_sign(msg, &sk).expect("signing with a valid key must succeed");
+        bip340_verify(msg, sig, &xonly).expect("a fresh signature must verify");
+    }
+
+    #[test]
+    fn test_bip340_verify_rejects_flipped_signature_byte() {
+        // Flipping one byte of the 64-byte signature must fail verification. Byte
+        // index 32 is in the `s` scalar half; the mutation still parses through
+        // Signature::from_slice (length is unchanged) but fails the Schnorr check
+        // — so this is a VERIFY rejection, not a parse rejection.
+        //
+        // NOTE (deviation from plan): bip340_verify returns the CONCRETE variant
+        // Btcr2Error::InvalidUpdateProof on verify failure (cryptosuite.rs:228),
+        // not ProofVerification as the plan text stated. The behavior (rejection)
+        // is what matters; we assert the variant the code actually returns.
+        let sk = test_secret_key();
+        let secp = Secp256k1::new();
+        let xonly = sk.as_inner().public_key(&secp).x_only_public_key().0;
+        let msg = Sha256Hash([0x11u8; 32]);
+
+        let sig = bip340_sign(msg, &sk).expect("signing with a valid key must succeed");
+        let mut bytes: [u8; 64] = *sig.as_ref();
+        bytes[32] ^= 0x01;
+        let bad = Signature::from_slice(&bytes)
+            .expect("a length-preserving byte flip still parses as a Signature");
+
+        let err = bip340_verify(msg, bad, &xonly)
+            .expect_err("a flipped signature byte must fail verification");
+        match err {
+            Btcr2Error::InvalidUpdateProof(_) => {}
+            other => panic!("expected InvalidUpdateProof, got {other:?}"),
+        }
+    }
+
+    // The length half: a valid base58-btc encoding
+    // of a NON-64-byte buffer passes the base check but must fail closed at
+    // Signature::from_slice's length check with ProofVerification — never yield a
+    // bogus Signature. The base-mismatch half is covered by
+    // multibase_decode_rejects_non_base58btc; the from_bip21 network-mismatch
+    // half of this rule lives in beacon.rs.
+    #[test]
+    fn test_multibase_decode_rejects_wrong_length() {
+        // 32 bytes, correctly base58-btc-encoded: right base, wrong length.
+        let short = [0x42u8; 32];
+        let base58 = multibase::encode(Base::Base58Btc, short);
+        assert!(
+            base58.starts_with('z'),
+            "sanity: base58-btc multibase prefix is 'z'"
+        );
+
+        let err = multibase_decode(&ProofValue(base58))
+            .expect_err("a non-64-byte base58-btc body must be rejected");
+        match err {
+            Btcr2Error::ProofVerification(_) => {}
+            other => panic!("expected ProofVerification, got {other:?}"),
+        }
     }
 }
