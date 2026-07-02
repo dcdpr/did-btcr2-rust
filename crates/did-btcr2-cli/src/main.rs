@@ -330,7 +330,7 @@ fn parse_create(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command,
 /// Map a `--network` string to a [`did_btcr2::identifier::Network`].
 ///
 /// `None` and `"testnet"` both map to `TestnetV3` (the CLI default); `"signet"`,
-/// `"mainnet"`, and `"mutinynet"` map to their variants. Anything else is a
+/// `"mainnet"`, `"mutinynet"`, and `"regtest"` map to their variants. Anything else is a
 /// typed [`did_btcr2_client::Error::UnknownNetwork`] (surfaced via
 /// `CliRunError::Client`), mirroring how [`beacon_index`] handles an unknown
 /// beacon type — the unknown string is NOT laundered through another variant.
@@ -341,6 +341,7 @@ fn network_from_str(network: Option<&str>) -> Result<did_btcr2::identifier::Netw
         Some("signet") => Ok(Network::Signet),
         Some("mainnet") => Ok(Network::Mainnet),
         Some("mutinynet") => Ok(Network::Mutinynet),
+        Some("regtest") => Ok(Network::Regtest),
         Some(other) => Err(CliRunError::Client(
             did_btcr2_client::Error::UnknownNetwork(other.to_string()),
         )),
@@ -667,10 +668,12 @@ fn run_create(
         // facade re-parses/validates it into an IntermediateDocument; the raw
         // value is also what a --sidecar-out genesisDocument carries verbatim.
         let intermediate_json: serde_json::Value = serde_json::from_reader(File::open(path)?)?;
-        // The external facade never touches the transport, so URL/transport are
-        // unused; build the client the same way the other arms do.
-        let client =
-            Client::with_network(network.unwrap_or("testnet"), None, UreqTransport::new())?;
+        // The external facade never touches the transport, and `create` does no
+        // endpoint selection: build the client with a placeholder base URL so
+        // offline creation works for every recognized network — including
+        // regtest, which has no default Esplora endpoint (with_network would
+        // reject regtest before this zero-I/O path could ever run).
+        let client = Client::new(String::new(), UreqTransport::new());
         create_external_and_print(&client, intermediate_json, net, sidecar_out)?;
         return Ok(());
     }
@@ -705,10 +708,11 @@ fn run_create(
 
     let net = network_from_str(network)?;
 
-    // `create` invokes no transport, so the URL/transport are never touched;
-    // build the client the same way the other arms do rather than adding a
-    // bespoke no-transport constructor.
-    let client = Client::with_network(network.unwrap_or("testnet"), None, UreqTransport::new())?;
+    // `create` invokes no transport and does no endpoint selection, so build the
+    // client with a placeholder base URL. This keeps offline creation working for
+    // every recognized network — including regtest, which has no default Esplora
+    // endpoint (with_network would reject regtest before this zero-I/O path runs).
+    let client = Client::new(String::new(), UreqTransport::new());
 
     create_and_print(&client, &public_key, net)?;
 
@@ -1607,6 +1611,10 @@ mod tests {
             network_from_str(Some("mutinynet")).unwrap(),
             Network::Mutinynet
         ));
+        assert!(matches!(
+            network_from_str(Some("regtest")).unwrap(),
+            Network::Regtest
+        ));
         // an unknown network is its own typed variant.
         match network_from_str(Some("bogus")).unwrap_err() {
             CliRunError::Client(did_btcr2_client::Error::UnknownNetwork(n)) => {
@@ -1614,6 +1622,38 @@ mod tests {
             }
             other => panic!("expected UnknownNetwork, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn regtest_cli_path_recognizes_network_but_has_no_default_endpoint() {
+        use did_btcr2::identifier::Network;
+        use did_btcr2_client::{Error, resolve_base_url};
+
+        // 1. The CLI string->enum map RECOGNIZES regtest.
+        assert!(matches!(
+            network_from_str(Some("regtest")).unwrap(),
+            Network::Regtest
+        ));
+
+        // 2. The network->URL map REFUSES a default for regtest and demands
+        //    --esplora-url via the dedicated typed error — NOT a testnet URL,
+        //    NOT UnknownNetwork. This is the real
+        //    end-to-end path a CLI user hits with `resolve --network regtest`
+        //    and no --esplora-url.
+        match resolve_base_url(Some("regtest"), None) {
+            Err(Error::NoDefaultEndpoint(net)) => assert_eq!(net, "regtest"),
+            other => panic!("expected NoDefaultEndpoint, got {other:?}"),
+        }
+
+        // 3. A supplied --esplora-url wins for regtest.
+        assert_eq!(
+            resolve_base_url(
+                Some("regtest"),
+                Some("http://localhost:3000/api".to_string())
+            )
+            .unwrap(),
+            "http://localhost:3000/api"
+        );
     }
 
     // ── create: key-mode truth table (pure helper, no env touch) ──────────────
@@ -1841,5 +1881,53 @@ mod tests {
             result.document.as_ref().get("id").and_then(|v| v.as_str()),
             Some(did.encode())
         );
+    }
+
+    #[test]
+    fn run_create_regtest_offline_needs_no_esplora_endpoint() {
+        // Regression guard for the offline-create endpoint-selection bug: `create`
+        // does ZERO I/O and no endpoint selection, so it must succeed for regtest
+        // even though regtest has no default Esplora endpoint. Both create
+        // client-build sites (key-based and x1-external) are exercised here; before
+        // the fix they aborted with NoDefaultEndpoint before minting anything, and
+        // `create` exposes no --esplora-url flag to work around it.
+        use did_btcr2::identifier::Network;
+
+        // (a) key-based create path (--generate): mints a k1 regtest DID offline.
+        run_create(Some("regtest"), None, false, true, None, None)
+            .expect("key-based regtest create must not require an Esplora endpoint");
+
+        // (b) x1-external create path: mints an x1 regtest DID from an intermediate
+        //     document, again with no endpoint selection.
+        let intermediate_path = unique_temp_path("regtest-intermediate");
+        std::fs::write(
+            &intermediate_path,
+            serde_json::to_vec(&x1_intermediate_json()).unwrap(),
+        )
+        .unwrap();
+        let sidecar_path = unique_temp_path("regtest-sidecar-out");
+        run_create(
+            Some("regtest"),
+            None,
+            false,
+            false,
+            Some(intermediate_path.clone()),
+            Some(sidecar_path.clone()),
+        )
+        .expect("x1-external regtest create must not require an Esplora endpoint");
+
+        // The x1 path wrote a sidecar carrying the intermediate (placeholder-id)
+        // document — confirming create actually ran to completion for regtest.
+        let written: serde_json::Value =
+            serde_json::from_reader(File::open(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(written["genesisDocument"]["id"], "did:btcr2:_");
+        let _ = std::fs::remove_file(&intermediate_path);
+        let _ = std::fs::remove_file(&sidecar_path);
+
+        // Sanity: the network name is still validated (regtest is recognized).
+        assert!(matches!(
+            network_from_str(Some("regtest")).unwrap(),
+            Network::Regtest
+        ));
     }
 }

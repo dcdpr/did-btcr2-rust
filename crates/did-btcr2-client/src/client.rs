@@ -614,6 +614,81 @@ mod tests {
     }
 
     #[test]
+    fn regtest_x1_create_then_resolve_round_trips_via_fake_transport() {
+        use did_btcr2::document::SidecarData;
+
+        // Empty /txs array + bare-integer tip => a freshly created DID resolves to
+        // genesis version 1 with zero live I/O. This is the sanctioned substitute for
+        // a live regtest node in CI, NOT a product offline-resolve mode.
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://fake".to_string(), transport);
+
+        // The placeholder-`did:btcr2:_` intermediate document. Built once here and
+        // cloned so the SAME JSON is (a) consumed by `create_external` — which hashes
+        // it into the External `genesisBytes` — and (b) threaded through the sidecar.
+        // Reusing one value guarantees the sidecar hash matches the on-chain
+        // commitment regardless of field-ordering or optional fields.
+        let intermediate_json = serde_json::json!({
+            "id": "did:btcr2:_",
+            "@context": [
+                "https://www.w3.org/ns/did/v1.1",
+                "https://btcr2.dev/context/v1"
+            ],
+            "verificationMethod": [{
+                "id": "did:btcr2:_#key-0",
+                "type": "Multikey",
+                "controller": "did:btcr2:_",
+                "publicKeyMultibase": "zQ3shTHn9hZ1BHtoZayz4VmPAZT97p2v8swmuPEUwBKHCanTL"
+            }],
+            "authentication": ["did:btcr2:_#key-0"],
+            "assertionMethod": ["did:btcr2:_#key-0"],
+            "capabilityInvocation": ["did:btcr2:_#key-0"],
+            "capabilityDelegation": ["did:btcr2:_#key-0"],
+            "service": [{
+                "id": "did:btcr2:_#service-0",
+                "serviceEndpoint": "bitcoin:mnDXvNsFTf9cs4hWigPkENCBDp9eJpfyxF",
+                "type": "SingletonBeacon"
+            }]
+        });
+        let intermediate =
+            IntermediateDocument::from_json_value(intermediate_json.clone(), Network::Regtest)
+                .expect("the inline intermediate document is structurally valid");
+
+        let (did, _doc) = client
+            .create_external(intermediate, Network::Regtest)
+            .expect("create_external succeeds");
+        assert!(
+            did.encode().starts_with("did:btcr2:x1"),
+            "regtest external create must mint an x1 DID, got: {}",
+            did.encode()
+        );
+
+        // Thread the INTERMEDIATE (placeholder-DID) document through the sidecar —
+        // this is exactly what `create_external_and_print` writes and what
+        // `run_resolve` feeds to resolve. ResolutionOptions::default() carries no
+        // sidecar and CANNOT resolve an x1 DID, whose on-chain commitment is only the
+        // hash of this document.
+        let sidecar = SidecarData::from_json_value(
+            serde_json::json!({ "genesisDocument": intermediate_json }),
+        )
+        .expect("sidecar with genesisDocument deserializes");
+        let opts = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..ResolutionOptions::default()
+        };
+
+        let result = client
+            .resolve(&did, opts)
+            .expect("regtest x1 resolve succeeds against the fake transport");
+        assert_eq!(
+            result.document_metadata.version_id,
+            std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+            "genesis resolves to version 1",
+        );
+        assert!(!result.document_metadata.deactivated);
+    }
+
+    #[test]
     fn resolve_returns_triple() {
         // A freshly created DID has announced NO updates, so the beacon /txs
         // returns an empty array and the DID resolves to genesis version 1.

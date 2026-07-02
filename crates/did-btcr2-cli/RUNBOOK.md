@@ -134,6 +134,26 @@ source (`--key-file`/`--key-stdin`/`DIDBTCR2_KEY`); combining them is an error a
 no key is read. With no sidecar at all, resolving an `x1` DID errors (its genesis
 document cannot be retrieved — the genesis-CAS path is not yet implemented).
 
+#### `x1` on `regtest` — create → resolve round-trip against a local esplora
+
+The did:btcr2 `x1` test vectors are authored on **regtest**, which has no hosted
+Esplora endpoint. Mint the `x1` DID with `--network regtest`, then resolve it back
+by pointing `--esplora-url` at your local esplora and feeding the genesis sidecar
+(omitting `--esplora-url` errors with
+`regtest has no default Esplora endpoint; pass --esplora-url`):
+
+```bash
+# 1. mint the x1 regtest DID + genesis sidecar (offline, zero network calls)
+cargo run -p did-btcr2-cli -- create \
+  --intermediate-document ./intermediate.json \
+  --sidecar-out ./sidecar.json \
+  --network regtest
+# 2. resolve it back against a local esplora, using that genesis sidecar
+cargo run -p did-btcr2-cli -- resolve --network regtest \
+  --esplora-url http://<your-local-esplora>/api \
+  --sidecar ./sidecar.json <the-x1-did>
+```
+
 ---
 
 ## Step 2 — Fund the beacon address (USER step, faucet)

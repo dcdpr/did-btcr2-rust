@@ -59,6 +59,12 @@ pub enum Error {
     #[error("unknown network '{0}'. Expected testnet, signet, mainnet, or mutinynet")]
     UnknownNetwork(String),
 
+    /// A recognized network that has no hosted Esplora endpoint (regtest), used
+    /// without an `--esplora-url` override. Regtest is a known network, so this is
+    /// deliberately distinct from `UnknownNetwork`.
+    #[error("{0} has no default Esplora endpoint; pass --esplora-url")]
+    NoDefaultEndpoint(&'static str),
+
     /// An unrecognized `--beacon` type name.
     #[error("unknown beacon type '{0}'; expected P2PKH, P2WPKH, or P2TR")]
     UnknownBeaconType(String),

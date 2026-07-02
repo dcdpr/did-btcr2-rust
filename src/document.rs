@@ -1270,6 +1270,33 @@ mod tests {
         }
     }
 
+    /// `find_and_replace` rewrites a whole-DID string and a `did#fragment`
+    /// string, but leaves the DID untouched when it merely appears mid-text or
+    /// is immediately followed by a non-`#` character — the substring-collision
+    /// guard the function was written to add. The `list` field exercises the
+    /// `Value::Array` recursion arm (document.rs Array branch), not just
+    /// top-level object fields.
+    #[test]
+    fn find_and_replace_only_touches_whole_did_and_fragment_ids() {
+        let mut v = json!({
+            "id": "did:btcr2:x1abc",                   // whole DID  -> replaced
+            "vm": "did:btcr2:x1abc#key-0",             // DID#frag   -> replaced
+            "note": "see did:btcr2:x1abc in the log",  // mid-text   -> untouched
+            "sibling": "did:btcr2:x1abcXYZ",           // prefix+non-'#' -> untouched
+            "list": [
+                "did:btcr2:x1abc",                     // array elem, whole DID -> replaced
+                "did:btcr2:x1abc#svc"                  // array elem, DID#frag  -> replaced
+            ]
+        });
+        find_and_replace(&mut v, "did:btcr2:x1abc", "did:btcr2:_");
+        assert_eq!(v["id"], "did:btcr2:_");
+        assert_eq!(v["vm"], "did:btcr2:_#key-0");
+        assert_eq!(v["note"], "see did:btcr2:x1abc in the log");
+        assert_eq!(v["sibling"], "did:btcr2:x1abcXYZ");
+        assert_eq!(v["list"][0], "did:btcr2:_"); // exercises Array recursion arm
+        assert_eq!(v["list"][1], "did:btcr2:_#svc");
+    }
+
     /// True iff the `test-suite/` submodule is checked out (vs. an empty
     /// placeholder directory left by a non-recursive clone). The probe is the
     /// presence of the `test-suite/regtest/` directory — the common root of every

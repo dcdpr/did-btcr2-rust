@@ -42,6 +42,13 @@ verbatim (trailing slash trimmed):
 | `signet` | `https://blockstream.info/signet/api` |
 | `mainnet` | `https://blockstream.info/api` |
 | `mutinynet` | `https://mutinynet.com/api` |
+| `regtest` | *(none — requires `--esplora-url`)* |
+
+`regtest` has no hosted Esplora endpoint, so `did-btcr2 resolve --network regtest`
+requires `--esplora-url http://<your-local-esplora>/api` pointing at your local
+esplora. Omitting it errors with
+`regtest has no default Esplora endpoint; pass --esplora-url`
+rather than falling back to testnet.
 
 ## Supplying the secret key (`update` / `deactivate`)
 

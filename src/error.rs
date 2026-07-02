@@ -176,4 +176,51 @@ mod tests {
         );
         assert_eq!(details["detail"], message);
     }
+
+    /// `InvalidDid` carries the W3C `did` namespace prefix, the `INVALID_DID`
+    /// code, a Display-wired `title`, and the plain carried detail string.
+    #[test]
+    fn invalid_did_problem_details_shape() {
+        let err = Btcr2Error::InvalidDid("bad did".into());
+        let d = err.details().expect("InvalidDid yields problem details");
+        assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_DID");
+        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["detail"], "bad did");
+    }
+
+    /// `InvalidDidDocument` is the second variant on the W3C `did` prefix; its
+    /// code is `INVALID_DID_DOCUMENT`.
+    #[test]
+    fn invalid_did_document_problem_details_shape() {
+        let err = Btcr2Error::InvalidDidDocument("bad doc".into());
+        let d = err
+            .details()
+            .expect("InvalidDidDocument yields problem details");
+        assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_DID_DOCUMENT");
+        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["detail"], "bad doc");
+    }
+
+    /// `MissingUpdateData` covers the second namespace prefix (btc1.dev) and the
+    /// non-trivial formatted-detail arm (hex of the 32-byte update hash).
+    #[test]
+    fn missing_update_data_problem_details_shape() {
+        let err = Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash([0u8; 32]),
+        };
+        let d = err
+            .details()
+            .expect("MissingUpdateData yields problem details");
+        // NOTE: this pins the current `btc1.dev` namespace prefix. The
+        // btc1.dev -> btcr2.dev namespace rename is still outstanding; this
+        // assertion is a deliberate re-bless site and MUST be updated to
+        // `btcr2.dev` when that rename lands.
+        assert_eq!(d["type"], "https://btc1.dev/context/v1#MISSING_UPDATE_DATA");
+        assert_eq!(d["title"], err.to_string());
+        // detail is the formatted hex of the 32-byte hash (all-zero here).
+        assert_eq!(
+            d["detail"],
+            format!("update_hash={}", hex::encode([0u8; 32]))
+        );
+    }
 }
