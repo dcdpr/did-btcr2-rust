@@ -9,9 +9,8 @@ pub(crate) trait CanonicalHash: AsRef<Value> {
         let jcs = serde_jcs::to_string(self.as_ref()).expect("JSON is always valid JCS");
         let hash_bytes = Sha256::digest(jcs.as_bytes());
 
-        Sha256Hash(
-            hash_bytes[..]
-                .try_into()
+        Sha256Hash::from(
+            <[u8; 32]>::try_from(&hash_bytes[..])
                 .expect("Sha256::digest is always 32 bytes by type system"),
         )
     }

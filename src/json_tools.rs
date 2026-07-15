@@ -69,11 +69,10 @@ pub(crate) fn hash_from_object(value: &Value, key: &str) -> Result<Sha256Hash, J
     let bytes = URL_SAFE_NO_PAD
         .decode(s)
         .map_err(|_| JsonError::InvalidHash(key.into()))?;
-    Ok(Sha256Hash(
-        bytes
-            .try_into()
-            .map_err(|_| JsonError::InvalidHash(key.into()))?,
-    ))
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| JsonError::InvalidHash(key.into()))?;
+    Ok(Sha256Hash::from(arr))
 }
 
 /// Returns value[key] as a str if it is a JSON string.

@@ -41,7 +41,14 @@ pub trait AddressExt {
 
 impl AddressExt for Address {
     fn from_bip21(uri: &str, network: Network) -> Result<Self, Error> {
-        let body = uri.strip_prefix("bitcoin:").ok_or(Error::InvalidBip21)?;
+        // BIP21 URI schemes are case-insensitive (RFC 3986 §3.1); QR encoders
+        // routinely uppercase URIs (e.g. `BITCOIN:`). Case-fold the scheme ONLY
+        // — the address body stays untouched because Bitcoin addresses are
+        // case-sensitive.
+        let (scheme, body) = uri.split_once(':').ok_or(Error::InvalidBip21)?;
+        if !scheme.eq_ignore_ascii_case("bitcoin") {
+            return Err(Error::InvalidBip21);
+        }
         let (address, params) = match body.split_once('?') {
             Some((addr, params)) => (addr, Some(params)),
             None => (body, None),
@@ -323,6 +330,22 @@ mod tests {
         let uri = "bitcoin:mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU?amount=0.1&label=beacon";
         Address::from_bip21(uri, Network::Regtest)
             .expect("a BIP21 URI with only benign parameters parses to its address");
+    }
+
+    /// BIP21 URI schemes are case-insensitive (RFC 3986). An uppercase
+    /// `BITCOIN:` and a mixed-case `Bitcoin:` URI must parse to the SAME address
+    /// as the lowercase form; the address body is never case-folded.
+    #[test]
+    fn bip21_scheme_is_case_insensitive() {
+        let addr = "mh8h6FXkMzHaW4RKerGT33ZLqx52xL28dU";
+        let lower = Address::from_bip21(&format!("bitcoin:{addr}"), Network::Regtest)
+            .expect("lowercase scheme parses");
+        let upper = Address::from_bip21(&format!("BITCOIN:{addr}"), Network::Regtest)
+            .expect("uppercase scheme parses");
+        let mixed = Address::from_bip21(&format!("Bitcoin:{addr}"), Network::Regtest)
+            .expect("mixed-case scheme parses");
+        assert_eq!(lower, upper, "BITCOIN: must equal bitcoin:");
+        assert_eq!(lower, mixed, "Bitcoin: must equal bitcoin:");
     }
 
     /// A beacon `serviceEndpoint` BIP21 URI is

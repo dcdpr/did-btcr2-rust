@@ -176,7 +176,7 @@ pub fn select(
 ) -> Result<Vec<Prevout>, Error> {
     // Confirmed UTXOs only, sorted largest-first (stable for determinism).
     let mut confirmed: Vec<&EsploraUtxo> = utxos.iter().filter(|u| u.status.confirmed).collect();
-    confirmed.sort_by(|a, b| b.value.cmp(&a.value));
+    confirmed.sort_by_key(|b| std::cmp::Reverse(b.value));
 
     if confirmed.is_empty() {
         return Err(Error::NoSpendableUtxo);

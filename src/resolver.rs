@@ -86,8 +86,12 @@ pub struct Resolver<T = ()> {
     /// Caller-supplied chain tip height for computing `confirmations`.
     /// `None` => `DocumentMetadata.confirmations` is `None` (fail-closed).
     chain_tip_height: Option<u32>,
-    /// Lowest block height seen for an applied update (dedup tiebreaker,
-    /// resolve.md:50 footnote 1). `None` until the first update is applied.
+    /// Block height of the MOST-RECENTLY-APPLIED unique update, the basis for
+    /// `confirmations` (resolve.md:31,50). Overwritten on each unique apply; under
+    /// the ascending (target_version_id, block_height) sort this ends as the
+    /// highest-version applied update's height. The lower-height dedup fold-in
+    /// (resolve.md:50 footnote 1) survives only as a defensive guard in the
+    /// duplicate branch. `None` until the first update is applied.
     applied_block_height: Option<u32>,
     rpc_host: String,
     request_cache: HashSet<esploda::http::Uri>,
@@ -189,24 +193,20 @@ impl Resolver {
                 // FIRST tuple is what the version_time bound is evaluated against.
                 signals.sort_unstable_by_key(|s| (s.update.target_version_id, s.block_height));
 
-                // Process updates Array step 3 (resolve.md:153): if versionTime is
-                // provided and the first tuple's block time is more recent, resolve
-                // current_document as didDocument. This MUST read the first
-                // tuple AFTER the (targetVersionId, block_height) sort — not an
-                // unordered signal, and NOT a block_time sort (resolve.md:151-153).
-                if let TargetCondition::Time(time) = &self.target_condition
-                    && signals[0].block_time > *time
-                {
-                    return Ok(ResolverState::Resolved(self.terminal_state()));
-                }
-
                 // Step 10.
                 let mut contemporary_hash = self.contemporary_doc.hash();
+
+                // Most-recently-applied UNIQUE update's version, tracked as a
+                // loop-local (no struct field / no public-API change). Under the
+                // ascending (target_version_id, block_height) sort at
+                // resolver.rs:190 this is simply the last unique apply; it keys the
+                // defensive dedup guard in the duplicate branch below.
+                let mut most_recent_applied_version: Option<NonZeroU64> = None;
 
                 for AppliedSignal {
                     update,
                     block_height,
-                    block_time: _,
+                    block_time,
                 } in signals
                 {
                     // Step 10.1.
@@ -219,6 +219,22 @@ impl Resolver {
                         // and displace a later version's entry, turning a benign
                         // duplicate signal into a false LATE_PUBLISHING.
                         update.confirm_duplicate(&self.update_hash_history)?;
+
+                        // Defensive guard (dedup of the SAME announcement,
+                        // resolve.md:50 footnote 1): fold in the lower height when
+                        // this duplicate targets the most-recently-applied update.
+                        // Under the ascending (target_version_id, block_height) sort
+                        // at resolver.rs:190 the lowest-height announcement is ALWAYS
+                        // processed FIRST and is already the applied height, so every
+                        // later same-update announcement is at a HIGHER height and
+                        // this min() is a no-op — unreachable as a state change under
+                        // natural signal flow, retained only for robustness against
+                        // unsorted input.
+                        if most_recent_applied_version == Some(update.target_version_id)
+                            && let Some(existing) = self.applied_block_height
+                        {
+                            self.applied_block_height = Some(existing.min(block_height));
+                        }
                     }
 
                     // Step 10.2.
@@ -227,6 +243,24 @@ impl Resolver {
                         .checked_add(1)
                         .expect("version_id overflow requires 2^64 updates to a single DID");
                     if update.target_version_id == next_update_version_id {
+                        // Process updates §step 3 (resolve.md:153): the versionTime
+                        // bound is per UNIQUE applied tuple, evaluated against THIS
+                        // tuple's block_time. It sits inside the apply branch (not
+                        // the duplicate branch, not once per batch): under the
+                        // ascending (target_version_id, block_height) sort a
+                        // duplicate announcement is processed before a later-version
+                        // unique update, so a high-block_time DUPLICATE must never
+                        // abort the loop and suppress a later low-block_time unique
+                        // update announced within versionTime. If this unique update
+                        // is more recent than the requested time, resolve the
+                        // document in effect so far (the earlier version) and apply
+                        // no further.
+                        if let TargetCondition::Time(time) = &self.target_condition
+                            && block_time > *time
+                        {
+                            return Ok(ResolverState::Resolved(self.terminal_state()));
+                        }
+
                         // Step 10.2.1.
                         if update.source_hash != contemporary_hash {
                             return Err(Btcr2Error::late_publishing(
@@ -241,12 +275,12 @@ impl Resolver {
                         // Step 10.2.4.
                         self.current_version_id = next_update_version_id;
 
-                        // track the LOWEST block
-                        // height across applied updates for confirmations.
-                        self.applied_block_height = Some(match self.applied_block_height {
-                            Some(existing) => existing.min(block_height),
-                            None => block_height,
-                        });
+                        // confirmations = block of the most-recently-applied UNIQUE
+                        // update (resolve.md:31,50): overwrite here, so after the
+                        // ascending-version loop this holds the highest-version (most
+                        // recent) applied update's height.
+                        self.applied_block_height = Some(block_height);
+                        most_recent_applied_version = Some(update.target_version_id);
 
                         // resolve.md §"Process updates Array" step 7
                         // — once the document is deactivated, resolve it as the
@@ -315,20 +349,29 @@ impl Resolver {
                 let Some(txout) = tx.outputs.last() else {
                     continue;
                 };
-                let ops = txout
+                // Reject (skip) an output whose script does not parse cleanly — a
+                // malformed or over-long OP_RETURN tail must NOT be loosely matched
+                // as a signal (strict wire-signal boundary). Collecting as a Result
+                // (instead of `.flatten()`, which silently discarded an unparseable
+                // trailing push's Err and let a garbage-tailed script masquerade as a
+                // valid 2-op signal) rejects the whole output on any parse error,
+                // without failing the rest of the transaction batch.
+                let Ok(ops) = txout
                     .script_pubkey
                     .instructions()
-                    .flatten()
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, _>>()
+                else {
+                    continue;
+                };
 
                 // Extract the signal bytes
                 let [Instruction::Op(OP_RETURN), Instruction::PushBytes(bytes)] = ops[..] else {
                     continue;
                 };
-                let Ok(signal_arr) = bytes.as_bytes().try_into() else {
+                let Ok(signal_arr) = <[u8; 32]>::try_from(bytes.as_bytes()) else {
                     continue;
                 };
-                let signal_bytes = Sha256Hash(signal_arr);
+                let signal_bytes = Sha256Hash::from(signal_arr);
 
                 let (block_time, block_height) = match tx.status {
                     Status::Unconfirmed => {
@@ -724,7 +767,8 @@ mod tests {
                 other => panic!("unexpected idType {other}"),
             };
 
-            let components = DidComponents::new(DidVersion::One, Network::Regtest, id_type);
+            let components =
+                DidComponents::new(DidVersion::One, Network::Regtest, id_type).unwrap();
             let did = Did::try_from(components).unwrap();
             assert_eq!(
                 did.encode(),
@@ -893,7 +937,7 @@ mod tests {
                 let intermediate =
                     IntermediateDocument::from_json_value(genesis.clone(), Network::Regtest)
                         .unwrap();
-                let initial_doc = intermediate.into_initial(&did);
+                let initial_doc = intermediate.into_initial(&did).unwrap();
                 ResolutionOptions {
                     sidecar_data: Some(SidecarData {
                         initial_document: Some(initial_doc),
@@ -1004,7 +1048,7 @@ mod tests {
             // Content-bound triple must equal the vector's signedUpdate.
             let to_b64 = |h: &Sha256Hash| {
                 use base64::Engine as _;
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.0)
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.as_bytes())
             };
             assert_eq!(
                 to_b64(&update.source_hash),
@@ -1133,6 +1177,69 @@ mod tests {
         assert!(
             signals.is_empty(),
             "the sole unconfirmed beacon tx was skipped, so no signals are produced"
+        );
+    }
+
+    /// D-09c (strict wire-signal boundary): a beacon tx whose LAST output is a
+    /// malformed/over-long OP_RETURN tail — `[OP_RETURN, <32-byte push>,
+    /// <unparseable trailing push opcode>]` — must NOT be matched as a 32-byte
+    /// signal. The trailing lone `OP_PUSHBYTES_32` (0x20) with no following data
+    /// makes the script instruction iterator yield an `Err`, which the old
+    /// `.flatten()` silently dropped, collapsing the script to a 2-op `[OP_RETURN,
+    /// PushBytes]` that masqueraded as a valid signal. Rejecting that one output
+    /// must not fail the rest of the batch: a well-formed signal in the SAME pass
+    /// is still extracted.
+    #[test]
+    fn malformed_op_return_tail_is_rejected_as_signal() {
+        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
+            return;
+        };
+
+        // Well-formed signal (6a 20 <32B>) — must still be extracted.
+        let good_signal = Sha256Hash::from([0x11u8; 32]);
+        let good_tx = confirmed_signal_tx(good_signal, 100, 1_700_000_000, 0xc1);
+
+        // Malformed tail: OP_RETURN, OP_PUSHBYTES_32 + 32 bytes, then a trailing
+        // lone OP_PUSHBYTES_32 (0x20) with NO following data → the instruction
+        // iterator yields an Err for that push. The old `.flatten()` dropped it,
+        // leaving a 2-op script that loosely matched the exact-2 signal pattern.
+        let bad_script = format!("6a20{}20", hex::encode([0x22u8; 32]));
+        let bad_txid = "cc".repeat(32);
+        let bad_json = serde_json::json!({
+            "txid": bad_txid,
+            "version": 2,
+            "locktime": 0,
+            "vin": [],
+            "vout": [{ "scriptpubkey": bad_script, "value": 0 }],
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": 100,
+                "block_hash":
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                "block_time": 1_700_000_000,
+            },
+        });
+        let bad_tx: Transaction =
+            serde_json::from_value(bad_json).expect("synthetic malformed-tail tx deserializes");
+
+        let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![bad_tx, good_tx]);
+
+        let signals = resolver
+            .find_next_signals(transactions)
+            .expect("a malformed OP_RETURN tail is skipped, not an error");
+
+        assert_eq!(
+            signals.len(),
+            1,
+            "only the well-formed output yields a signal; the malformed tail is rejected"
+        );
+        assert_eq!(
+            signals[0].signal_bytes, good_signal,
+            "the surviving signal is the well-formed one, not the malformed-tail masquerade"
         );
     }
 
@@ -1475,11 +1582,15 @@ mod tests {
     }
 
     /// `confirmations == tip - applied_block_height + 1` with
-    /// saturating arithmetic (tip > h, tip == h, tip < h), and the dedup
-    /// tiebreaker keeps the LOWEST block height across applied updates.
+    /// saturating arithmetic (tip > h, tip == h, tip < h) plus the no-tip and
+    /// no-applied-update cases. This exercises only `terminal_state`'s formatting
+    /// of `applied_block_height`, which is unchanged; the *accounting* of that
+    /// height (most-recently-applied unique update, not a running min across
+    /// distinct updates) is driven end-to-end by
+    /// `confirmations_use_the_most_recently_applied_update` and
+    /// `later_duplicate_does_not_raise_confirmations`.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:50 footnote 1
-    /// (confirmations dedup tiebreaker on lowest block height).
+    /// Spec: did-btcr2/src/operations/resolve.md:31,50.
     #[test]
     fn metadata_confirmations_saturate_against_chain_tip() {
         // terminal_state computes confirmations from chain_tip_height +
@@ -1526,23 +1637,328 @@ mod tests {
             no_tip.terminal_state().document_metadata.confirmations,
             None
         );
+    }
 
-        // Dedup tiebreaker: the running MIN keeps the lowest height. Simulate
-        // two applied updates seen at heights 120 then 90 (lower wins).
-        let Some(mut dedup) = resolver_with(SidecarData::default(), Some(200)) else {
-            return;
+    // ──────────────────────────────────────────────────────────────────────
+    // Full-FSM-drive coverage for the versionTime bound and confirmations.
+    //
+    // These build a self-consistent chain of two signed updates ENTIRELY IN
+    // MEMORY from a locally-generated key-based initial document (no on-disk
+    // fixture, no test-suite submodule dependency — so they never vacuously
+    // SKIP, Pitfall 2), then drive the public resolver FSM end-to-end
+    // (Init -> Requests -> process_responses -> resolve -> Resolved) over
+    // synthetic confirmed beacon transactions whose OP_RETURN push is each
+    // update's JSON Document Hash.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Fixed secret key for the in-memory chain (`[7u8; 32]`, a valid secp256k1
+    /// key). Its public key derives the source DID, so the DID's own
+    /// verification method signs the chained updates.
+    const CHAIN_SECRET_KEY_BYTES: [u8; 32] = [7u8; 32];
+
+    fn chain_secret_key() -> crate::key::SecretKey {
+        crate::key::SecretKey::try_from(CHAIN_SECRET_KEY_BYTES)
+            .expect("[7u8; 32] is a valid secp256k1 secret key")
+    }
+
+    /// A benign RFC-6902 patch that keeps the document conformant and does not
+    /// touch `id`: append the given verification-method id to `assertionMethod`.
+    fn chain_benign_patch(vm_id: &str) -> json_patch::Patch {
+        serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/assertionMethod/-", "value": vm_id}
+        ]))
+        .expect("benign patch is a valid RFC 6902 op array")
+    }
+
+    /// Build a key-based initial document deterministically from
+    /// `CHAIN_SECRET_KEY_BYTES`, then two chained signed updates: update1 (v2)
+    /// against the initial doc and update2 (v3) against the post-update-1 doc.
+    ///
+    /// The chain is self-consistent BY CONSTRUCTION — `update1.source_hash ==
+    /// initial.hash()` and `update2.source_hash == (initial + update1).hash()` —
+    /// because both updates are derived from the locally-built document each run,
+    /// not from committed bytes that could silently drift if
+    /// `deterministically_generate`'s output ever changed. This is what makes the
+    /// apply loop actually APPLY (rather than reject at the sourceHash check),
+    /// and it needs no on-disk fixture and no test-suite submodule.
+    fn chained_two_updates() -> (InitialDocument, Update, Update) {
+        use crate::document::Document;
+        use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network};
+        use secp256k1::Secp256k1;
+
+        let secp = Secp256k1::new();
+        let public_key = chain_secret_key().as_inner().public_key(&secp);
+        let id_type = IdType::from(public_key);
+        let did: Did = DidComponents::new(DidVersion::One, Network::Mutinynet, id_type)
+            .expect("mutinynet is a valid network")
+            .try_into()
+            .expect("default version + mutinynet + key id type encode to a valid did");
+
+        let initial = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("key-based DID deterministically generates its initial document");
+        let document = Document::from(initial.clone());
+        let vm_id = format!("{}#initialKey", did.encode());
+
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+        let update1 = document
+            .construct_signed_update(chain_benign_patch(&vm_id), v2, &vm_id, chain_secret_key())
+            .expect("update #1 constructs against the initial document");
+
+        let mut after1 = initial.clone();
+        after1
+            .apply_update(&update1)
+            .expect("update #1 applies to the initial document");
+        let doc_after1 = Document::from(after1);
+
+        let v3 = NonZeroU64::new(3).expect("3 is non-zero");
+        let update2 = doc_after1
+            .construct_signed_update(chain_benign_patch(&vm_id), v3, &vm_id, chain_secret_key())
+            .expect("update #2 constructs against the post-update-1 document");
+
+        (initial, update1, update2)
+    }
+
+    /// Build a confirmed Singleton-beacon esplora transaction whose LAST output is
+    /// `OP_RETURN <signal>` (a 32-byte push of an update's JSON Document Hash).
+    /// `txid_seed` gives each tx a distinct, structurally-valid txid.
+    fn confirmed_signal_tx(
+        signal: Sha256Hash,
+        block_height: u32,
+        block_time: i64,
+        txid_seed: u8,
+    ) -> Transaction {
+        // OP_RETURN (0x6a) + OP_PUSHBYTES_32 (0x20) + 32-byte hash.
+        let script_pubkey = format!("6a20{}", hex::encode(signal.as_bytes()));
+        let txid = format!("{txid_seed:02x}").repeat(32);
+        let json = serde_json::json!({
+            "txid": txid,
+            "version": 2,
+            "locktime": 0,
+            "vin": [],
+            "vout": [{ "scriptpubkey": script_pubkey, "value": 0 }],
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": block_height,
+                "block_hash":
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                "block_time": block_time,
+            },
+        });
+        serde_json::from_value(json).expect("synthetic esplora transaction JSON deserializes")
+    }
+
+    /// A `DateTime<Utc>` from a unix timestamp (seconds).
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).expect("in-range unix timestamp")
+    }
+
+    /// Drive a resolver FSM to its terminal state over a single batch of
+    /// Singleton-beacon transactions, mirroring `resolve_with_no_signals`'s
+    /// drive-to-terminal shape.
+    fn drive_to_resolved(resolver: Resolver, txs: Vec<Transaction>) -> ResolutionResult {
+        let ResolverState::Requests(next_state, _requests) = resolver
+            .resolve()
+            .expect("Init step yields beacon requests")
+        else {
+            panic!("expected Requests from Init step");
         };
-        for height in [120u32, 90u32] {
-            dedup.applied_block_height = Some(match dedup.applied_block_height {
-                Some(existing) => existing.min(height),
-                None => height,
-            });
+        let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+        transactions.insert(BeaconType::Singleton, txs);
+        let mut state = next_state
+            .process_responses(transactions)
+            .resolve()
+            .expect("processing the beacon signals resolves a step");
+        loop {
+            match state {
+                ResolverState::Resolved(result) => break result,
+                ResolverState::Requests(next, _requests) => {
+                    state = next
+                        .process_responses(HashMap::new())
+                        .resolve()
+                        .expect("empty-signal step resolves");
+                }
+            }
         }
-        assert_eq!(dedup.applied_block_height, Some(90));
-        // confirmations from the lowest height: 200 - 90 + 1 = 111.
+    }
+
+    /// Guard (Task 1 anti-vacuity): the in-memory chain's FIRST update's
+    /// `source_hash` equals the locally-constructed initial document's `hash()`.
+    /// This is what makes the apply loop actually APPLY update1 rather than
+    /// reject it at the sourceHash check (resolver.rs step 10.2.1) — the
+    /// precondition for every full-drive test below to be
+    /// non-vacuous.
+    #[test]
+    fn chained_two_updates_chains_to_initial_doc() {
+        let (initial, update1, update2) = chained_two_updates();
         assert_eq!(
-            dedup.terminal_state().document_metadata.confirmations,
-            Some(111)
+            update1.source_hash,
+            initial.hash(),
+            "update1.sourceHash must equal the locally-built initial doc hash"
+        );
+        assert_eq!(
+            u64::from(update1.target_version_id),
+            2,
+            "update1 targets version 2"
+        );
+        assert_eq!(
+            u64::from(update2.target_version_id),
+            3,
+            "update2 targets version 3"
+        );
+    }
+
+    /// A resolution whose `versionTime` falls mid-batch returns the
+    /// version in EFFECT at that time, not the batch's final version. Two chained
+    /// updates arrive (v2 @ block_time T2, v3 @ block_time T3) with
+    /// `T2 < versionTime < T3`; the resolved document is v2, NOT v3. The
+    /// per-tuple versionTime check inside the apply branch aborts before applying
+    /// v3.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md:153.
+    #[test]
+    fn version_time_mid_batch_returns_the_version_in_effect() {
+        let (initial, update1, update2) = chained_two_updates();
+        let t2 = 1_700_000_000i64;
+        let t3 = 1_700_000_200i64;
+        let version_time = 1_700_000_100i64; // T2 < T < T3
+
+        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, t2, 0xa1);
+        let tx_v3 = confirmed_signal_tx(update2.hash(), 200, t3, 0xa2);
+
+        let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(version_time)),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            2,
+            "mid-batch versionTime must resolve to the in-effect version (v2), not v3"
+        );
+    }
+
+    /// Ordering fold-in: a DUPLICATE announcement of v2 at a HIGH
+    /// block_time (> versionTime), processed under the ascending
+    /// (target_version_id, block_height) sort BEFORE the UNIQUE v3 at a LOW
+    /// block_time (< versionTime), must NOT abort the loop. v3 IS still applied.
+    /// This pins that the versionTime cutoff lives ONLY in the unique-apply
+    /// branch, never on a duplicate tuple — a naive per-every-tuple check would
+    /// abort at the high-block_time duplicate and wrongly return v2.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md:153.
+    #[test]
+    fn version_time_cutoff_ignores_duplicate_tuples() {
+        let (initial, update1, update2) = chained_two_updates();
+        let version_time = 1_700_000_100i64;
+
+        // v2 unique @ height 100, low block_time (< T) -> applied first.
+        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xb1);
+        // v2 DUPLICATE @ height 200, HIGH block_time (> T) -> processed before v3
+        // under the (tvid, height) sort, must NOT abort the loop.
+        let tx_v2_dup = confirmed_signal_tx(update1.hash(), 200, 1_700_000_999, 0xb2);
+        // v3 unique @ height 300, low block_time (< T) -> must still apply.
+        let tx_v3 = confirmed_signal_tx(update2.hash(), 300, 1_700_000_050, 0xb3);
+
+        let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(version_time)),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let result = drive_to_resolved(resolver, vec![tx_v2, tx_v2_dup, tx_v3]);
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            3,
+            "a high-block_time duplicate must not suppress the later within-versionTime unique v3"
+        );
+    }
+
+    /// `confirmations` derives from the MOST-RECENTLY-APPLIED unique
+    /// update's block height, not the running min across distinct updates. Two
+    /// distinct updates apply at heights 100 (v2) then 200 (v3); with chain tip
+    /// 300, confirmations = 300 - 200 + 1 = 101 (from v3's height), NOT
+    /// 300 - 100 + 1 = 201 (the old running-min bug).
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md:31,50.
+    #[test]
+    fn confirmations_use_the_most_recently_applied_update() {
+        let (initial, update1, update2) = chained_two_updates();
+
+        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xc1);
+        let tx_v3 = confirmed_signal_tx(update2.hash(), 200, 1_700_000_100, 0xc2);
+
+        let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: Some(300),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            3,
+            "both updates apply -> version 3"
+        );
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(101),
+            "confirmations must derive from the most-recently-applied update's height (200), \
+             not the running min (100)"
+        );
+    }
+
+    /// Sort-guaranteed dedup: the SAME update (v2) announced twice at
+    /// heights 100 then 200 (h_low < h_high). Under the ascending
+    /// (target_version_id, block_height) sort the h_low announcement is applied
+    /// FIRST and becomes the confirmations height; the later h_high duplicate's
+    /// defensive min is a no-op and does NOT raise it. With chain tip 300,
+    /// confirmations = 300 - 100 + 1 = 201 (from h_low), never
+    /// 300 - 200 + 1 = 101.
+    ///
+    /// This asserts the SORT-guaranteed lowest-height-first outcome, not a
+    /// synthetic lower-than-applied duplicate (which cannot arise under the sort).
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md:50 footnote 1.
+    #[test]
+    fn later_duplicate_does_not_raise_confirmations() {
+        let (initial, update1, _update2) = chained_two_updates();
+
+        // Same v2 update announced twice: h_low = 100 (applied first), h_high =
+        // 200 (later duplicate). The higher-height duplicate must not raise the
+        // applied confirmations height.
+        let tx_low = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xd1);
+        let tx_high = confirmed_signal_tx(update1.hash(), 200, 1_700_000_100, 0xd2);
+
+        let sidecar = SidecarData::new(None, vec![update1], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: Some(300),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let result = drive_to_resolved(resolver, vec![tx_low, tx_high]);
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            2,
+            "the single update applies -> version 2"
+        );
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(201),
+            "confirmations must derive from the lowest-height (first-applied) announcement (100), \
+             not raised by the later higher-height duplicate (200)"
         );
     }
 
@@ -1613,7 +2029,7 @@ mod tests {
         };
 
         // Synthesize a beacon signal whose hash is absent from the (empty) table.
-        let missing_hash = Sha256Hash([7u8; 32]);
+        let missing_hash = Sha256Hash::from([7u8; 32]);
         let signal = NextSignal {
             beacon_type: BeaconType::Singleton,
             signal_bytes: missing_hash,
@@ -1644,7 +2060,7 @@ mod tests {
 
         let signal = NextSignal {
             beacon_type: BeaconType::Cas,
-            signal_bytes: Sha256Hash([1u8; 32]),
+            signal_bytes: Sha256Hash::from([1u8; 32]),
             block_time: Utc::now(),
             block_height: 1,
         };
@@ -1668,7 +2084,7 @@ mod tests {
 
         let signal = NextSignal {
             beacon_type: BeaconType::SparseMerkleTree,
-            signal_bytes: Sha256Hash([2u8; 32]),
+            signal_bytes: Sha256Hash::from([2u8; 32]),
             block_time: Utc::now(),
             block_height: 1,
         };

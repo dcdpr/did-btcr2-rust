@@ -28,7 +28,7 @@ pub enum Error {
     /// Failed to decode base58
     MultikeyBase58,
 
-    /// Invalid Multikey prefix for secp256k1 x-only public key
+    /// Invalid Multikey prefix or length for a secp256k1 compressed public key
     MultikeyPrefix,
 }
 
@@ -54,8 +54,16 @@ impl PublicKeyExt for PublicKey {
         let data =
             base58::FromBase58::from_base58(&multikey[1..]).map_err(|_| Error::MultikeyBase58)?;
 
+        // Cryptosuite §2.1.1: bip340-jcs multikeys MUST be the 2-byte prefix +
+        // a 33-byte COMPRESSED secp256k1 key. Any other encoding (e.g. a
+        // 65-byte uncompressed key) MUST NOT be allowed, so enforce the exact
+        // total length before handing bytes to from_slice.
+        if data.len() != 2 + PUBLIC_KEY_SIZE {
+            return Err(Error::MultikeyPrefix);
+        }
+
         // Check prefix
-        if data.len() < 2 || data[0..2] != MULTIKEY_PREFIX {
+        if data[0..2] != MULTIKEY_PREFIX {
             return Err(Error::MultikeyPrefix);
         }
 
@@ -329,6 +337,25 @@ mod tests {
         match err {
             Error::InvalidBytesForPublicKey(_) => {}
             other => panic!("expected InvalidBytesForPublicKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_multikey_rejects_uncompressed_key() {
+        // Cryptosuite §2.1.1: a multikey carrying a 65-byte UNCOMPRESSED
+        // secp256k1 key (prefix + 65 bytes = len 67) MUST be rejected. Without
+        // the exact-length gate, from_slice would happily accept it.
+        let sk = SecretKey::try_from([9u8; 32]).expect("[9u8;32] is a valid secp scalar");
+        let pk = sk.as_inner().public_key(&Secp256k1::new());
+        let mut bytes = MULTIKEY_PREFIX.to_vec();
+        bytes.extend_from_slice(&pk.serialize_uncompressed()); // 65 bytes
+        assert_eq!(bytes.len(), 2 + 65);
+        let multikey = format!("z{}", bytes.to_base58());
+        let err = PublicKey::from_multikey(&multikey)
+            .expect_err("a 65-byte uncompressed key multikey must be rejected");
+        match err {
+            Error::MultikeyPrefix => {}
+            other => panic!("expected MultikeyPrefix (length gate), got {other:?}"),
         }
     }
 

@@ -28,13 +28,25 @@ impl CryptoSuite {
         mut inner: ProofInner,
         secret_key: &SecretKey,
     ) -> Result<Proof, Btcr2Error> {
-        // Add document context to proof if present
+        // Add document context to proof if present.
+        //
+        // Construction-side only: the spec's update `@context` entries are all
+        // string URLs (data-structures.md, BTCR2 Unsigned Update), so a non-string
+        // entry here is a malformed update — reject it with a typed error rather
+        // than silently drop it (the old `flat_map(as_str)` vanished non-string
+        // entries, letting the signed proof config diverge from the update's
+        // declared context). This is NOT a general JSON-LD validator; the
+        // verifier's exact-match-vs-prefix @context semantics remain deferred
+        // (QUESTIONS item 11) and are untouched here.
         if let Some(context) = unsecured_update.as_ref()["@context"].as_array() {
             inner.context = context
                 .iter()
-                .flat_map(|e| e.as_str())
-                .map(|e| e.to_string())
-                .collect();
+                .map(|e| {
+                    e.as_str().map(str::to_string).ok_or_else(|| {
+                        Btcr2Error::InvalidDidUpdate("@context entries must be strings".into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
         }
 
         // Create proof config
@@ -130,9 +142,33 @@ impl CryptoSuite {
         // Transform document
         let transformed_data = self.transform(&unsecured_update);
 
-        // Configure proof
-        let proof_options =
-            serde_json::to_value(&update.proof.inner).expect("JSON is always valid JCS");
+        // Configure proof.
+        //
+        // proofOptions = securedDocument.proof minus proofValue, taken from the
+        // ORIGINAL proof JSON (Cryptosuite §3.3.2 step 2), NOT a re-serialisation
+        // of the typed `ProofInner`. The typed path normalises `.000Z` created
+        // datetimes (chrono re-emits `...Z`) and drops unknown extension
+        // properties (ProofInner has no `#[serde(flatten)]` catch-all); either
+        // divergence changes the JCS bytes and falsely rejects a conformant
+        // foreign signature. Reading the original JSON here mirrors the @context
+        // handling above (`update.as_ref()["@context"]`).
+        let mut proof_options = update.as_ref()["proof"].clone();
+        // Fail loud if `proof` is absent/not an object: indexing a missing key
+        // yields Value::Null, and silently hashing `null` would swap a clean
+        // typed rejection for an opaque signature mismatch and drop the invariant
+        // announcement the old `.expect("JSON is always valid JCS")` gave. A
+        // malformed update must be reported, not smuggled through.
+        let serde_json::Value::Object(map) = &mut proof_options else {
+            return Err(Btcr2Error::InvalidUpdateProof(
+                "update proof is absent or not a JSON object".into(),
+            ));
+        };
+        map.remove("proofValue");
+        // Extension-property authentication boundary: a property INSIDE this
+        // `proof` object IS JCS-canonicalised into the signed proofOptions hash
+        // below, so it IS covered by the BIP340 signature (authenticated). Only
+        // properties OUTSIDE `proof` (elsewhere in the update) ride along
+        // unauthenticated; the crate never reads those.
         let proof_config = self.configure_proof(&proof_options);
 
         // Hash data
@@ -155,7 +191,8 @@ impl CryptoSuite {
         hasher.update(Sha256::digest(proof_config));
         hasher.update(Sha256::digest(transformed_data));
 
-        Sha256Hash(hasher.finalize().into())
+        let digest: [u8; 32] = hasher.finalize().into();
+        Sha256Hash::from(digest)
     }
 
     // bip340 cryptosuite spec Section 3.3.5
@@ -194,7 +231,7 @@ fn bip340_sign(message_hash: Sha256Hash, secret_key: &SecretKey) -> Result<Signa
     let secp = Secp256k1::new();
 
     // Create message object from hash
-    let message = Message::from_slice(&message_hash.0)
+    let message = Message::from_slice(message_hash.as_bytes())
         .expect("Sha256Hash is exactly 32 bytes; Message::from_slice requires 32");
 
     // Sign with BIP340 Schnorr. This is the ONLY place the inner secp key is
@@ -220,7 +257,7 @@ fn bip340_verify(
     let secp = Secp256k1::new();
 
     // Create message object from hash
-    let message = Message::from_slice(&message_hash.0)
+    let message = Message::from_slice(message_hash.as_bytes())
         .expect("Sha256Hash is exactly 32 bytes; Message::from_slice requires 32");
 
     // Verify signature
@@ -402,6 +439,61 @@ mod tests {
     }
 
     #[test]
+    fn create_proof_rejects_non_string_context_entry() {
+        // A non-string `@context` entry (here a number) is a malformed
+        // update payload and must produce a typed `Btcr2Error::InvalidDidUpdate`
+        // at proof construction — NOT be silently dropped (the old
+        // `flat_map(as_str)` vanished it, so the signed proof config could diverge
+        // from the update's declared context).
+        let update = UnsecuredUpdate {
+            json: serde_json::json!({
+                "@context": ["https://w3id.org/security/v2", 42],
+                "patch": [],
+                "targetVersionId": 2,
+            }),
+        };
+        let suite = CryptoSuite;
+        let err = suite
+            .create_proof(&update, proof_inner(), &test_secret_key())
+            .expect_err("a non-string @context entry must be rejected");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => {
+                assert!(
+                    msg.contains("@context"),
+                    "message should name @context, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_proof_accepts_all_string_context() {
+        // Happy path: an all-string `@context` still signs and the proof carries
+        // the contexts verbatim (the fallible map is order- and
+        // content-preserving for well-formed input).
+        let update = UnsecuredUpdate {
+            json: serde_json::json!({
+                "@context": ["https://w3id.org/security/v2", "https://w3id.org/zcap/v1"],
+                "patch": [],
+                "targetVersionId": 2,
+            }),
+        };
+        let suite = CryptoSuite;
+        let proof = suite
+            .create_proof(&update, proof_inner(), &test_secret_key())
+            .expect("an all-string @context must sign successfully");
+        assert_eq!(
+            proof.inner.context,
+            vec![
+                "https://w3id.org/security/v2".to_string(),
+                "https://w3id.org/zcap/v1".to_string(),
+            ],
+            "the proof config carries the update's string contexts verbatim"
+        );
+    }
+
+    #[test]
     fn verify_proof_rejects_prefix_context_forgery() {
         // a proof whose @context is a strict prefix of the
         // update's @context must NOT pass verification. The previous
@@ -518,7 +610,7 @@ mod tests {
         let sk = test_secret_key();
         let secp = Secp256k1::new();
         let xonly = sk.as_inner().public_key(&secp).x_only_public_key().0;
-        let msg = Sha256Hash([0x11u8; 32]);
+        let msg = Sha256Hash::from([0x11u8; 32]);
 
         let sig = bip340_sign(msg, &sk).expect("signing with a valid key must succeed");
         bip340_verify(msg, sig, &xonly).expect("a fresh signature must verify");
@@ -538,7 +630,7 @@ mod tests {
         let sk = test_secret_key();
         let secp = Secp256k1::new();
         let xonly = sk.as_inner().public_key(&secp).x_only_public_key().0;
-        let msg = Sha256Hash([0x11u8; 32]);
+        let msg = Sha256Hash::from([0x11u8; 32]);
 
         let sig = bip340_sign(msg, &sk).expect("signing with a valid key must succeed");
         let mut bytes: [u8; 64] = *sig.as_ref();
@@ -576,5 +668,165 @@ mod tests {
             Btcr2Error::ProofVerification(_) => {}
             other => panic!("expected ProofVerification, got {other:?}"),
         }
+    }
+
+    // The highest-value interop fix: verify_proof must build the
+    // proofOptions bytes from the ORIGINAL proof JSON (`update.json["proof"]`
+    // minus proofValue), not a re-serialisation of the lossy typed ProofInner.
+    // The helper below hand-forges a foreign proof over the SAME original-JSON
+    // proofOptions the fixed verify path uses, so the two lossy-field positives
+    // exercise exactly the divergence a typed re-emission would introduce.
+
+    // The secp256k1 public key matching `test_secret_key()`. `verify_proof`
+    // takes `crate::key::PublicKey` (== `secp256k1::PublicKey`) and derives its
+    // own x-only key, matching what `bip340_sign` signs under.
+    fn test_public_key() -> secp256k1::PublicKey {
+        let secp = Secp256k1::new();
+        test_secret_key().as_inner().public_key(&secp)
+    }
+
+    // Hand-forge a valid `proofValue` over `update_json` (which carries a `proof`
+    // object; any existing proofValue is ignored) using the ORIGINAL-JSON
+    // proofOptions path the fixed `verify_proof` uses:
+    //   proofOptions = proof minus proofValue
+    //   transformed  = update minus proof
+    //   hash         = Sha256(Sha256(proofOptions) || Sha256(transformed))   [hash(), 151-159]
+    // then BIP340-signs that hash with `test_secret_key()` and inserts the
+    // base58-btc proofValue. Because it drives the SAME private
+    // configure_proof/transform/hash chain, a NO-lossy-field control forged this
+    // way verifies on any tree — proving the composition is faithful — while a
+    // lossy-field variant only verifies once Task 1 stops discarding those bytes.
+    fn forge_signed_update(mut update_json: serde_json::Value) -> Update {
+        let suite = CryptoSuite;
+
+        // proofOptions = proof minus proofValue (from the ORIGINAL JSON).
+        let mut proof_options = update_json["proof"].clone();
+        proof_options
+            .as_object_mut()
+            .expect("proof is a JSON object")
+            .remove("proofValue");
+        let proof_config = suite.configure_proof(&proof_options);
+
+        // transformed = update minus proof.
+        let mut unsecured_json = update_json.clone();
+        unsecured_json
+            .as_object_mut()
+            .expect("update json is a JSON object")
+            .remove("proof");
+        let unsecured = UnsecuredUpdate {
+            json: unsecured_json,
+        };
+        let transformed = suite.transform(&unsecured);
+
+        // hash = Sha256(Sha256(proof_config) || Sha256(transformed)).
+        let hash = suite.hash(&transformed, &proof_config);
+        let sig =
+            bip340_sign(hash, &test_secret_key()).expect("signing with a valid key must succeed");
+        let proof_value = multibase_encode(sig);
+
+        update_json["proof"]["proofValue"] = serde_json::json!(proof_value.0);
+        make_update(update_json)
+    }
+
+    #[test]
+    fn verify_accepts_foreign_created_with_millis() {
+        let suite = CryptoSuite;
+
+        // CONTROL (composition gate, asserted FIRST): a proof whose `created` is a
+        // plain `"...Z"` (no lossy field). The typed round-trip re-emits this
+        // byte-identically, so it verifies on ANY tree — proving our hand-rolled
+        // Sha256(proof_config) || Sha256(transformed) + BIP340 path faithfully
+        // reproduces hash(). Only after this passes do we trust the lossy positive.
+        let mut control = base_update_json();
+        control["proof"]["created"] = serde_json::json!("2024-01-01T00:00:00Z");
+        let control_update = forge_signed_update(control);
+        suite.verify_proof(test_public_key(), &control_update).expect(
+            "control: plain '...Z' created (no lossy field) must verify — composition is faithful",
+        );
+
+        // LOSSY POSITIVE: same proof but `created` carries JS-style millis
+        // `"...00.000Z"`. The typed ProofInner round-trip normalises this to
+        // `"...00Z"` (different JCS bytes); building proofOptions from the ORIGINAL
+        // proof JSON (Task 1) preserves the millis, so the foreign signature
+        // verifies. Reverting Task 1 makes THIS assertion fail (typed path drops
+        // the `.000`) while the control above would still pass — so the test is
+        // non-vacuous and exercises exactly the created-millis divergence.
+        let mut lossy = base_update_json();
+        lossy["proof"]["created"] = serde_json::json!("2024-01-01T00:00:00.000Z");
+        let lossy_update = forge_signed_update(lossy);
+        suite.verify_proof(test_public_key(), &lossy_update).expect(
+            "foreign proof with '.000Z' created must verify (millis preserved by original-JSON proofOptions)",
+        );
+    }
+
+    #[test]
+    fn verify_accepts_unknown_extension_property() {
+        let suite = CryptoSuite;
+
+        // CONTROL (composition gate, asserted FIRST): no extension property. Same
+        // faithful-composition guarantee as above — verifies on any tree.
+        let control = base_update_json();
+        let control_update = forge_signed_update(control);
+        suite
+            .verify_proof(test_public_key(), &control_update)
+            .expect("control: no extension property must verify — composition is faithful");
+
+        // LOSSY POSITIVE: an unknown extension property INSIDE `proof`. ProofInner
+        // has no `#[serde(flatten)]` catch-all, so the typed round-trip DROPS this
+        // key (different JCS bytes). Original-JSON proofOptions (Task 1) retains
+        // it, so the foreign proof verifies — and the property, being inside the
+        // signed proofOptions, is authenticated. Reverting Task 1 makes THIS
+        // assertion fail (typed path drops the key) while the control still
+        // passes — non-vacuous, exercising the extension-property divergence.
+        let mut lossy = base_update_json();
+        lossy["proof"]["foreignExtension"] = serde_json::json!("interop");
+        let lossy_update = forge_signed_update(lossy);
+        suite
+            .verify_proof(test_public_key(), &lossy_update)
+            .expect("foreign proof carrying an unknown extension property must verify");
+    }
+
+    #[test]
+    fn verify_proof_round_trips_locally_signed() {
+        // A3 lock: a LOCALLY self-signed update (create_proof -> assemble Update
+        // JSON exactly as construct_signed_update does) must still verify through
+        // the fixed original-JSON proofOptions path. For a locally-built proof
+        // (`created: None`, no extension props) the original JSON minus proofValue
+        // is byte-identical to the old typed serialisation, so this positive holds
+        // — the fix does not regress the sign->verify round-trip.
+        let suite = CryptoSuite;
+
+        // Unsigned document with valid sourceHash/targetHash (base_update_json
+        // with the proof removed) so the assembled Update parses.
+        let mut unsigned_json = base_update_json();
+        unsigned_json
+            .as_object_mut()
+            .expect("base_update_json is a JSON object")
+            .remove("proof");
+        let unsigned = UnsecuredUpdate {
+            json: unsigned_json,
+        };
+
+        let proof = suite
+            .create_proof(&unsigned, proof_inner(), &test_secret_key())
+            .expect("signing with a valid key must succeed");
+
+        // Assemble the signed Update JSON exactly as construct_signed_update does
+        // (document.rs:774-782): the unsigned JSON with "proof" inserted.
+        let mut signed_json = unsigned.json;
+        signed_json
+            .as_object_mut()
+            .expect("unsigned update is a JSON object")
+            .insert(
+                "proof".to_string(),
+                serde_json::to_value(&proof).expect("proof serializes to JSON"),
+            );
+
+        let update =
+            Update::from_json_value(signed_json).expect("locally signed update must parse");
+
+        suite.verify_proof(test_public_key(), &update).expect(
+            "a locally self-signed update must still verify through the original-JSON proofOptions path",
+        );
     }
 }

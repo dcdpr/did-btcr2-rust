@@ -90,6 +90,15 @@ pub enum Error {
     /// Unexpected DID
     #[error("Expected `{0}` but found `{1}`")]
     UnexpectedDid(String, String),
+
+    /// A key-based DID unexpectedly yielded no genesis public key.
+    ///
+    /// Structurally unreachable — the key-based generation paths are only
+    /// entered for `IdType::Key` DIDs via [`Self::from_did`] — but modeled as a
+    /// typed error rather than a panic so hostile input can never trigger an
+    /// abort on the generation path.
+    #[error("key-based DID has no genesis public key")]
+    MissingGenesisKey,
 }
 
 impl ProblemDetails for Error {
@@ -257,11 +266,17 @@ where
 
         // TODO: All of these are optional. Only `vec_from_value` has been fixed
         let controller = vec_from_value(value, "controller")?;
+        // Lenient envelope: carry the method's declared `type` verbatim rather
+        // than hard-coding "Multikey". A present, well-formed publicKeyMultibase
+        // is retained regardless of the declared type; strictness is deferred to
+        // VerificationMethod::public_key (which rejects non-Multikey at the
+        // crypto-trust boundary). D-09b.
         let verification_method = vec_from_object(value, "verificationMethod", |method| {
-            Ok(VerificationMethod::new(
+            Ok(VerificationMethod::with_type(
                 string_from_object(method, "id")?.parse()?,
                 string_from_object(method, "controller")?.parse()?,
                 PublicKey::from_multikey(string_from_object(method, "publicKeyMultibase")?)?,
+                string_from_object(method, "type")?.to_string(),
             ))
         })?;
         let authentication = vec_from_value(value, "authentication")?;
@@ -269,16 +284,39 @@ where
         let capability_invocation_vec: Vec<VerificationMethodId> =
             vec_from_value(value, "capabilityInvocation")?;
         let capability_delegation = vec_from_value(value, "capabilityDelegation")?;
-        // TODO: This will fail when the DID document contains non-Beacon services
-        // https://github.com/dcdpr/did-btcr2/issues/170
-        let service_vec: Vec<Beacon> = vec_from_object(value, "service", |service| {
-            let id = string_from_object(service, "id")?.to_string();
-            let ty = string_from_object(service, "type")?.parse()?;
-            let descriptor =
-                Address::from_bip21(string_from_object(service, "serviceEndpoint")?, network)?;
+        // Two-tier leniency, pulls in upstream fix for
+        // https://github.com/dcdpr/did-btcr2/issues/170:
+        // a service whose `type` does not name a beacon type (e.g.
+        // `LinkedDomains`) is retain-and-ignore — kept in `json_data` (the raw
+        // envelope) but excluded from the typed beacon vec, so a single
+        // non-beacon service can no longer fail the whole document. This
+        // leniency covers unknown-but-PRESENT types only: a service missing
+        // `type` entirely is malformed and still errors (the `?` below
+        // propagates the missing-key error), as does a real beacon with a
+        // malformed `serviceEndpoint`.
+        let service_array = &value["service"];
+        let mut service_vec: Vec<Beacon> = Vec::new();
+        if !service_array.is_null() {
+            let services = service_array.as_array().ok_or_else(|| {
+                JsonError::UnexpectedJsonType("service".into(), ExpectedType::Array)
+            })?;
+            for service in services {
+                let ty = match string_from_object(service, "type")?.parse::<BeaconType>() {
+                    Ok(ty) => ty,
+                    // Non-beacon service: retained in json_data, skipped here.
+                    Err(crate::beacon::Error::InvalidBeaconType) => continue,
+                    // `BeaconType::from_str` only yields `InvalidBeaconType`;
+                    // any other beacon error is a real parse fault — propagate.
+                    Err(e) => return Err(JsonError::from(e).into()),
+                };
+                let id = string_from_object(service, "id")?.to_string();
+                let descriptor =
+                    Address::from_bip21(string_from_object(service, "serviceEndpoint")?, network)
+                        .map_err(JsonError::from)?;
 
-            Ok(Beacon::new(id, ty, descriptor))
-        })?;
+                service_vec.push(Beacon::new(id, ty, descriptor));
+            }
+        }
 
         // parse-boundary conversion. For T = Did this enforces
         // NonEmpty (returning Btcr2Error::InvalidDidDocument on empty);
@@ -910,32 +948,35 @@ impl InitialDocument {
         doc: IntermediateDocument,
         version: Option<DidVersion>,
         network: Option<Network>,
-    ) -> (Did, Self) {
+    ) -> Result<(Did, Self), Error> {
         let hash = doc.hash();
 
         let id_type = IdType::External(hash);
 
-        // Per the panic-sweep policy:
-        // type-system-guaranteed encode (default DidVersion, default Network,
-        // 32-byte hash payload) -> .expect() with structural invariant.
-        // Result propagation here would change `from_external_intermediate`'s
-        // public signature from `(Did, Self)` to `Result<(Did, Self), _>`,
-        // which is architectural scope beyond the original panic sweep.
+        // The DID encode is a genuine structural invariant: default DidVersion,
+        // default Network, and a 32-byte External hash payload always encode to a
+        // valid did:btcr2 string, so `.expect()` is correct here.
         let did: Did = DidComponents::new(
             version.unwrap_or_default(),
             network.unwrap_or_default(),
             id_type,
-        )
+        )?
         .try_into()
         .expect("default DidVersion + default Network + 32-byte External hash payload always encode to a valid did:btcr2 string");
 
-        let initial_document = doc.into_initial(&did);
+        // An externally-authored intermediate document can be structurally valid
+        // as an intermediate document while violating the non-empty
+        // `service`/`capabilityInvocation` invariant of an initial document.
+        // `from_json_value` does not enforce those invariants, so a nonconforming
+        // genesis document (e.g. an empty `service` array) must surface as a typed
+        // error here rather than panic.
+        let initial_document = doc.into_initial(&did)?;
 
         // Step 9 is unimplemented (this is the caller's responsibility)
         // Optionally store canonicalBytes on a Content Addressable Storage (CAS) system like the
         // InterPlanetary File System (IPFS).
 
-        (did, initial_document)
+        Ok((did, initial_document))
     }
 
     // Spec section 7.2.1
@@ -963,7 +1004,7 @@ impl InitialDocument {
                 "id": verification_method_id,
                 "type": "Multikey",
                 "controller": did.encode(),
-                "publicKeyMultibase": did.public_key_unchecked().to_multikey(),
+                "publicKeyMultibase": did.public_key().ok_or(Error::MissingGenesisKey)?.to_multikey(),
             }],
             "authentication": verification_method_ids,
             "assertionMethod": verification_method_ids,
@@ -1002,7 +1043,7 @@ impl InitialDocument {
             // errors in the genesis document propagate as typed errors (no unwrap).
             let intermediate =
                 IntermediateDocument::from_json_value(genesis.clone(), did.components().network())?;
-            let initial = intermediate.into_initial(did);
+            let initial = intermediate.into_initial(did)?;
             initial.sidecar_initial_validation(hash)?
         } else {
             return Err(Btcr2Error::Unsupported(
@@ -1085,11 +1126,17 @@ impl InitialDocument {
         // capabilityAction == "Write" remains a CONSTRUCTION must (data-structures.md);
         // only its resolve-path enforcement is deferred.
 
-        crypto_suite.data_integrity_verify_proof(
-            public_key,
-            update,
-            &ProofPurpose::CapabilityInvocation,
-        )?;
+        // Resolve-path apply site: a proof-verification failure MUST surface as
+        // INVALID_DID_UPDATE (resolve.md:200), not the granular ProofVerification
+        // code. Every other error apply_update raises is already InvalidDidUpdate,
+        // so the whole apply step is spec-uniform. Find-refs confirms apply_update
+        // has one production caller — the resolver resolve path — so this collapse
+        // is resolve-path-only (no construction caller loses a granular variant).
+        crypto_suite
+            .data_integrity_verify_proof(public_key, update, &ProofPurpose::CapabilityInvocation)
+            .map_err(|e| {
+                Btcr2Error::InvalidDidUpdate(format!("update proof failed verification: {e}"))
+            })?;
 
         // Step 11
         json_patch::patch(&mut self.json_data, &update.patch)
@@ -1170,15 +1217,16 @@ impl IntermediateDocument {
         })
     }
 
-    pub(crate) fn into_initial(self, did: &Did) -> InitialDocument {
+    pub(crate) fn into_initial(self, did: &Did) -> Result<InitialDocument, Btcr2Error> {
         // Find and replace all DID placeholder strings with the DID.
         let mut json_data = self.json_data.clone();
         find_and_replace(&mut json_data, DID_PLACEHOLDER, did.encode());
 
-        InitialDocument::from_json_value(json_data).expect(
-            "intermediate doc validated at construction; substituting the placeholder DID \
-             string for a real DID string preserves structural validity",
-        )
+        // A nonconforming genesis (e.g. empty service/capabilityInvocation on an
+        // x1 sidecar) is structurally invalid as an initial document — surface a
+        // typed error, never panic on attacker-supplied sidecar data.
+        InitialDocument::from_json_value(json_data)
+            .map_err(|e| Btcr2Error::InvalidDidDocument(e.to_string()))
     }
 
     pub(crate) fn from_initial(initial_doc: &InitialDocument) -> Self {
@@ -1235,7 +1283,8 @@ fn generate_beacons(
     let secp = secp256k1::Secp256k1::verification_only();
     let network = did.components().network().try_into()?;
     // TODO: After the `bitcoin` crate is updated, we can remove this extra public key constructor.
-    let public_key = esploda::bitcoin::PublicKey::new(did.public_key_unchecked());
+    let public_key =
+        esploda::bitcoin::PublicKey::new(did.public_key().ok_or(Error::MissingGenesisKey)?);
 
     let p2pkh_id = format!("{}#initialP2PKH", did.encode());
     let p2wpkh_id = format!("{}#initialP2WPKH", did.encode());
@@ -1397,6 +1446,80 @@ mod tests {
         assert_eq!(doc.fields.verification_method.len(), 1);
     }
 
+    /// D-09a (#170): a document carrying a non-beacon `service`
+    /// (`LinkedDomains`) alongside its beacons parses successfully — the
+    /// non-beacon service is retain-and-ignored (excluded from the typed beacon
+    /// vec / `beacons()`, but retained in `json_data`) rather than failing the
+    /// whole document.
+    #[test]
+    fn non_beacon_service_is_retained_not_fatal() {
+        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
+        else {
+            return;
+        };
+        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
+        let mut did_document = resolve_output["didDocument"].clone();
+
+        let did_id = did_document["id"].as_str().unwrap().to_string();
+        did_document["service"].as_array_mut().unwrap().push(json!({
+            "id": format!("{did_id}#linked-domain"),
+            "type": "LinkedDomains",
+            "serviceEndpoint": "https://example.com"
+        }));
+
+        let doc = Document::from_json_value(did_document.clone()).expect("parse must succeed");
+
+        // The LinkedDomains service is excluded from beacon logic ...
+        assert_eq!(doc.beacons().count(), 3);
+        assert_eq!(doc.fields.service.len(), 3);
+        // ... but survives in the retained raw envelope (json_data).
+        assert_eq!(doc.as_ref()["service"].as_array().unwrap().len(), 4);
+    }
+
+    /// Boundary of the leniency policy: a service object with NO `type` field is
+    /// malformed and still fails the whole document (the `?` on
+    /// `string_from_object(service, "type")` propagates the missing-key error) —
+    /// retain-and-ignore covers unknown-but-present types, not absent required
+    /// fields.
+    #[test]
+    fn service_missing_type_still_errors() {
+        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
+        else {
+            return;
+        };
+        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
+        let mut did_document = resolve_output["didDocument"].clone();
+
+        let service = &mut did_document["service"].as_array_mut().unwrap()[0];
+        service.as_object_mut().unwrap().remove("type");
+
+        assert!(Document::from_json_value(did_document).is_err());
+    }
+
+    /// D-09b: a verification method whose `type` is not `"Multikey"` is retained
+    /// in the parsed document (lenient envelope), but its key cannot be
+    /// extracted for proof verification (strict crypto-trust boundary).
+    #[test]
+    fn non_multikey_vm_is_retained_but_key_extraction_fails() {
+        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
+        else {
+            return;
+        };
+        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
+        let mut did_document = resolve_output["didDocument"].clone();
+
+        did_document["verificationMethod"].as_array_mut().unwrap()[0]["type"] =
+            json!("Ed25519VerificationKey2020");
+
+        let doc = Document::from_json_value(did_document).expect("parse must succeed");
+        let vm = &doc.fields.verification_method[0];
+        assert_eq!(vm.type_, "Ed25519VerificationKey2020");
+        assert!(matches!(
+            vm.public_key(),
+            Err(crate::verification::Error::UnsupportedVerificationMethod)
+        ));
+    }
+
     // Drives the EXTERNAL x1 q26jeds9 vector. The vector's
     // `other.json.genesisDocument` is authored with the spec-form `did:btcr2:_`
     // genesis placeholder; `into_initial` substitutes it for the real DID, and
@@ -1420,7 +1543,7 @@ mod tests {
             Network::Regtest,
         )
         .unwrap();
-        let initial_doc = intermediate.into_initial(&did);
+        let initial_doc = intermediate.into_initial(&did).unwrap();
 
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(SidecarData {
@@ -1500,12 +1623,13 @@ mod tests {
             Network::Regtest,
         )
         .unwrap();
-        let initial_doc = intermediate.into_initial(&did);
+        let initial_doc = intermediate.into_initial(&did).unwrap();
 
         // Flip one byte of the genuine External genesisBytes so the only thing
         // wrong is the hash passed to validation.
-        let mut wrong = did.hash_unchecked();
-        wrong.0[0] ^= 0xff;
+        let mut wrong_bytes = *did.hash_unchecked().as_bytes();
+        wrong_bytes[0] ^= 0xff;
+        let wrong = Sha256Hash::from(wrong_bytes);
 
         let result = initial_doc.sidecar_initial_validation(wrong);
         assert!(
@@ -1533,6 +1657,98 @@ mod tests {
         assert!(
             matches!(result, Err(Error::Btcr2Error(Btcr2Error::Unsupported(_)))),
             "genesis-CAS fallback must error Unsupported, got: {result:?}"
+        );
+    }
+
+    // A hostile x1 sidecar whose genesisDocument carries an empty
+    // `service` array is a valid INTERMEDIATE document (DocumentFields<String>
+    // leaves `service`/`capabilityInvocation` unconstrained) but violates the
+    // NonEmpty invariant of an INITIAL document (DocumentFields<Did>). Before the
+    // fix, `into_initial` `.expect()`ed that fallible parse — so this input reached
+    // a reachable PANIC (a DoS on attacker-supplied sidecar data). It must now
+    // surface a typed `Btcr2Error::InvalidDidDocument` propagated through
+    // `resolve_external`, never a panic.
+    #[test]
+    fn resolve_external_empty_service_genesis_returns_typed_error_not_panic() {
+        let raw = include_str!("../fixtures/spec-form/sidecar-empty-service-genesis.json");
+        let value: Value = serde_json::from_str(raw).unwrap();
+
+        let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
+            .parse()
+            .unwrap();
+
+        // Fold-in 9 staging check: the empty-service genesis MUST parse as an
+        // intermediate document, so the failure below is isolated to `into_initial`
+        // (the panic site) — NOT an earlier, wrong-stage parse rejection. If this
+        // parse ever failed, the resolve assertion could pass vacuously.
+        let intermediate = IntermediateDocument::from_json_value(
+            value["genesisDocument"].clone(),
+            Network::Regtest,
+        );
+        assert!(
+            intermediate.is_ok(),
+            "empty-service genesis must parse as an intermediate document so the test \
+             reaches into_initial, got: {intermediate:?}"
+        );
+
+        // Drive the production serde/CLI sidecar path: a `SidecarData` deserialized
+        // from the wire form leaves `initial_document` None and fills
+        // `genesis_document`, so `resolve_external` bridges it via `into_initial`.
+        let sidecar = SidecarData::from_json_value(value).unwrap();
+        assert!(sidecar.genesis_document.is_some());
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+
+        let hash = did.hash_unchecked();
+        let result = InitialDocument::resolve_external(&did, hash, &resolution_options);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(_)))
+            ),
+            "empty-service genesis must surface a typed InvalidDidDocument (no panic), got: {result:?}"
+        );
+    }
+
+    // The `create --external` path shares the same into_initial bridge as the
+    // resolve/sidecar path above. An externally-authored intermediate document
+    // whose `service` array is empty is a valid INTERMEDIATE document
+    // (DocumentFields<String> leaves `service`/`capabilityInvocation`
+    // unconstrained) but violates the NonEmpty invariant of an INITIAL document
+    // (DocumentFields<Did>). `from_external_intermediate` must surface that as a
+    // typed error, NOT panic. (Anti-vacuity: on the pre-fix tree this input hits
+    // the `.expect()` on into_initial and panics the process, so this test would
+    // abort rather than return an Err.)
+    #[test]
+    fn from_external_intermediate_empty_service_genesis_returns_typed_error_not_panic() {
+        let raw = include_str!("../fixtures/spec-form/sidecar-empty-service-genesis.json");
+        let value: Value = serde_json::from_str(raw).unwrap();
+
+        // The empty-service genesis MUST parse as an intermediate document, so the
+        // failure below is isolated to the into_initial site reached by
+        // `from_external_intermediate` — not an earlier, wrong-stage rejection.
+        let intermediate = IntermediateDocument::from_json_value(
+            value["genesisDocument"].clone(),
+            Network::Regtest,
+        );
+        assert!(
+            intermediate.is_ok(),
+            "empty-service genesis must parse as an intermediate document so the test \
+             reaches into_initial, got: {intermediate:?}"
+        );
+        let intermediate = intermediate.unwrap();
+
+        let result =
+            InitialDocument::from_external_intermediate(intermediate, None, Some(Network::Regtest));
+        assert!(
+            matches!(
+                result,
+                Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(_)))
+            ),
+            "empty-service genesis must surface a typed InvalidDidDocument (no panic), got: {:?}",
+            result.map(|(did, _)| did)
         );
     }
 
@@ -1575,7 +1791,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let did_components = DidComponents::new(DidVersion::One, Network::Signet, id_type);
+        let did_components = DidComponents::new(DidVersion::One, Network::Signet, id_type).unwrap();
 
         // Re-pointed to a surviving regtest vector so the gated build compiles
         // (test is #[ignore]'d; this read is never asserted against).
@@ -1761,7 +1977,8 @@ mod tests {
             intermediate_doc,
             None,
             Some(Network::Regtest),
-        );
+        )
+        .unwrap();
 
         // The re-derived DID must equal create/output.json.did.
         assert_eq!(did.encode(), create_output["did"].as_str().unwrap());
@@ -1997,6 +2214,7 @@ mod tests {
         let public_key = source_secret_key().as_inner().public_key(&secp);
         let id_type = IdType::from(public_key);
         let did: Did = DidComponents::new(DidVersion::One, Network::Mutinynet, id_type)
+            .expect("mutinynet is a valid network")
             .try_into()
             .expect("default version + mutinynet + key id type encode to a valid did");
 
@@ -2625,6 +2843,7 @@ mod tests {
             Network::Mutinynet,
             IdType::from(other_public_key),
         )
+        .expect("mutinynet is a valid network")
         .try_into()
         .expect("a second key-based did encodes");
         assert_ne!(other_did.encode(), did.encode());
@@ -3138,16 +3357,15 @@ mod tests {
     /// detached signature rather than minting a fresh update. This asserts
     /// REJECTION only — it neither creates nor re-blesses any golden vector.
     ///
-    /// NOTE (deviation from plan text): the plan's must-have named
-    /// `ProofVerification` as the expected variant. The corruption here keeps the
-    /// proofValue a well-formed 64-byte base58-btc signature (decode → flip one
-    /// signature byte → re-encode), so `multibase_decode` succeeds and the
-    /// rejection lands one step deeper at BIP340 verification, whose CONCRETE
-    /// variant is `Btcr2Error::InvalidUpdateProof` (cryptosuite.rs:228). This is
-    /// the stronger forgery-rejection path (a structurally-valid but wrong
-    /// signature); the `ProofVerification` decode-length class is covered by
-    /// `test_multibase_decode_rejects_wrong_length` in cryptosuite.rs. We assert
-    /// the variant the code actually returns.
+    /// NOTE (error-code collapse): the corruption here keeps the proofValue a
+    /// well-formed 64-byte base58-btc signature (decode → flip one signature byte →
+    /// re-encode), so `multibase_decode` succeeds and the rejection lands one step
+    /// deeper at BIP340 verification inside `data_integrity_verify_proof`. Prior to
+    /// that collapse this surfaced the granular `InvalidUpdateProof` (cryptosuite.rs:228);
+    /// the resolve-path `apply_update` site now wraps ANY proof-verification failure
+    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:200), so this security
+    /// regression test asserts `InvalidDidUpdate`. The rejection property (a tampered
+    /// signature is refused) is unchanged — only the wire variant is spec-aligned.
     #[test]
     fn test_apply_update_rejects_corrupted_proof_value() {
         let (_did, vm_id, _initial, document) = source_documents();
@@ -3187,8 +3405,48 @@ mod tests {
             .apply_update(&corrupted)
             .expect_err("a corrupted-proofValue update must be rejected");
         match err {
-            Btcr2Error::InvalidUpdateProof(_) => {}
-            other => panic!("expected InvalidUpdateProof, got {other:?}"),
+            Btcr2Error::InvalidDidUpdate(_) => {}
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
         }
+    }
+
+    /// resolve.md:200: a proof-verification failure raised on the resolve
+    /// path inside `apply_update` MUST surface as `INVALID_DID_UPDATE`, not the
+    /// granular BIP340 `InvalidUpdateProof`. This pins the wire-code collapse at the
+    /// `data_integrity_verify_proof` apply site. A find-refs scope check confirmed
+    /// `apply_update` has one production caller (the resolver resolve path), so the
+    /// collapse costs no non-resolve caller its granular variant.
+    #[test]
+    fn apply_update_bad_proof_surfaces_invalid_did_update() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // A structurally valid signed update whose signature is then invalidated.
+        let update = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+
+        // Replace the detached Schnorr signature with a well-formed 64-byte all-zero
+        // signature: valid multibase (reaches BIP340 verification) but never a valid
+        // signature over this update, so verification fails at the apply site.
+        let (base, _sig) = multibase::decode(&update.proof.proof_value.0)
+            .expect("golden proofValue is valid multibase");
+        let bad_proof_value = multibase::encode(base, [0u8; 64]);
+
+        let mut json = update.as_ref().clone();
+        json["proof"]["proofValue"] = Value::String(bad_proof_value);
+        let bad_update = Update::from_json_value(json)
+            .expect("a proofValue-only swap stays well-formed enough to re-parse");
+
+        let mut target = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("key DID regenerates its initial document");
+        let err = target
+            .apply_update(&bad_update)
+            .expect_err("an update whose proof fails verification must be rejected");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(_)),
+            "resolve-path proof-verify failure must surface INVALID_DID_UPDATE, got: {err:?}"
+        );
     }
 }

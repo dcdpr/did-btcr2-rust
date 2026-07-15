@@ -1,0 +1,30 @@
+{
+  "genesisDocument": {
+    "id": "did:btcr2:_",
+    "@context": [
+      "https://www.w3.org/ns/did/v1.1",
+      "https://btcr2.dev/context/v1"
+    ],
+    "verificationMethod": [
+      {
+        "id": "did:btcr2:_#key-0",
+        "type": "Multikey",
+        "controller": "did:btcr2:_",
+        "publicKeyMultibase": "zQ3shTHn9hZ1BHtoZayz4VmPAZT97p2v8swmuPEUwBKHCanTL"
+      }
+    ],
+    "authentication": [
+      "did:btcr2:_#key-0"
+    ],
+    "assertionMethod": [
+      "did:btcr2:_#key-0"
+    ],
+    "capabilityInvocation": [
+      "did:btcr2:_#key-0"
+    ],
+    "capabilityDelegation": [
+      "did:btcr2:_#key-0"
+    ],
+    "service": []
+  }
+}

@@ -66,7 +66,7 @@ pub enum Error {
     InvalidDidFormat(String),
 
     /// Invalid version number
-    #[error("Invalid version: {0} (must be 1-16)")]
+    #[error("invalid did:btcr2 version {0}: only version 1 is defined")]
     InvalidVersion(u8),
 
     /// Invalid network identifier
@@ -160,19 +160,8 @@ impl Did {
     /// external (`x`) identifier.
     pub fn public_key(&self) -> Option<PublicKey> {
         match self.components.id_type {
-            IdType::Key(key) => PublicKey::from_slice(&key).ok(),
+            IdType::Key(key) => Some(key),
             IdType::External(_) => None,
-        }
-    }
-
-    pub(crate) fn public_key_unchecked(&self) -> PublicKey {
-        match self.components.id_type {
-            IdType::Key(key) => PublicKey::from_slice(&key).expect(
-                "IdType::Key bytes were validated as a valid secp256k1 point at parse time in IdType::try_from",
-            ),
-            IdType::External(_) => unreachable!(
-                "public_key_unchecked called on an External id type — callers must check id_type first"
-            ),
         }
     }
 }
@@ -225,7 +214,7 @@ pub enum Network {
     TestnetV4 = 4,
     /// Mutinynet
     Mutinynet = 5,
-    /// Custom test network (6-11)
+    /// Custom test network (values 12 to 14)
     Custom(u8),
 }
 
@@ -239,7 +228,9 @@ impl TryFrom<u8> for Network {
             3 => Ok(Network::TestnetV3),
             4 => Ok(Network::TestnetV4),
             5 => Ok(Network::Mutinynet),
-            6..=15 => Ok(Network::Custom(nibble)),
+            // Spec algorithms.md Table 1: only 12..=14 is the custom partition;
+            // 6..=11 are reserved and 15 is undefined — reject both.
+            12..=14 => Ok(Network::Custom(nibble)),
             _ => Err(Error::InvalidNetwork(nibble)),
         }
     }
@@ -276,17 +267,48 @@ impl TryFrom<Network> for esploda::bitcoin::Network {
 /// Type of DID identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdType {
-    // TODO: Replace array with `PublicKey`
-    /// Key-based identifier (secp256k1 public key)
-    Key([u8; PUBLIC_KEY_SIZE]),
+    /// Key-based identifier (validated secp256k1 public key)
+    Key(PublicKey),
 
     /// External document-based identifier (hash of external document)
     External(Sha256Hash),
 }
 
 /// Represents a SHA-256 hash.
+///
+/// The inner bytes are private: a `Sha256Hash` is minted only through
+/// [`From<[u8; SHA256_HASH_LEN]>`] (infallible, for compile-time-sized data) or
+/// [`TryFrom<Vec<u8>>`] (length-validating, for runtime byte data). Any 32-byte
+/// array is a valid hash — there is no value invariant beyond length — so the
+/// standard fixed-size-newtype split applies (single `TryFrom<Vec<u8>>` + `From`),
+/// unlike `SecretKey` which needs two fallible constructors for its scalar
+/// invariant. Raw bytes leave the newtype only via [`Sha256Hash::as_bytes`], at
+/// the hex/wire point of use; there are deliberately no hex-conversion
+/// convenience methods on the newtype (callers do `hex::encode(h.as_bytes())`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Sha256Hash(pub [u8; SHA256_HASH_LEN]);
+pub struct Sha256Hash([u8; SHA256_HASH_LEN]);
+
+impl From<[u8; SHA256_HASH_LEN]> for Sha256Hash {
+    fn from(bytes: [u8; SHA256_HASH_LEN]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl TryFrom<Vec<u8>> for Sha256Hash {
+    type Error = Error;
+
+    fn try_from(v: Vec<u8>) -> Result<Self, Error> {
+        let arr: [u8; SHA256_HASH_LEN] = v.try_into().map_err(|_| Error::InvalidHashLength)?;
+        Ok(Self(arr))
+    }
+}
+
+impl Sha256Hash {
+    /// The raw 32 hash bytes. Extract only at the hex/wire point of use.
+    pub fn as_bytes(&self) -> &[u8; SHA256_HASH_LEN] {
+        &self.0
+    }
+}
 
 // data-structures.md §sidecar-data — base64url-no-pad encoding for hashes.
 // Manual impls (NOT derive(Serialize, Deserialize)) because the default derive
@@ -349,10 +371,10 @@ impl TryFrom<&DecodedResult> for IdType {
                     "decoded.dp[1..] has length PUBLIC_KEY_SIZE per length check immediately above",
                 );
                 // Parse, don't validate: reject 33-byte payloads that are not a
-                // valid secp256k1 curve point. This makes `Did::public_key_unchecked`
-                // a statically-guaranteed success.
-                PublicKey::from_slice(&payload).map_err(Error::InvalidPublicKeyPoint)?;
-                Ok(IdType::Key(payload))
+                // valid secp256k1 curve point, and STORE the parsed key so a
+                // non-curve-point key can never enter a `Did`.
+                let key = PublicKey::from_slice(&payload).map_err(Error::InvalidPublicKeyPoint)?;
+                Ok(IdType::Key(key))
             }
             HRP_EXTERNAL => {
                 let payload: [u8; SHA256_HASH_LEN] = decoded.dp[1..].try_into().expect(
@@ -367,7 +389,7 @@ impl TryFrom<&DecodedResult> for IdType {
 
 impl From<PublicKey> for IdType {
     fn from(key: PublicKey) -> Self {
-        Self::Key(key.serialize())
+        Self::Key(key)
     }
 }
 
@@ -400,13 +422,24 @@ pub struct DidComponents {
 }
 
 impl DidComponents {
-    /// Create new DID components with validation
-    pub fn new(version: DidVersion, network: Network, id_type: IdType) -> Self {
-        Self {
+    /// Create validated DID components.
+    ///
+    /// Rejects a [`Network::Custom`] whose nibble is outside the spec's custom
+    /// partition `12..=14` with [`Error::InvalidNetwork`], so a hand-built
+    /// out-of-range Custom network can never enter a validated identifier. The
+    /// other inputs are already type-constrained (`DidVersion` has a single
+    /// variant; the named `Network` variants are all valid).
+    pub fn new(version: DidVersion, network: Network, id_type: IdType) -> Result<Self, Error> {
+        if let Network::Custom(n) = network
+            && !(12..=14).contains(&n)
+        {
+            return Err(Error::InvalidNetwork(n));
+        }
+        Ok(Self {
             version,
             network,
             id_type,
-        }
+        })
     }
 
     /// The did:btcr2 encoding version.
@@ -436,20 +469,11 @@ impl DidComponents {
 /// * `Ok(DidComponents)` - The parsed components
 /// * `Err(Error)` - If parsing fails
 ///
-/// # Examples
-///
-/// ```rust
-/// use did_btcr2::identifier::{parse_did_identifier, Network, IdType, Error, DidVersion};
-///
-/// let did = "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
-/// let components = parse_did_identifier(did)?;
-///
-/// assert_eq!(components.version(), DidVersion::One);
-/// assert_eq!(components.network(), Network::Mainnet);
-/// assert!(matches!(components.id_type(), IdType::Key(_)));
-/// # Ok::<(), Error>(())
-/// ```
-pub fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
+/// Private to match its private inverse [`encode_did_identifier`]; external
+/// callers reach it through the public [`Did`] `FromStr` impl. The former
+/// public doctest is preserved as the `parse_did_identifier_decodes_key_based`
+/// unit test.
+fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
     // Check DID prefix
     if !did.starts_with(DID_BTCR2_PREFIX) {
         return Err(Error::InvalidDidFormat(format!(
@@ -473,17 +497,16 @@ pub fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
     let network = Network::try_from(network_nibble)?;
 
     // Create and validate components
-    Ok(DidComponents::new(version.try_into()?, network, id_type))
+    DidComponents::new(version.try_into()?, network, id_type)
 }
 
 /// Encode DID components into a DID:BTCR2 identifier string
 ///
 /// # Arguments
 ///
-/// * `version` - Specification version (1-16)
+/// * `version` - Specification version (only version 1 is defined)
 /// * `network` - Bitcoin network
-/// * `id_type` - Identifier type
-/// * `genesis_bytes` - Genesis data (public key or hash)
+/// * `id_type` - Identifier type (carries the genesis public key or hash)
 ///
 /// # Returns
 ///
@@ -494,8 +517,12 @@ fn encode_did_identifier(
     network: Network,
     id_type: IdType,
 ) -> Result<String, Error> {
+    let key_bytes;
     let genesis_bytes = match &id_type {
-        IdType::Key(key) => &key[..],
+        IdType::Key(key) => {
+            key_bytes = key.serialize();
+            &key_bytes[..]
+        }
         IdType::External(Sha256Hash(hash)) => &hash[..],
     };
 
@@ -525,7 +552,7 @@ mod tests {
     impl From<&[u8]> for IdType {
         fn from(bytes: &[u8]) -> Self {
             match bytes.len() {
-                PUBLIC_KEY_SIZE => IdType::Key(bytes.try_into().unwrap()),
+                PUBLIC_KEY_SIZE => IdType::Key(PublicKey::from_slice(bytes).unwrap()),
                 SHA256_HASH_LEN => IdType::External(Sha256Hash(bytes.try_into().unwrap())),
                 _ => unreachable!(),
             }
@@ -557,7 +584,9 @@ mod tests {
 
     #[test]
     fn test_id_type_hrps() {
-        let key = IdType::from(&[0_u8; PUBLIC_KEY_SIZE][..]);
+        // `IdType::Key` now stores a validated PublicKey, so the helper needs a
+        // real curve point rather than the former all-zero placeholder.
+        let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
         assert_eq!(key.hrp(), "k");
 
         let hash = IdType::from(&[0_u8; SHA256_HASH_LEN][..]);
@@ -584,9 +613,10 @@ mod tests {
     fn did_with_non_curve_point_payload_is_rejected() {
         // a DID with HRP=`k` and a 33-byte payload that is
         // length-correct but is NOT a valid secp256k1 curve point must be
-        // rejected at parse time. Previously, parsing succeeded and the
-        // panic happened later in Did::public_key_unchecked() — an
-        // attacker-controlled-input panic on the resolve happy path.
+        // rejected at parse time. Previously, parsing stored the raw bytes and
+        // a later key access re-parsed them, risking an attacker-controlled
+        // panic on the resolve happy path; `IdType::Key` now holds a validated
+        // key, so a non-curve-point payload cannot enter a `Did` at all.
 
         // Construct a payload of 33 zero bytes. The secp256k1 library
         // rejects the all-zero key (it is not on the curve).
@@ -648,12 +678,50 @@ mod tests {
 
     #[test]
     fn test_custom_network() {
+        // Only the spec's custom partition 12..=14 decodes as Custom.
         // Encode->parse round-trip requires a valid curve point.
         let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
-        let did = encode_did_identifier(DidVersion::One, Network::Custom(15), key).unwrap();
+        for n in 12..=14u8 {
+            let did = encode_did_identifier(DidVersion::One, Network::Custom(n), key).unwrap();
+            let components = parse_did_identifier(&did).unwrap();
+            assert_eq!(components.network, Network::Custom(n));
+        }
 
-        let components = parse_did_identifier(&did).unwrap();
-        assert_eq!(components.network, Network::Custom(15));
+        // Reserved (6..=11) and undefined (15) nibbles are typed-rejected.
+        for n in [6u8, 11, 15] {
+            assert!(
+                matches!(Network::try_from(n), Err(Error::InvalidNetwork(m)) if m == n),
+                "network nibble {n} must be rejected as InvalidNetwork"
+            );
+        }
+    }
+
+    /// A hand-built out-of-range `Network::Custom` cannot enter a
+    /// validated `DidComponents` — `new` rejects it with `InvalidNetwork`.
+    #[test]
+    fn did_components_new_rejects_out_of_range_custom_network() {
+        let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
+        assert!(
+            matches!(
+                DidComponents::new(DidVersion::One, Network::Custom(200), key),
+                Err(Error::InvalidNetwork(200))
+            ),
+            "Custom(200) must be rejected by DidComponents::new"
+        );
+        // And an in-range Custom is accepted.
+        assert!(DidComponents::new(DidVersion::One, Network::Custom(13), key).is_ok());
+    }
+
+    /// Migrated from the former public `parse_did_identifier` doctest
+    /// (now private). Pins the same fixed-string decode assertions.
+    #[test]
+    fn parse_did_identifier_decodes_key_based() {
+        let did = "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+        let components = parse_did_identifier(did).unwrap();
+
+        assert_eq!(components.version(), DidVersion::One);
+        assert_eq!(components.network(), Network::Mainnet);
+        assert!(matches!(components.id_type(), IdType::Key(_)));
     }
 
     // ---- parse-edge negative tests -----------------
@@ -787,5 +855,87 @@ mod sha256_hash_serde_tests {
         let parsed: Sha256Hash = serde_json::from_str(escaped)
             .expect("escaped but valid base64url-no-pad hash must deserialize Ok");
         assert_eq!(parsed, expected);
+    }
+}
+
+#[cfg(test)]
+mod sha256_hash_newtype_tests {
+    use super::*;
+
+    // The hardened newtype rejects a wrong-length runtime `Vec<u8>` with the
+    // typed `Error::InvalidHashLength` (the same length variant used by
+    // `IdType::from_sha256_hash`), while `From<[u8; 32]>` is infallible.
+
+    #[test]
+    fn try_from_rejects_short_vec() {
+        assert!(matches!(
+            Sha256Hash::try_from(vec![0u8; SHA256_HASH_LEN - 1]),
+            Err(Error::InvalidHashLength)
+        ));
+    }
+
+    #[test]
+    fn try_from_rejects_long_vec() {
+        assert!(matches!(
+            Sha256Hash::try_from(vec![0u8; SHA256_HASH_LEN + 1]),
+            Err(Error::InvalidHashLength)
+        ));
+    }
+
+    #[test]
+    fn try_from_accepts_exact_len_vec() {
+        let v = vec![0x42u8; SHA256_HASH_LEN];
+        let hash = Sha256Hash::try_from(v).expect("32-byte vec is a valid hash");
+        assert_eq!(hash.as_bytes(), &[0x42u8; SHA256_HASH_LEN]);
+    }
+
+    #[test]
+    fn from_array_is_infallible_and_round_trips_bytes() {
+        let bytes = [0x7fu8; SHA256_HASH_LEN];
+        let hash = Sha256Hash::from(bytes);
+        assert_eq!(hash.as_bytes(), &bytes);
+    }
+}
+
+#[cfg(test)]
+mod pinned_mutinynet_vector_tests {
+    use super::*;
+
+    // The spec's mutinynet decoding example (did-btcr2/src/algorithms.md
+    // lines 99-110), pinned in BOTH directions with externally-sourced bytes.
+    //
+    // This is the sole NON-self-inverse identifier vector: the genesis bytes are
+    // hard-coded from the spec, not derived from the codec under test. A
+    // self-consistent-but-wrong codec (e.g. a flipped version/network nibble
+    // layout, GAP-1) passes every existing self-inverse round-trip test but must
+    // fail this one, settling GAP-1 at the byte level.
+    const MUTINYNET_DID: &str =
+        "did:btcr2:x1qhjw6jnhwcyu5wau4x0cpwvz74c3g82c3uaehqpaf7lzfgmnwsd7spmmf54";
+
+    // genesis SHA-256 e4ed4a777609ca3bbca99f80b982f571141d588f3b9b803d4fbe24a373741be8,
+    // spec algorithms.md decoding example.
+    const EXPECTED_GENESIS: [u8; 32] = [
+        0xe4, 0xed, 0x4a, 0x77, 0x76, 0x09, 0xca, 0x3b, 0xbc, 0xa9, 0x9f, 0x80, 0xb9, 0x82, 0xf5,
+        0x71, 0x14, 0x1d, 0x58, 0x8f, 0x3b, 0x9b, 0x80, 0x3d, 0x4f, 0xbe, 0x24, 0xa3, 0x73, 0x74,
+        0x1b, 0xe8,
+    ];
+
+    #[test]
+    fn decode_matches_spec_version_network_genesis() {
+        let components = parse_did_identifier(MUTINYNET_DID).expect("spec mutinynet DID parses");
+        assert_eq!(components.version(), DidVersion::One);
+        assert_eq!(components.network(), Network::Mutinynet);
+        match components.id_type() {
+            IdType::External(hash) => assert_eq!(hash.as_bytes(), &EXPECTED_GENESIS),
+            IdType::Key(_) => panic!("mutinynet vector must decode to an External id_type"),
+        }
+    }
+
+    #[test]
+    fn encode_reproduces_spec_string() {
+        let id_type = IdType::External(Sha256Hash::from(EXPECTED_GENESIS));
+        let encoded = encode_did_identifier(DidVersion::One, Network::Mutinynet, id_type)
+            .expect("mutinynet components encode");
+        assert_eq!(encoded, MUTINYNET_DID);
     }
 }

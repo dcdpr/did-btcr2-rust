@@ -66,7 +66,7 @@ impl<T: BtcTransport> Client<T> {
     /// ([`DidVersion::One`]) per the spec.
     pub fn create(&self, public_key: &PublicKey, network: Network) -> Result<Document, Error> {
         let id_type = IdType::from(*public_key);
-        let components = DidComponents::new(DidVersion::One, network, id_type);
+        let components = DidComponents::new(DidVersion::One, network, id_type)?;
         let did = Did::try_from(components)?;
         let initial = InitialDocument::from_did(&did, &ResolutionOptions::default())?;
         Ok(Document::from(initial))
@@ -78,8 +78,13 @@ impl<T: BtcTransport> Client<T> {
     /// Pure composition over the sans-I/O core — it makes ZERO transport calls,
     /// and takes `&self` only to keep the facade's entry surface uniform with
     /// [`Client::create`]; no field is read. The DID is fixed to version 1
-    /// ([`DidVersion::One`]) per the spec. Returns `Result` for signature
-    /// uniformity with `create`; the underlying core call is infallible.
+    /// ([`DidVersion::One`]) per the spec.
+    ///
+    /// Returns a typed error (not a panic) when the externally-authored
+    /// intermediate document is nonconforming as an initial document — e.g. an
+    /// empty `service` or `capabilityInvocation` array, which is permitted for an
+    /// intermediate document but violates the initial document's non-empty
+    /// invariants.
     ///
     /// The resulting `x1` DID is NOT deterministically resolvable: resolving it
     /// requires the genesis (intermediate) document to be supplied as sidecar
@@ -93,7 +98,7 @@ impl<T: BtcTransport> Client<T> {
             intermediate_document,
             Some(DidVersion::One),
             Some(network),
-        );
+        )?;
         Ok((did, Document::from(initial)))
     }
 
@@ -301,7 +306,7 @@ impl<T: BtcTransport> Client<T> {
     ) -> Result<Txid, Error> {
         let target = current_version_id
             .checked_add(1)
-            .expect("a DID version_id never reaches u64::MAX in practice");
+            .ok_or(Error::VersionIdOverflow)?;
         let signed = doc.construct_signed_update(patch, target, vm_id, update_sk)?;
         let tx = self.build_update_tx(doc, signed, beacon_idx, fee, change, beacon_sk)?;
         self.broadcast(&tx)
@@ -328,7 +333,7 @@ impl<T: BtcTransport> Client<T> {
     ) -> Result<Txid, Error> {
         let target = current_version_id
             .checked_add(1)
-            .expect("a DID version_id never reaches u64::MAX in practice");
+            .ok_or(Error::VersionIdOverflow)?;
         let signed = doc.deactivate(vm_id, update_sk, target)?;
         let tx = self.build_update_tx(doc, signed, beacon_idx, fee, change, beacon_sk)?;
         self.broadcast(&tx)
@@ -821,6 +826,78 @@ mod tests {
             "update broadcasts once"
         );
         assert!(!txid.to_string().is_empty(), "a txid is returned");
+    }
+
+    /// A `current_version_id` of `NonZeroU64::MAX` makes `checked_add(1)`
+    /// overflow. That check is the FIRST statement in `update` (before any
+    /// signing/build/broadcast), so it must short-circuit with a typed
+    /// `Error::VersionIdOverflow` and issue ZERO transport calls — never panic.
+    #[test]
+    fn update_rejects_version_id_overflow() {
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://unused".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let sk = test_secret_key();
+        let max = NonZeroU64::new(u64::MAX).expect("u64::MAX is non-zero");
+
+        let err = client
+            .update(
+                &doc,
+                benign_patch(&vm_id),
+                &vm_id,
+                test_update_sk(),
+                sk,
+                max,
+                1,
+                Fee::Absolute(1_000),
+                None,
+            )
+            .expect_err("a MAX version id must not increment");
+
+        match err {
+            Error::VersionIdOverflow => {}
+            other => panic!("expected VersionIdOverflow, got {other:?}"),
+        }
+        assert_eq!(
+            client.transport.call_count(),
+            0,
+            "the overflow check precedes all I/O"
+        );
+    }
+
+    /// Same as `update_rejects_version_id_overflow`, for `deactivate` — its
+    /// `checked_add(1)` is likewise the first statement, so a `NonZeroU64::MAX`
+    /// version id yields `Error::VersionIdOverflow` with zero transport calls.
+    #[test]
+    fn deactivate_rejects_version_id_overflow() {
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://unused".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let sk = test_secret_key();
+        let max = NonZeroU64::new(u64::MAX).expect("u64::MAX is non-zero");
+
+        let err = client
+            .deactivate(
+                &doc,
+                &vm_id,
+                test_update_sk(),
+                sk,
+                max,
+                1,
+                Fee::Absolute(1_000),
+                None,
+            )
+            .expect_err("a MAX version id must not increment");
+
+        match err {
+            Error::VersionIdOverflow => {}
+            other => panic!("expected VersionIdOverflow, got {other:?}"),
+        }
+        assert_eq!(
+            client.transport.call_count(),
+            0,
+            "the overflow check precedes all I/O"
+        );
     }
 
     #[test]

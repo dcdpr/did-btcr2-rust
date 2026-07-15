@@ -5,16 +5,6 @@ use crate::identifier::Sha256Hash;
 use onlyerror::Error;
 use serde_json::{Value, json};
 
-/// Legacy top-level error type. Retained only for ZCAP errors pending the full
-/// error-vocabulary reconciliation; new spec errors live in [`Btcr2Error`].
-// TODO: Remove this
-#[derive(Error, Debug)]
-pub enum Error {
-    /// ZCAP (Authorization Capabilities) related errors
-    #[error("ZCAP error: {0}")]
-    Zcap(String),
-}
-
 /// Maps an error to a W3C DID Resolution Problem Details JSON-LD object, as
 /// returned in `didResolutionMetadata` when a resolution operation fails.
 pub trait ProblemDetails {
@@ -91,8 +81,8 @@ impl Btcr2Error {
     pub(crate) fn late_publishing(found_hash: Sha256Hash, expected_hash: Sha256Hash) -> Self {
         Self::LatePublishingError(format!(
             "Found hash `{}`, expected `{}`",
-            hex::encode(found_hash.0),
-            hex::encode(expected_hash.0),
+            hex::encode(found_hash.as_bytes()),
+            hex::encode(expected_hash.as_bytes()),
         ))
     }
 }
@@ -119,7 +109,7 @@ impl ProblemDetails for Btcr2Error {
             Self::InvalidDid(_) => "INVALID_DID",
             Self::InvalidDidDocument(_) => "INVALID_DID_DOCUMENT",
             Self::InvalidSidecarData(_) => "INVALID_SIDECAR_DATA",
-            Self::LatePublishingError(_) => "LATE_PUBLISHING_ERROR",
+            Self::LatePublishingError(_) => "LATE_PUBLISHING",
             Self::MissingUpdateData { .. } => "MISSING_UPDATE_DATA",
             Self::InvalidUpdateProof(_) => "INVALID_UPDATE_PROOF",
             Self::Zcap(_) => "ZCAP",
@@ -142,7 +132,7 @@ impl ProblemDetails for Btcr2Error {
                 Self::InvalidSidecarData(detail) => detail.clone(),
                 Self::LatePublishingError(detail) => detail.clone(),
                 Self::MissingUpdateData { update_hash } => {
-                    format!("update_hash={}", hex::encode(update_hash.0))
+                    format!("update_hash={}", hex::encode(update_hash.as_bytes()))
                 }
                 Self::InvalidUpdateProof(detail) => detail.clone(),
                 Self::Zcap(detail) => detail.clone(),
@@ -206,7 +196,7 @@ mod tests {
     #[test]
     fn missing_update_data_problem_details_shape() {
         let err = Btcr2Error::MissingUpdateData {
-            update_hash: Sha256Hash([0u8; 32]),
+            update_hash: Sha256Hash::from([0u8; 32]),
         };
         let d = err
             .details()
@@ -222,5 +212,43 @@ mod tests {
             d["detail"],
             format!("update_hash={}", hex::encode([0u8; 32]))
         );
+    }
+
+    /// Pins the wire `type` (prefix + `#NAME`) emitted by `ProblemDetails::details`
+    /// for the three `did:btcr2` method errors in the spec `errors.md` registry plus
+    /// the empty-service-genesis `InvalidDidDocument`. Asserting the FULL string
+    /// tripwires both a wrong namespace prefix AND a drifted code name — in
+    /// particular this is what fails if `LATE_PUBLISHING` ever regresses to the
+    /// old `LATE_PUBLISHING_ERROR` string. (btc1.dev prefix is the deferred
+    /// namespace rename; these assertions must be re-blessed to btcr2.dev then.)
+    #[test]
+    fn error_wire_codes_match_spec_registry() {
+        let cases: [(Btcr2Error, &str); 4] = [
+            (
+                Btcr2Error::InvalidDidUpdate("bad update".into()),
+                "https://btc1.dev/context/v1#INVALID_DID_UPDATE",
+            ),
+            (
+                Btcr2Error::LatePublishingError("late".into()),
+                "https://btc1.dev/context/v1#LATE_PUBLISHING",
+            ),
+            (
+                Btcr2Error::MissingUpdateData {
+                    update_hash: Sha256Hash::from([0u8; 32]),
+                },
+                "https://btc1.dev/context/v1#MISSING_UPDATE_DATA",
+            ),
+            (
+                Btcr2Error::InvalidDidDocument("bad genesis".into()),
+                "https://www.w3.org/ns/did#INVALID_DID_DOCUMENT",
+            ),
+        ];
+
+        for (err, expected_type) in cases {
+            let d = err
+                .details()
+                .expect("registry error yields problem details");
+            assert_eq!(d["type"], expected_type, "wire type mismatch for {err:?}");
+        }
     }
 }

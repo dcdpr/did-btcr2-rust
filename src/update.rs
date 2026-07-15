@@ -196,7 +196,7 @@ impl Update {
 
         // 1. The 32 signal bytes = JCS-SHA256 of the full signed update (the
         //    sidecar key the resolver matches on).
-        let signal: [u8; 32] = self.hash().0;
+        let signal: [u8; 32] = *self.hash().as_bytes();
 
         // 2. Build the OP_RETURN signal output (value 0).
         let pb = PushBytesBuf::from(signal);
@@ -492,7 +492,7 @@ mod tests {
 
         // In-range (index 0) but the recorded historical hash differs from this
         // update's hash → the late-publishing branch.
-        let wrong_hash = Sha256Hash([0xAB; 32]);
+        let wrong_hash = Sha256Hash::from([0xAB; 32]);
         let hash_history: Vec<Sha256Hash> = vec![wrong_hash];
         let err = update
             .confirm_duplicate(&hash_history)
@@ -519,8 +519,8 @@ mod tests {
     #[test]
     fn unsigned_update_has_four_contexts() {
         let patch = sample_patch();
-        let src = Sha256Hash([0x11; 32]);
-        let tgt = Sha256Hash([0x22; 32]);
+        let src = Sha256Hash::from([0x11; 32]);
+        let tgt = Sha256Hash::from([0x22; 32]);
         let ver = NonZeroU64::new(2).expect("2 is non-zero");
 
         let u = UnsecuredUpdate::construct(&patch, src, tgt, ver);
@@ -542,8 +542,8 @@ mod tests {
     #[test]
     fn unsigned_update_field_set() {
         let patch = sample_patch();
-        let src = Sha256Hash([0x11; 32]);
-        let tgt = Sha256Hash([0x22; 32]);
+        let src = Sha256Hash::from([0x11; 32]);
+        let tgt = Sha256Hash::from([0x22; 32]);
         let ver = NonZeroU64::new(2).expect("2 is non-zero");
 
         let u = UnsecuredUpdate::construct(&patch, src, tgt, ver);
@@ -572,8 +572,8 @@ mod tests {
     #[test]
     fn unsigned_update_hashes_are_base64url_no_pad() {
         let patch = sample_patch();
-        let src = Sha256Hash([0x11; 32]);
-        let tgt = Sha256Hash([0x22; 32]);
+        let src = Sha256Hash::from([0x11; 32]);
+        let tgt = Sha256Hash::from([0x22; 32]);
         let ver = NonZeroU64::new(2).expect("2 is non-zero");
 
         let u = UnsecuredUpdate::construct(&patch, src, tgt, ver);
@@ -811,7 +811,7 @@ mod tests {
             esploda::bitcoin::blockdata::script::Instruction::PushBytes(b) => b.as_bytes(),
             other => panic!("expected push, got {other:?}"),
         };
-        assert_eq!(push, &update.hash().0);
+        assert_eq!(push, update.hash().as_bytes());
     }
 
     #[test]
@@ -835,7 +835,7 @@ mod tests {
             esploda::bitcoin::blockdata::script::Instruction::PushBytes(b) => b.as_bytes(),
             other => panic!("expected push, got {other:?}"),
         };
-        assert_eq!(push, &update.hash().0);
+        assert_eq!(push, update.hash().as_bytes());
     }
 
     #[test]
@@ -859,7 +859,7 @@ mod tests {
             esploda::bitcoin::blockdata::script::Instruction::PushBytes(b) => b.as_bytes(),
             other => panic!("expected push, got {other:?}"),
         };
-        assert_eq!(push, &update.hash().0);
+        assert_eq!(push, update.hash().as_bytes());
     }
 
     // -- positive oracle: each produced input passes Script::verify -------
