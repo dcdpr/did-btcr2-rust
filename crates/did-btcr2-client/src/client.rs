@@ -24,6 +24,7 @@ use secp256k1::SecretKey;
 use crate::error::{Error, TransportError};
 use crate::esplora;
 use crate::funding::{self, Fee};
+use crate::signing::sign_beacon_tx;
 use crate::transport::BtcTransport;
 use crate::url::resolve_base_url;
 
@@ -163,13 +164,16 @@ impl<T: BtcTransport> Client<T> {
     /// `POST /tx`.
     ///
     /// Reads the beacon at `beacon_idx` via its accessor, fetches its own
-    /// UTXOs, defaults the change address back to the beacon address
-    /// resolves the [`Fee`] and selects funding inputs per the bounded
-    /// single-input contract, and feeds the result to the core
-    /// [`announce_singleton`](did_btcr2::Update::announce_singleton). For a rate
-    /// fee the transaction is built twice: once with a provisional fee to measure
-    /// the real vsize, then again with the exact `ceil(rate * vsize)` fee on the
-    /// SAME single prevout (no divergence between the measured and broadcast tx).
+    /// UTXOs, defaults the change address back to the beacon address, resolves the
+    /// [`Fee`] and selects funding inputs per the bounded single-input contract,
+    /// then runs the construct/sign split: the core
+    /// [`build_unsigned`](did_btcr2::Update::build_unsigned) produces the unsigned
+    /// tx + per-input sighashes, the wallet [`sign_beacon_tx`](crate::sign_beacon_tx)
+    /// signs them, and the core [`finalize`](did_btcr2::UnsignedBeaconTx::finalize)
+    /// assembles the broadcastable [`SignedBeaconTx`]. For a rate fee the absolute
+    /// fee is resolved from the deterministic
+    /// [`predicted_vsize`](did_btcr2::UnsignedBeaconTx::predicted_vsize) of a single
+    /// unsigned build — no throwaway signed build.
     pub fn build_update_tx(
         &self,
         doc: &Document,
@@ -189,51 +193,69 @@ impl<T: BtcTransport> Client<T> {
         match fee {
             Fee::Absolute(n) => {
                 let prevouts = funding::select(&utxos, &spk, n)?;
-                let signed_tx =
-                    signed.announce_singleton(&addr, &prevouts, n, &change_addr, beacon_sk)?;
+                let unsigned = signed.build_unsigned(&addr, &prevouts, n, &change_addr)?;
+                let sigs = sign_beacon_tx(&unsigned, &beacon_sk)?;
+                let signed_tx = unsigned.finalize(&sigs)?;
                 Ok(signed_tx)
             }
             Fee::Rate(r) => {
-                // Bootstrap with a provisional fee from a pessimistic vsize.
-                let provisional = funding::resolve_fee(Fee::Rate(r), funding::provisional_vsize());
+                // Bootstrap with a provisional fee from a pessimistic vsize just to
+                // SELECT the funding input (the final fee comes from the measured
+                // vsize below, not this bootstrap).
+                let provisional = funding::resolve_fee(Fee::Rate(r), funding::provisional_vsize())?;
                 let prevouts = funding::select(&utxos, &spk, provisional)?;
                 // Bounded single-input contract: a rate fee MUST fund from one
-                // input (so the rebuild vsize is stable). Multi-input under a
-                // rate fee is deferred.
+                // input (so the measured vsize is deterministic). Multi-input under
+                // a rate fee is deferred.
                 if prevouts.len() > 1 {
                     return Err(Error::RateFeeRequiresMultipleInputs);
                 }
-                // First build measures the real vsize.
-                let provisional_tx = signed.announce_singleton(
-                    &addr,
-                    &prevouts,
-                    provisional,
-                    &change_addr,
-                    beacon_sk,
-                )?;
-                let vsize = provisional_tx.as_tx().vsize() as u64;
-                let abs_fee = funding::resolve_fee(Fee::Rate(r), vsize);
-                // The provisional selection only guaranteed coverage of
-                // `provisional` (= rate * PROVISIONAL_VSIZE). Correctness of
-                // reusing that prevout for `abs_fee` depends on the implicit
-                // invariant `measured_vsize <= PROVISIONAL_VSIZE`. Re-validate
-                // explicitly so a future output/script change that pushes the
-                // measured vsize past the ceiling fails with a precise error
-                // rather than a confusing InsufficientFunds from the rebuild
                 let inputs_total: u64 = prevouts.iter().map(|p| p.value).sum();
-                if inputs_total < abs_fee {
+                // Iterate to a fixed point so the fee is sized on the SAME output
+                // set the final tx will have. In the single-input regime the exact
+                // fee is at or below the provisional fee, and a LOWER fee grows the
+                // change (`change = inputs_total - fee`); once change clears the dust
+                // threshold, `build_unsigned` ADDS a change output the provisional
+                // build folded away. Measuring the vsize on the folded 1-output
+                // build and then paying at the 2-output tx would under-pay the
+                // requested rate, so we re-measure at each candidate fee until the
+                // fee (and thus the output set it produces) stops changing.
+                const RATE_FEE_MAX_PASSES: usize = 8;
+                let mut fee = provisional;
+                for _ in 0..RATE_FEE_MAX_PASSES {
+                    if inputs_total < fee {
+                        return Err(Error::NoSpendableUtxo);
+                    }
+                    let vsize = signed
+                        .build_unsigned(&addr, &prevouts, fee, &change_addr)?
+                        .predicted_vsize();
+                    let next = funding::resolve_fee(Fee::Rate(r), vsize)?;
+                    if next == fee {
+                        break;
+                    }
+                    fee = next;
+                }
+                if inputs_total < fee {
                     return Err(Error::NoSpendableUtxo);
                 }
-                // Rebuild with the exact fee on the SAME single prevout: input/
-                // output count is unchanged, so the rebuilt vsize equals the
-                // measured vsize and the fee is exact.
-                let signed_tx = signed.announce_singleton(
-                    &addr,
-                    &prevouts,
-                    abs_fee,
-                    &change_addr,
-                    beacon_sk,
-                )?;
+                // Safety net for the rare value window where the fee alternates
+                // between the folded and change-present output sets without meeting
+                // inside the pass budget: build at the converged fee and, if that
+                // build's vsize would demand more, bump ONCE to the higher fee. The
+                // higher fee can only fold change (shrinking the real vsize), so it
+                // stays overpay-safe — it never under-pays the rate.
+                let unsigned = signed.build_unsigned(&addr, &prevouts, fee, &change_addr)?;
+                let needed = funding::resolve_fee(Fee::Rate(r), unsigned.predicted_vsize())?;
+                let unsigned = if needed > fee {
+                    if inputs_total < needed {
+                        return Err(Error::NoSpendableUtxo);
+                    }
+                    signed.build_unsigned(&addr, &prevouts, needed, &change_addr)?
+                } else {
+                    unsigned
+                };
+                let sigs = sign_beacon_tx(&unsigned, &beacon_sk)?;
+                let signed_tx = unsigned.finalize(&sigs)?;
                 Ok(signed_tx)
             }
         }
@@ -1043,6 +1065,177 @@ mod tests {
         assert!(
             matches!(err, Error::NoSpendableUtxo),
             "expected NoSpendableUtxo from the coverage guard, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn rate_predicted_vsize_exact() {
+        // The Fee::Rate rewire resolves the real on-chain fee from the
+        // deterministic `predicted_vsize` of a SINGLE keyless unsigned build (no
+        // build-twice signed measurement). For the single-input P2TR key-path
+        // default-sighash case the prediction is EXACT, so it must equal the
+        // finalized tx's real vsize AND the fee it sets must be the rate resolved
+        // against that predicted vsize.
+        use did_btcr2::Prevout;
+        use esploda::bitcoin::{OutPoint, ScriptBuf};
+
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://fake".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let sk = test_secret_key();
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let signed = doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
+            .expect("a signed update constructs against the genesis document");
+
+        // The P2TR beacon (idx 2) is derived from the DID key, so the test key
+        // owns it — a single-input P2TR key-path prevout.
+        let addr = doc
+            .beacons()
+            .nth(2)
+            .expect("the key DID has a P2TR beacon at idx 2")
+            .address()
+            .clone();
+        let spk: ScriptBuf = addr.script_pubkey();
+        let value = 100_000u64;
+        let prevout = Prevout {
+            outpoint: OutPoint {
+                txid: "0000000000000000000000000000000000000000000000000000000000000001"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            value,
+            script_pubkey: spk,
+        };
+
+        let rate = 5.0_f64;
+        let unsigned = signed
+            .build_unsigned(&addr, std::slice::from_ref(&prevout), 1_000, &addr)
+            .expect("build_unsigned over the owned P2TR prevout");
+        let v = unsigned.predicted_vsize();
+        let abs_fee = funding::resolve_fee(Fee::Rate(rate), v).expect("a positive rate resolves");
+
+        // Rebuild at the exact fee (matching build_update_tx), then sign+finalize.
+        let unsigned_final = signed
+            .build_unsigned(&addr, &[prevout], abs_fee, &addr)
+            .expect("build_unsigned at the exact rate fee");
+        let sigs = sign_beacon_tx(&unsigned_final, &sk).expect("sign the P2TR input");
+        let signed_tx = unsigned_final.finalize(&sigs).expect("finalize");
+
+        // (a) predicted vsize == the finalized tx's REAL vsize (exact, P2TR).
+        assert_eq!(
+            v,
+            signed_tx.as_tx().vsize() as u64,
+            "predicted_vsize must equal the finalized single-input P2TR tx vsize",
+        );
+
+        // (b) the finalized tx's actual on-chain fee equals the rate resolved
+        // against the predicted vsize.
+        let outputs_total: u64 = signed_tx.as_tx().output.iter().map(|o| o.value).sum();
+        let actual_fee = value - outputs_total;
+        assert_eq!(
+            actual_fee, abs_fee,
+            "the finalized fee must equal ceil(rate * predicted_vsize)",
+        );
+        assert_eq!(
+            abs_fee,
+            funding::resolve_fee(Fee::Rate(rate), v).expect("a positive rate resolves"),
+            "the fee is set from predicted_vsize, not a build-twice measurement",
+        );
+    }
+
+    #[test]
+    fn rate_fee_covers_final_vsize_across_dust_crossing() {
+        // Regression: a single-input rate fee must be sized on the FINAL output
+        // set. When the funding value sits just above the provisional fee, the
+        // provisional-fee build folds change to dust (1 output) while the lower
+        // exact fee clears dust (2 outputs). Sizing the fee on the folded
+        // 1-output build would under-pay the requested rate against the
+        // 2-output tx that actually gets broadcast.
+        use did_btcr2::Prevout;
+        use esploda::bitcoin::{OutPoint, ScriptBuf};
+
+        let rate = 5.0_f64;
+        // Funding value inside the [provisional, provisional + change-dust]
+        // window: provisional fee = rate * PROVISIONAL_VSIZE = 5 * 200 = 1_000;
+        // the P2TR change output's dust threshold is ~330 sat, so a 1_200-sat
+        // input folds change at the provisional fee and clears it at the lower
+        // exact fee. The window is asserted below against the real dust value.
+        let value = 1_200u64;
+
+        let transport = FakeTransport::with_utxo_value(value);
+        let client = Client::new("http://fake".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let sk = test_secret_key();
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let signed = doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
+            .expect("a signed update constructs against the genesis document");
+
+        // The P2TR beacon (idx 2) is derived from the DID key, so the test key
+        // owns it — a single-input P2TR key-path prevout.
+        let addr = doc
+            .beacons()
+            .nth(2)
+            .expect("the key DID has a P2TR beacon at idx 2")
+            .address()
+            .clone();
+        let spk: ScriptBuf = addr.script_pubkey();
+
+        // Confirm we exercise the crossing window using the REAL dust value.
+        let dust = spk.dust_value().to_sat();
+        let provisional = funding::resolve_fee(Fee::Rate(rate), funding::provisional_vsize())
+            .expect("a positive rate resolves");
+        assert!(
+            value >= provisional && value - provisional <= dust,
+            "funding value {value} must sit in the [provisional {provisional}, \
+             provisional + dust {}] window",
+            provisional + dust,
+        );
+
+        // At the provisional fee the change folds to dust (1 output): a naive
+        // prediction on this build understates the final vsize.
+        let prevout = Prevout {
+            outpoint: OutPoint {
+                txid: "0000000000000000000000000000000000000000000000000000000000000001"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            value,
+            script_pubkey: spk,
+        };
+        let folded = signed
+            .build_unsigned(&addr, std::slice::from_ref(&prevout), provisional, &addr)
+            .expect("provisional build folds change to dust");
+        assert_eq!(
+            folded.as_tx().output.len(),
+            1,
+            "the provisional fee folds change to dust (single OP_RETURN output)",
+        );
+
+        // The real build sizes the fee on the final (change-present) output set.
+        let tx = client
+            .build_update_tx(&doc, signed, 2, Fee::Rate(rate), None, sk)
+            .expect("a rate-fee build succeeds across the dust crossing");
+        assert_eq!(
+            tx.as_tx().output.len(),
+            2,
+            "the exact fee clears dust, adding a change output the provisional build folded",
+        );
+
+        let outputs_total: u64 = tx.as_tx().output.iter().map(|o| o.value).sum();
+        let actual_fee = value - outputs_total;
+        let final_vsize = tx.as_tx().vsize() as u64;
+        let required =
+            funding::resolve_fee(Fee::Rate(rate), final_vsize).expect("a positive rate resolves");
+        assert!(
+            actual_fee >= required,
+            "finalized fee {actual_fee} must cover rate * final vsize {required} \
+             (final vsize {final_vsize})",
         );
     }
 

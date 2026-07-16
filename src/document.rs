@@ -94,7 +94,7 @@ pub enum Error {
     /// A key-based DID unexpectedly yielded no genesis public key.
     ///
     /// Structurally unreachable — the key-based generation paths are only
-    /// entered for `IdType::Key` DIDs via [`Self::from_did`] — but modeled as a
+    /// entered for `IdType::Key` DIDs via [`InitialDocument::from_did`] — but modeled as a
     /// typed error rather than a panic so hostile input can never trigger an
     /// abort on the generation path.
     #[error("key-based DID has no genesis public key")]
@@ -2196,7 +2196,7 @@ mod tests {
 
     /// The same key material as [`source_secret_key`] but as the raw
     /// `secp256k1::SecretKey` the Bitcoin beacon-signing path
-    /// (`announce_singleton`) expects — that path signs the on-chain
+    /// (`sign_and_finalize_for_test`) expects — that path signs the on-chain
     /// transaction and is deliberately NOT the crate-owned newtype.
     fn source_beacon_secret_key() -> secp256k1::SecretKey {
         secp256k1::SecretKey::from_slice(&SOURCE_SECRET_KEY_BYTES)
@@ -2454,15 +2454,12 @@ mod tests {
         // Announce it from the P2WPKH default beacon (its key is the DID key).
         let (beacon_address, prevout) =
             beacon_prevout(&initial, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
-        let signed = update
-            .announce_singleton(
-                &beacon_address,
-                &[prevout],
-                1_000,
-                &beacon_address,
-                source_beacon_secret_key(),
-            )
-            .expect("announce_singleton produces a signed beacon tx");
+        let unsigned = update
+            .build_unsigned(&beacon_address, &[prevout], 1_000, &beacon_address)
+            .expect("build_unsigned");
+        let signed =
+            crate::test_signing::sign_and_finalize_for_test(&unsigned, &source_beacon_secret_key())
+                .expect("sign produces a signed beacon tx");
 
         // The OP_RETURN signal bytes equal the update hash (the sidecar key).
         let bridged = bridge_to_esplora(&signed, 100, 1_700_000_000);
@@ -2564,26 +2561,24 @@ mod tests {
         // (the duplicate confirmation carries the identical update / signal hash).
         let (beacon_address, prevout1) =
             beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
-        let signed1 = update1
-            .announce_singleton(
-                &beacon_address,
-                &[prevout1],
-                1_000,
-                &beacon_address,
-                source_beacon_secret_key(),
-            )
-            .expect("announce update #1");
+        let unsigned1 = update1
+            .build_unsigned(&beacon_address, &[prevout1], 1_000, &beacon_address)
+            .expect("build_unsigned update #1");
+        let signed1 = crate::test_signing::sign_and_finalize_for_test(
+            &unsigned1,
+            &source_beacon_secret_key(),
+        )
+        .expect("announce update #1");
         let (_addr2, prevout2) =
             beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
-        let signed2 = update2
-            .announce_singleton(
-                &beacon_address,
-                &[prevout2],
-                1_000,
-                &beacon_address,
-                source_beacon_secret_key(),
-            )
-            .expect("announce update #2");
+        let unsigned2 = update2
+            .build_unsigned(&beacon_address, &[prevout2], 1_000, &beacon_address)
+            .expect("build_unsigned update #2");
+        let signed2 = crate::test_signing::sign_and_finalize_for_test(
+            &unsigned2,
+            &source_beacon_secret_key(),
+        )
+        .expect("announce update #2");
         let b1 = bridge_to_esplora(&signed1, 100, 1_700_000_000);
         let b1_dup = bridge_to_esplora(&signed1, 100, 1_700_000_000);
         let b2 = bridge_to_esplora(&signed2, 101, 1_700_000_100);
@@ -2674,26 +2669,24 @@ mod tests {
         // a confirmed esplora tx.
         let (beacon_address, prevout1) =
             beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
-        let signed1 = update1
-            .announce_singleton(
-                &beacon_address,
-                &[prevout1],
-                1_000,
-                &beacon_address,
-                source_beacon_secret_key(),
-            )
-            .expect("announce update #1");
+        let unsigned1 = update1
+            .build_unsigned(&beacon_address, &[prevout1], 1_000, &beacon_address)
+            .expect("build_unsigned update #1");
+        let signed1 = crate::test_signing::sign_and_finalize_for_test(
+            &unsigned1,
+            &source_beacon_secret_key(),
+        )
+        .expect("announce update #1");
         let (_addr2, prevout2) =
             beacon_prevout(&genesis, |a| a.script_pubkey().is_v0_p2wpkh(), 10_000);
-        let signed2 = deactivate
-            .announce_singleton(
-                &beacon_address,
-                &[prevout2],
-                1_000,
-                &beacon_address,
-                source_beacon_secret_key(),
-            )
-            .expect("announce the deactivate update");
+        let unsigned2 = deactivate
+            .build_unsigned(&beacon_address, &[prevout2], 1_000, &beacon_address)
+            .expect("build_unsigned the deactivate update");
+        let signed2 = crate::test_signing::sign_and_finalize_for_test(
+            &unsigned2,
+            &source_beacon_secret_key(),
+        )
+        .expect("announce the deactivate update");
         let bridged1 = bridge_to_esplora(&signed1, 100, 1_700_000_000);
         let bridged2 = bridge_to_esplora(&signed2, 101, 1_700_000_100);
 

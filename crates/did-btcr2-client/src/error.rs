@@ -97,6 +97,16 @@ pub enum Error {
     /// the measured-vsize fee exact).
     RateFeeRequiresMultipleInputs,
 
+    /// A fee rate was not a usable positive, finite sat/vB value (a negative,
+    /// zero, `NaN`, or infinite rate — e.g. from a malformed `/fee-estimates`
+    /// response or a bad CLI value). Rejected up front rather than coerced to a
+    /// zero-sat fee that would produce a non-relayable transaction.
+    #[error("invalid fee rate {rate} sat/vB: expected a positive, finite value")]
+    InvalidFeeRate {
+        /// The offending rate.
+        rate: f64,
+    },
+
     /// `POST /tx` was rejected (non-2xx) by the broadcast endpoint.
     #[error("broadcast rejected: {body}")]
     BroadcastRejected {

@@ -255,7 +255,7 @@ fn e2e_four_operations_roundtrip() {
         .document
         .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
         .expect("the update constructs against the genesis document");
-    let _txid = client
+    let update_txid = client
         .update(
             &first.document,
             benign_patch(&vm_id),
@@ -272,6 +272,22 @@ fn e2e_four_operations_roundtrip() {
     // The broadcast tx's last output is OP_RETURN <32 bytes> (the beacon signal).
     // (Asserted indirectly: the re-resolve below only reaches version 2 if the
     // announce tx carries the matching 32-byte signal.)
+
+    // SC#3 (split-explicit): the txid the client returns is exactly the finalized
+    // tx it POSTed — the fake serves that POSTed tx back on /txs keyed by its real
+    // txid, so a finalize regression (a witness/script_sig that changes the txid,
+    // or a tx the transport rejects) is caught HERE on the build→sign→finalize→
+    // broadcast path, not only in the core unit tests.
+    assert_eq!(
+        state
+            .served_txs
+            .borrow()
+            .last()
+            .and_then(|t| t.get("txid").and_then(|v| v.as_str()))
+            .map(str::to_owned),
+        Some(update_txid.to_string()),
+        "the returned update txid matches the finalized tx accepted by broadcast",
+    );
 
     // 4. Mid-sequence re-resolve → the version-2 document (via re-resolution, not
     //    in-crate update application). /txs now serves [update1]; the sidecar

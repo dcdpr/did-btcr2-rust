@@ -125,61 +125,56 @@ impl Update {
         }
     }
 
-    /// Build a fully signed singleton-beacon announcement transaction.
+    /// Build an **unsigned** singleton-beacon announcement transaction plus each
+    /// input's precomputed sighash.
     ///
-    /// Sans-I/O primitive: given this signed update plus a singleton
-    /// beacon's funding inputs and key material, produce a
-    /// [`SignedBeaconTx`](crate::SignedBeaconTx) whose **last** output is
-    /// `OP_RETURN <32-byte JSON Document Hash>` (the resolver reads only
-    /// `outputs.last()`). The 32 signal bytes are `self.hash().0` — the same
-    /// value the resolver's sidecar `update_lookup_table` keys on.
+    /// Sans-I/O primitive and **keyless**: given this signed update plus a
+    /// singleton beacon's funding inputs, produce an
+    /// [`UnsignedBeaconTx`](crate::UnsignedBeaconTx) whose transaction's **last**
+    /// output is `OP_RETURN <32-byte JSON Document Hash>` (the resolver reads
+    /// only `outputs.last()`). The 32 signal bytes are `self.hash().0` — the same
+    /// value the resolver's sidecar `update_lookup_table` keys on. No beacon
+    /// secret key crosses into the core: the caller signs the returned sighashes
+    /// (where the beacon key lives) and finalizes into a
+    /// [`SignedBeaconTx`](crate::SignedBeaconTx).
     ///
-    /// All supplied `prevouts` are signed with the single `beacon_secret_key`
-    /// (see the [`Prevout`](crate::Prevout) API contract). The signing scheme
-    /// for each input is inferred from its `script_pubkey`:
+    /// The signing scheme for each input is inferred from its `script_pubkey`:
     /// P2PKH (legacy ECDSA), P2WPKH (segwit-v0 ECDSA), or P2TR (key-path
     /// Schnorr/BIP340). Any other script type yields
     /// [`AnnounceError::UnsupportedScriptType`](crate::AnnounceError::UnsupportedScriptType).
+    /// All sighashes are computed on the fully-unsigned transaction (every input
+    /// still has an empty `script_sig`/witness), so a later input's sighash never
+    /// observes an earlier input's signature.
     ///
     /// Outputs are `[change?, op_return]`: a change output is emitted (before the
     /// OP_RETURN) only when `change > dust`; when `change <= dust` the remainder
     /// folds into the fee. `change = sum(prevouts) - fee` (the OP_RETURN output
-    /// has value 0); an absolute `fee` is used with no vsize/feerate estimation
-    /// Broadcasting the returned transaction is the caller's
-    /// responsibility (sans-I/O purity).
+    /// has value 0); an absolute `fee` is used with no vsize/feerate estimation.
+    /// Broadcasting the finalized transaction is the caller's responsibility
+    /// (sans-I/O purity).
     ///
-    /// # Secret-key handling (deliberate scope)
+    /// # No secret key (deliberate scope)
     ///
-    /// `beacon_secret_key` is a raw [`secp256k1::SecretKey`] (a `Copy` type with
-    /// no `Drop`), NOT the crate's zeroize-on-drop [`crate::key::SecretKey`].
-    /// This is a known, deliberate asymmetry: the update-signing key was
-    /// hardened to zeroize-on-drop, but the beacon key — which signs the Bitcoin
-    /// announcement inputs and is at least as sensitive — is not yet. Because it
-    /// is `Copy` and never scrubbed, its 32 bytes are copied at every call
-    /// boundary and left in memory on drop. Migrating the beacon path to the
-    /// zeroizing newtype (extracting `.as_inner()` at each signing site, as the
-    /// update path does) is tracked follow-up work; it touches the facade and
-    /// CLI signatures too, so it is intentionally out of scope here rather than
-    /// left as a silent gap.
-    pub fn announce_singleton(
+    /// This build path is **keyless**: no beacon secret key is a parameter, so
+    /// none is copied into or scrubbed from the core. The beacon key stays with
+    /// the wallet, which signs the returned [`Sighash`](crate::Sighash) values
+    /// and cross-checks prevout ownership at the signing site.
+    pub fn build_unsigned(
         &self,
         beacon_address: &esploda::bitcoin::Address,
         prevouts: &[crate::beacon::Prevout],
         fee: u64,
         change_address: &esploda::bitcoin::Address,
-        beacon_secret_key: secp256k1::SecretKey,
-    ) -> Result<crate::beacon::SignedBeaconTx, crate::beacon::AnnounceError> {
-        use crate::beacon::{AnnounceError, SignedBeaconTx};
+    ) -> Result<crate::beacon::UnsignedBeaconTx, crate::beacon::AnnounceError> {
+        use crate::beacon::{
+            AnnounceError, BeaconInput, BeaconInputScheme, Sighash, UnsignedBeaconTx,
+        };
         use esploda::bitcoin::{
-            PublicKey, ScriptBuf, Transaction, TxIn, TxOut, Witness,
+            ScriptBuf, Transaction, TxIn, TxOut, Witness,
             absolute::LockTime,
             blockdata::script::{Builder, PushBytesBuf},
-            ecdsa,
             hashes::Hash,
-            key::TapTweak,
-            secp256k1::{KeyPair, Message, Secp256k1},
             sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType},
-            taproot,
         };
 
         // The beacon_address is part of the announce contract (the signal is
@@ -241,7 +236,7 @@ impl Update {
                 witness: Witness::new(),
             })
             .collect();
-        let mut tx = Transaction {
+        let tx = Transaction {
             version: 2,
             lock_time: LockTime::ZERO,
             input,
@@ -258,66 +253,22 @@ impl Update {
             })
             .collect();
 
-        let secp = Secp256k1::new();
-        let bitcoin_pubkey = PublicKey::new(beacon_secret_key.public_key(&secp));
-
-        // 6. Sign each input by scheme inferred from its scriptPubKey.
+        // 6. Precompute EVERY input's sighash on the fully-unsigned tx (all
+        //    script_sigs/witnesses still empty), so a later input's sighash never
+        //    observes an earlier input's signature. No secret key is touched: the
+        //    scheme is inferred from the prevout scriptPubKey and the ownership
+        //    cross-check relocates to the signing site (where the beacon key
+        //    lives).
+        let mut inputs = Vec::with_capacity(prevouts.len());
         for (idx, prevout) in prevouts.iter().enumerate() {
             let spk = &prevout.script_pubkey;
             let value = prevout.value;
 
-            // Ownership cross-check: derive the script that `beacon_secret_key`
-            // actually controls for this scheme and require it to match the
-            // prevout's scriptPubKey. Without this, a prevout locked to a
-            // foreign key would be "signed" with a wrong-key signature and
-            // yield a silently invalid, fund-committing transaction. This
-            // mirrors Guard 3 on the update-signing path (a secret key that
-            // does not match the method's public key is rejected). It cannot
-            // reject a prevout the key genuinely owns: a matching script still
-            // matches. Unsupported script types fall through to the existing
-            // `UnsupportedScriptType` arm below (nothing to cross-check).
-            let expected_spk = if spk.is_p2pkh() {
-                Some(ScriptBuf::new_p2pkh(&bitcoin_pubkey.pubkey_hash()))
-            } else if spk.is_v0_p2wpkh() {
-                match bitcoin_pubkey.wpubkey_hash() {
-                    Some(wpkh) => Some(ScriptBuf::new_v0_p2wpkh(&wpkh)),
-                    // A compressed key (which this always is) has a wpubkey_hash;
-                    // treat the absence defensively as a non-owning mismatch.
-                    None => return Err(AnnounceError::KeyDoesNotOwnPrevout { index: idx }),
-                }
-            } else if spk.is_v1_p2tr() {
-                // new_v1_p2tr applies the BIP341 key-path tweak internally, so
-                // this compares the *tweaked* output key — the same key the
-                // signing branch below signs with.
-                let internal_key = beacon_secret_key.x_only_public_key(&secp).0;
-                Some(ScriptBuf::new_v1_p2tr(&secp, internal_key, None))
-            } else {
-                None
-            };
-            if let Some(expected_spk) = expected_spk
-                && &expected_spk != spk
-            {
-                return Err(AnnounceError::KeyDoesNotOwnPrevout { index: idx });
-            }
-
-            if spk.is_p2pkh() {
+            let (sighash_bytes, scheme): ([u8; 32], BeaconInputScheme) = if spk.is_p2pkh() {
                 let sighash = SighashCache::new(&tx)
                     .legacy_signature_hash(idx, spk, EcdsaSighashType::All as u32)
                     .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                let msg = Message::from_slice(sighash.as_byte_array())
-                    .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                let sig = ecdsa::Signature {
-                    sig: secp.sign_ecdsa(&msg, &beacon_secret_key),
-                    hash_ty: EcdsaSighashType::All,
-                };
-                let sig_bytes = sig.to_vec();
-                let sig_push =
-                    <&esploda::bitcoin::script::PushBytes>::try_from(sig_bytes.as_slice())
-                        .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                tx.input[idx].script_sig = Builder::new()
-                    .push_slice(sig_push)
-                    .push_key(&bitcoin_pubkey)
-                    .into_script();
+                (*sighash.as_byte_array(), BeaconInputScheme::P2pkh)
             } else if spk.is_v0_p2wpkh() {
                 let script_code = spk
                     .p2wpkh_script_code()
@@ -325,16 +276,7 @@ impl Update {
                 let sighash = SighashCache::new(&tx)
                     .segwit_signature_hash(idx, &script_code, value, EcdsaSighashType::All)
                     .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                let msg = Message::from_slice(sighash.as_byte_array())
-                    .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                let sig = ecdsa::Signature {
-                    sig: secp.sign_ecdsa(&msg, &beacon_secret_key),
-                    hash_ty: EcdsaSighashType::All,
-                };
-                let mut w = Witness::new();
-                w.push(sig.to_vec());
-                w.push(bitcoin_pubkey.to_bytes());
-                tx.input[idx].witness = w;
+                (*sighash.as_byte_array(), BeaconInputScheme::P2wpkh)
             } else if spk.is_v1_p2tr() {
                 let sighash = SighashCache::new(&tx)
                     .taproot_key_spend_signature_hash(
@@ -343,27 +285,22 @@ impl Update {
                         TapSighashType::Default,
                     )
                     .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                let msg = Message::from_slice(sighash.as_byte_array())
-                    .map_err(|e| AnnounceError::Signing(e.to_string()))?;
-                // BIP341 key-path tweak: sign with the tweaked key, not the
-                // internal key (an untweaked sig fails Script::verify).
-                let untweaked = KeyPair::from_secret_key(&secp, &beacon_secret_key);
-                let tweaked = untweaked.tap_tweak(&secp, None);
-                let schnorr = secp.sign_schnorr_no_aux_rand(&msg, &tweaked.to_inner());
-                let sig = taproot::Signature {
-                    sig: schnorr,
-                    hash_ty: TapSighashType::Default,
-                };
-                let mut w = Witness::new();
-                w.push(sig.to_vec());
-                tx.input[idx].witness = w;
+                (*sighash.as_byte_array(), BeaconInputScheme::P2tr)
             } else {
                 return Err(AnnounceError::UnsupportedScriptType);
-            }
+            };
+
+            inputs.push(BeaconInput {
+                input_index: idx,
+                sighash: Sighash::from(sighash_bytes),
+                scheme,
+                value,
+                script_pubkey: spk.clone(),
+            });
         }
 
-        // 7. Internal infallible producer — the tx was built valid here.
-        Ok(SignedBeaconTx(tx))
+        // 7. Internal infallible producer — the unsigned tx was built valid here.
+        Ok(UnsignedBeaconTx { tx, inputs })
     }
 }
 
@@ -730,7 +667,7 @@ mod tests {
         }
     }
 
-    // ---- announce_singleton tests -----------------
+    // ---- build_unsigned + beacon-announce tests -----------------
 
     use crate::beacon::{AnnounceError, Prevout};
     use esploda::bitcoin::{
@@ -746,7 +683,7 @@ mod tests {
     }
 
     /// A signed Update to announce. The golden fixture is a real signed update;
-    /// `announce_singleton` only consumes `self.hash()`, so any valid Update
+    /// `build_unsigned` only consumes `self.hash()`, so any valid Update
     /// works as the signal source.
     fn sample_signed_update() -> Update {
         let raw = include_str!("../fixtures/spec-form/golden-signed-update.json");
@@ -799,9 +736,10 @@ mod tests {
             script_pubkey: addr.script_pubkey(),
         }];
 
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let tx = signed.as_tx();
 
         let last = tx.output.last().expect("has outputs");
@@ -825,9 +763,10 @@ mod tests {
             script_pubkey: addr.script_pubkey(),
         }];
 
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let last = signed.as_tx().output.last().expect("has outputs");
         assert!(last.script_pubkey.is_op_return());
         let ops: Vec<_> = last.script_pubkey.instructions().flatten().collect();
@@ -849,9 +788,10 @@ mod tests {
             script_pubkey: addr.script_pubkey(),
         }];
 
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let last = signed.as_tx().output.last().expect("has outputs");
         assert!(last.script_pubkey.is_op_return());
         let ops: Vec<_> = last.script_pubkey.instructions().flatten().collect();
@@ -875,9 +815,10 @@ mod tests {
             value,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let serialized = consensus::encode::serialize(signed.as_tx());
         addr.script_pubkey()
             .verify(0, Amount::from_sat(value), &serialized)
@@ -895,9 +836,10 @@ mod tests {
             value,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let serialized = consensus::encode::serialize(signed.as_tx());
         addr.script_pubkey()
             .verify(0, Amount::from_sat(value), &serialized)
@@ -966,9 +908,10 @@ mod tests {
             value,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let all_txouts = txouts_of(&prevouts);
         assert!(
             p2tr_sig_verifies(signed.as_tx(), 0, &all_txouts),
@@ -992,9 +935,10 @@ mod tests {
             value,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let mut tx = signed.into_inner();
         // Flip a byte in the scriptSig (the signature push lives there for P2PKH).
         let mut bytes = tx.input[0].script_sig.to_bytes();
@@ -1020,9 +964,10 @@ mod tests {
             value,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let mut tx = signed.into_inner();
         // Flip a byte in witness element 0 (the signature).
         let mut w = tx.input[0].witness.to_vec();
@@ -1052,9 +997,10 @@ mod tests {
             value,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let mut tx = signed.into_inner();
         // Flip a byte in witness element 0 (the 64-byte Schnorr signature).
         let mut w = tx.input[0].witness.to_vec();
@@ -1099,9 +1045,11 @@ mod tests {
                 script_pubkey: tr.script_pubkey(),
             },
         ];
-        let signed = update
-            .announce_singleton(&tr, &prevouts, 1_000, &change_address(), sk)
-            .expect("multi-input announce succeeds");
+        let unsigned = update
+            .build_unsigned(&tr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk)
+            .expect("multi-input sign");
         let tx = signed.as_tx();
         assert_eq!(tx.input.len(), 2);
         assert!(tx.output.last().unwrap().script_pubkey.is_op_return());
@@ -1132,9 +1080,10 @@ mod tests {
             value: 1_000_000,
             script_pubkey: addr.script_pubkey(),
         }];
-        let signed = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
-            .expect("announce succeeds");
+        let unsigned = update
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
+            .expect("build_unsigned");
+        let signed = crate::test_signing::sign_and_finalize_for_test(&unsigned, &sk).expect("sign");
         let tx = signed.as_tx();
         assert_eq!(tx.output.len(), 2, "change output + OP_RETURN");
         assert!(
@@ -1163,9 +1112,11 @@ mod tests {
             value: dust + 50_000,
             script_pubkey: addr.script_pubkey(),
         }];
-        let big = update
-            .announce_singleton(&addr, &prevouts_big, 1_000, &change_addr, sk)
-            .expect("announce succeeds");
+        let big_unsigned = update
+            .build_unsigned(&addr, &prevouts_big, 1_000, &change_addr)
+            .expect("build_unsigned");
+        let big =
+            crate::test_signing::sign_and_finalize_for_test(&big_unsigned, &sk).expect("sign");
         assert_eq!(big.as_tx().output.len(), 2, "change above dust is emitted");
 
         // Case B: change == fee makes change 0 (<= dust) → no change (1 output).
@@ -1174,9 +1125,11 @@ mod tests {
             value: 1_000,
             script_pubkey: addr.script_pubkey(),
         }];
-        let small = update
-            .announce_singleton(&addr, &prevouts_small, 1_000, &change_addr, sk)
-            .expect("announce succeeds");
+        let small_unsigned = update
+            .build_unsigned(&addr, &prevouts_small, 1_000, &change_addr)
+            .expect("build_unsigned");
+        let small =
+            crate::test_signing::sign_and_finalize_for_test(&small_unsigned, &sk).expect("sign");
         assert_eq!(
             small.as_tx().output.len(),
             1,
@@ -1193,7 +1146,7 @@ mod tests {
         let sk = test_secret_key();
         let addr = p2wpkh_address(&sk);
         let err = update
-            .announce_singleton(&addr, &[], 0, &change_address(), sk)
+            .build_unsigned(&addr, &[], 0, &change_address())
             .expect_err("empty prevouts must be rejected");
         assert!(matches!(err, AnnounceError::NoPrevouts));
     }
@@ -1211,7 +1164,7 @@ mod tests {
             script_pubkey: addr.script_pubkey(),
         }];
         let err = update
-            .announce_singleton(&addr, &prevouts, 1_000, &change_address(), sk)
+            .build_unsigned(&addr, &prevouts, 1_000, &change_address())
             .expect_err("fee > inputs must be rejected");
         assert!(matches!(
             err,
@@ -1243,14 +1196,15 @@ mod tests {
             value: 100_000,
             script_pubkey: p2pkh_address(&foreign).script_pubkey(),
         }];
-        let err = update
-            .announce_singleton(
+        let unsigned = update
+            .build_unsigned(
                 &p2pkh_address(&signing_sk),
                 &prevouts,
                 1_000,
                 &change_address(),
-                signing_sk,
             )
+            .expect("keyless build succeeds on a foreign-but-valid scriptPubKey");
+        let err = crate::test_signing::sign_and_finalize_for_test(&unsigned, &signing_sk)
             .expect_err("a P2PKH prevout the beacon key does not own must be rejected");
         assert!(matches!(
             err,
@@ -1268,14 +1222,15 @@ mod tests {
             value: 100_000,
             script_pubkey: p2wpkh_address(&foreign).script_pubkey(),
         }];
-        let err = update
-            .announce_singleton(
+        let unsigned = update
+            .build_unsigned(
                 &p2wpkh_address(&signing_sk),
                 &prevouts,
                 1_000,
                 &change_address(),
-                signing_sk,
             )
+            .expect("keyless build succeeds on a foreign-but-valid scriptPubKey");
+        let err = crate::test_signing::sign_and_finalize_for_test(&unsigned, &signing_sk)
             .expect_err("a P2WPKH prevout the beacon key does not own must be rejected");
         assert!(matches!(
             err,
@@ -1295,14 +1250,15 @@ mod tests {
             value: 100_000,
             script_pubkey: p2tr_address(&foreign).script_pubkey(),
         }];
-        let err = update
-            .announce_singleton(
+        let unsigned = update
+            .build_unsigned(
                 &p2tr_address(&signing_sk),
                 &prevouts,
                 1_000,
                 &change_address(),
-                signing_sk,
             )
+            .expect("keyless build succeeds on a foreign-but-valid scriptPubKey");
+        let err = crate::test_signing::sign_and_finalize_for_test(&unsigned, &signing_sk)
             .expect_err("a P2TR prevout the beacon key does not own must be rejected");
         assert!(matches!(
             err,
@@ -1329,14 +1285,15 @@ mod tests {
                 script_pubkey: p2wpkh_address(&foreign).script_pubkey(),
             },
         ];
-        let err = update
-            .announce_singleton(
+        let unsigned = update
+            .build_unsigned(
                 &p2wpkh_address(&signing_sk),
                 &prevouts,
                 1_000,
                 &change_address(),
-                signing_sk,
             )
+            .expect("keyless build succeeds on foreign-but-valid scriptPubKeys");
+        let err = crate::test_signing::sign_and_finalize_for_test(&unsigned, &signing_sk)
             .expect_err("the second, foreign-owned prevout must be rejected");
         assert!(matches!(
             err,

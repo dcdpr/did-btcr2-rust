@@ -32,8 +32,14 @@ mod json_tools;
 mod update;
 mod zcap;
 
+#[cfg(test)]
+mod test_signing;
+
 // Re-exports of key components
-pub use beacon::{AnnounceError, Prevout, SignedBeaconTx};
+pub use beacon::{
+    AnnounceError, BeaconInput, BeaconInputScheme, Prevout, Sig, Sighash, SignedBeaconTx,
+    UnsignedBeaconTx,
+};
 pub use document::{
     Document, DocumentMetadata, ResolutionMetadata, ResolutionOptions, ResolutionResult,
 };

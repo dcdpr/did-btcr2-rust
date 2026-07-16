@@ -9,10 +9,9 @@
 //! measured transaction vsize.
 //!
 //! Coin-selection target: the target is `needed = absolute_fee`
-//! ONLY — NOT `fee + dust`. The core [`announce_singleton`](did_btcr2::Update::announce_singleton)
-//! folds sub-dust change into the fee (verified update.rs:139-213), so a UTXO that
-//! covers exactly the fee (leaving sub-dust change) is fundable and must not be
-//! rejected.
+//! ONLY — NOT `fee + dust`. The core [`Update::build_unsigned`](did_btcr2::Update::build_unsigned)
+//! folds sub-dust change into the fee, so a UTXO that covers exactly the fee
+//! (leaving sub-dust change) is fundable and must not be rejected.
 
 use std::collections::BTreeMap;
 
@@ -141,10 +140,20 @@ pub fn rate_from_estimates(estimates: &BTreeMap<u16, f64>, target: u16) -> Resul
 
 /// Resolve a [`Fee`] to an absolute sats fee given a (measured or provisional)
 /// vsize. `Absolute(n) => n`; `Rate(r) => ceil(r * vsize)`.
-pub fn resolve_fee(fee: Fee, vsize: u64) -> u64 {
+///
+/// A `Rate` must be a positive, finite sat/vB value. A negative, zero, `NaN`, or
+/// infinite rate is rejected with [`Error::InvalidFeeRate`] rather than being
+/// silently coerced by `as u64` to a zero-sat fee (which would build a
+/// non-relayable transaction that fails to propagate at broadcast time).
+pub fn resolve_fee(fee: Fee, vsize: u64) -> Result<u64, Error> {
     match fee {
-        Fee::Absolute(n) => n,
-        Fee::Rate(r) => (r * vsize as f64).ceil() as u64,
+        Fee::Absolute(n) => Ok(n),
+        Fee::Rate(r) => {
+            if r <= 0.0 || !r.is_finite() {
+                return Err(Error::InvalidFeeRate { rate: r });
+            }
+            Ok((r * vsize as f64).ceil() as u64)
+        }
     }
 }
 
@@ -303,11 +312,39 @@ mod tests {
     #[test]
     fn fee_rate_to_absolute() {
         // ceil(2.5 * 140) = 350.
-        assert_eq!(resolve_fee(Fee::Rate(2.5), 140), 350);
+        assert_eq!(
+            resolve_fee(Fee::Rate(2.5), 140).expect("positive rate"),
+            350
+        );
         // ceil(1.0 * 200) = 200.
-        assert_eq!(resolve_fee(Fee::Rate(1.0), 200), 200);
-        // Absolute passes through unchanged.
-        assert_eq!(resolve_fee(Fee::Absolute(1_234), 9_999), 1_234);
+        assert_eq!(
+            resolve_fee(Fee::Rate(1.0), 200).expect("positive rate"),
+            200
+        );
+        // Absolute passes through unchanged (no rate validation).
+        assert_eq!(
+            resolve_fee(Fee::Absolute(1_234), 9_999).expect("absolute is always valid"),
+            1_234
+        );
+    }
+
+    #[test]
+    fn fee_rate_rejects_non_positive_or_non_finite() {
+        // A zero, negative, NaN, or infinite rate is a typed error, NOT a
+        // 0-sat fee (which `as u64` would otherwise silently produce).
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = resolve_fee(Fee::Rate(bad), 140)
+                .expect_err("a non-positive/non-finite rate must be rejected");
+            match err {
+                Error::InvalidFeeRate { rate } => {
+                    assert!(
+                        rate == bad || (rate.is_nan() && bad.is_nan()),
+                        "the error carries the offending rate"
+                    );
+                }
+                other => panic!("expected InvalidFeeRate, got {other:?}"),
+            }
+        }
     }
 
     #[test]

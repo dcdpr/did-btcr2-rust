@@ -94,7 +94,7 @@ impl PublicKeyExt for PublicKey {
 /// A secp256k1 secret key that zeroizes its bytes on drop.
 ///
 /// Wraps [`secp256k1::SecretKey`]; the inner key is exposed only at the final
-/// point of use (the sign boundary) via [`SecretKey::as_inner`]. The owned
+/// point of use (the sign boundary) via the crate-private `as_inner`. The owned
 /// bytes are scrubbed to `[1u8; 32]` when the value drops, so a used-and-dropped
 /// secret key does not linger in process memory.
 pub struct SecretKey(Secp256k1SecretKey);

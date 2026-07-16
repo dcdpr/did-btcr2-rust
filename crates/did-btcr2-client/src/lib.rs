@@ -16,6 +16,7 @@ mod client;
 mod error;
 mod esplora;
 mod funding;
+mod signing;
 mod transport;
 mod url;
 
@@ -25,6 +26,7 @@ pub use funding::{
     DEFAULT_CONF_TARGET, EsploraUtxo, Fee, fetch_fee_estimates, fetch_utxos, rate_from_estimates,
     resolve_fee, select,
 };
+pub use signing::sign_beacon_tx;
 pub use transport::{BtcTransport, UreqTransport};
 pub use url::{network_base_url, resolve_base_url};
 

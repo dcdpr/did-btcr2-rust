@@ -167,14 +167,15 @@ impl Beacon {
 /// of truth, no separate kind tag.
 ///
 /// API contract: every `Prevout` passed to
-/// [`Update::announce_singleton`](crate::Update::announce_singleton) is signed
-/// with the SAME `beacon_secret_key`, so each must be spendable by that key.
-/// This is a sans-I/O primitive — it does not perform any UTXO I/O — but before
-/// signing it DOES cross-check ownership: for each prevout it derives the
-/// expected script from `beacon_secret_key`'s public key (the key-hash for
-/// P2PKH/P2WPKH, the tweaked output key for P2TR) and compares it against
-/// `script_pubkey`, returning
-/// [`AnnounceError::KeyDoesNotOwnPrevout`](crate::AnnounceError::KeyDoesNotOwnPrevout)
+/// [`Update::build_unsigned`](crate::Update::build_unsigned) contributes one
+/// input to the [`UnsignedBeaconTx`], and each must be
+/// spendable by the beacon key that will sign the returned sighashes. The
+/// keyless build path does not touch any secret; the ownership cross-check
+/// therefore runs at the SIGNING site (where the beacon key lives): for each
+/// prevout the signer derives the expected script from the beacon key's public
+/// key (the key-hash for P2PKH/P2WPKH, the tweaked output key for P2TR) and
+/// compares it against `script_pubkey`, returning
+/// [`AnnounceError::KeyDoesNotOwnPrevout`]
 /// on mismatch rather than emitting a silently invalid, fund-committing
 /// transaction. (Whether the outpoint is unspent is still the caller's I/O
 /// concern.)
@@ -192,9 +193,9 @@ pub struct Prevout {
 ///
 /// Newtype over [`esploda::bitcoin::Transaction`] carrying the "valid singleton
 /// beacon signal" invariant: the last output is `OP_RETURN <32-byte push>` (the
-/// JSON Document Hash of the announced update). The internal infallible producer
-/// ([`Update::announce_singleton`](crate::Update::announce_singleton)) builds it
-/// directly; the public [`TryFrom`] validates the invariant for externally-built
+/// JSON Document Hash of the announced update). The core assembles it from an
+/// [`UnsignedBeaconTx`] plus the caller's signatures;
+/// the public [`TryFrom`] validates the invariant for externally-built
 /// transactions (parse-don't-validate). The caller extracts the inner
 /// transaction at broadcast time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +212,214 @@ impl SignedBeaconTx {
     pub fn as_tx(&self) -> &esploda::bitcoin::Transaction {
         &self.0
     }
+}
+
+/// Which of the three default beacon signing schemes a funding input uses.
+///
+/// Resolved at build time from the prevout scriptPubKey; carried in the handback
+/// so finalize/sign are type-driven rather than re-classifying the script.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BeaconInputScheme {
+    /// Legacy pay-to-pubkey-hash (ECDSA, `script_sig`).
+    P2pkh,
+    /// SegWit v0 pay-to-witness-pubkey-hash (ECDSA, witness).
+    P2wpkh,
+    /// Taproot key-path (BIP340 Schnorr, witness).
+    P2tr,
+}
+
+/// The per-input message-to-sign in the construct/sign handback.
+///
+/// A BIP341 taproot sighash is a *tagged* hash and the legacy/segwit sighashes
+/// are double-SHA256 — none is a plain SHA-256 digest — so this is a dedicated
+/// domain newtype, NOT a reuse of
+/// [`Sha256Hash`](crate::identifier::Sha256Hash). Fixed 32-byte structural
+/// invariant; follows the repo two-constructor newtype rule
+/// ([`From<[u8; 32]>`](Sighash::from) infallible +
+/// [`TryFrom<Vec<u8>>`](Sighash::try_from) length-validating), no
+/// `to_hex`/`from_hex` — callers extract via [`as_bytes`](Sighash::as_bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sighash([u8; 32]);
+
+impl From<[u8; 32]> for Sighash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl TryFrom<Vec<u8>> for Sighash {
+    type Error = AnnounceError;
+
+    fn try_from(v: Vec<u8>) -> Result<Self, Self::Error> {
+        let len = v.len();
+        let arr: [u8; 32] = v
+            .try_into()
+            .map_err(|_| AnnounceError::InvalidSighashLength { len })?;
+        Ok(Self(arr))
+    }
+}
+
+impl Sighash {
+    /// The raw 32 sighash bytes. Extract only at the point of signing.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// One funding input of an unsigned beacon-announcement tx, with its
+/// precomputed sighash.
+///
+/// Keeps `value` + `script_pubkey` so a later non-breaking
+/// `From<UnsignedBeaconTx> for Psbt` stays possible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeaconInput {
+    /// Index of this input within the unsigned transaction.
+    pub input_index: usize,
+    /// The precomputed sighash the caller must sign for this input.
+    pub sighash: Sighash,
+    /// The signing scheme resolved from the prevout scriptPubKey.
+    pub scheme: BeaconInputScheme,
+    /// The value of the spent output, in satoshis.
+    pub value: u64,
+    /// The scriptPubKey of the spent output.
+    pub script_pubkey: esploda::bitcoin::ScriptBuf,
+}
+
+/// A built-but-unsigned singleton-beacon announcement.
+///
+/// The unsigned transaction plus each input's precomputed sighash. The core
+/// produces this (no secret key); the wallet signs the sighashes and hands
+/// `Vec<Sig>` to `finalize`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsignedBeaconTx {
+    pub(crate) tx: esploda::bitcoin::Transaction,
+    pub(crate) inputs: Vec<BeaconInput>,
+}
+
+impl UnsignedBeaconTx {
+    /// Borrow the unsigned transaction (e.g. to compute a fee or inspect
+    /// outputs).
+    pub fn as_tx(&self) -> &esploda::bitcoin::Transaction {
+        &self.tx
+    }
+
+    /// The per-input handback entries, in transaction input order.
+    pub fn inputs(&self) -> &[BeaconInput] {
+        &self.inputs
+    }
+
+    /// Deterministic predicted vsize for `Fee::Rate` resolution — no signing, no
+    /// throwaway keys.
+    ///
+    /// EXACT for the P2TR key-path default-sighash beacon (64-byte Schnorr); an
+    /// upper bound for P2WPKH/P2PKH (ECDSA DER length varies), which never
+    /// under-pays the fee. `to_vbytes_ceil()` is `(wu + 3) / 4`, the same math
+    /// [`Transaction::vsize`](esploda::bitcoin::Transaction::vsize) uses, so for
+    /// the P2TR default-sighash case this equals the real signed tx's `vsize()`.
+    pub fn predicted_vsize(&self) -> u64 {
+        use esploda::bitcoin::transaction::{InputWeightPrediction, predict_weight};
+        // NB: the library consts `InputWeightPrediction::P2TR_KEY_DEFAULT_SIGHASH`
+        // (66-wu witness) and `InputWeightPrediction::P2WPKH_MAX` (109-wu witness)
+        // hardcode `script_size: 0`, which omits the 1-byte length prefix of the
+        // (empty) scriptSig that a real segwit input always serializes. Using
+        // them directly under-counts total vsize by exactly 1 byte per input,
+        // breaking the exact P2TR match the fee path relies on. We therefore
+        // build the equivalent predictions via `new`, whose scriptSig length
+        // prefix is counted correctly, reproducing the same witness sizes.
+        let preds: Vec<InputWeightPrediction> = self
+            .inputs
+            .iter()
+            .map(|i| match i.scheme {
+                // P2TR key-path default sighash: one 64-byte Schnorr witness
+                // element (the 66-wu witness of P2TR_KEY_DEFAULT_SIGHASH). EXACT.
+                BeaconInputScheme::P2tr => InputWeightPrediction::new(0usize, [64usize]),
+                // P2WPKH with the largest DER signature (the 109-wu witness of
+                // P2WPKH_MAX = [73-byte sig, 33-byte pubkey]). UPPER BOUND, since
+                // real ECDSA DER length varies — never under-pays.
+                BeaconInputScheme::P2wpkh => InputWeightPrediction::new(0usize, [73usize, 33usize]),
+                // P2PKH: no witness; script_sig ~= 1 + 73 (sig+sighash) + 1 + 33
+                // (pubkey) = 108 B, counted x4 in weight. UPPER BOUND.
+                BeaconInputScheme::P2pkh => {
+                    InputWeightPrediction::new(108usize, std::iter::empty::<usize>())
+                }
+            })
+            .collect();
+        let weight = predict_weight(preds, self.tx.script_pubkey_lens());
+        weight.to_vbytes_ceil()
+    }
+
+    /// Assemble the broadcastable signed transaction from caller signatures (one
+    /// per input, same order as [`inputs`](UnsignedBeaconTx::inputs)), then
+    /// re-assert the `OP_RETURN <32>` invariant by routing through
+    /// [`SignedBeaconTx::try_from`].
+    ///
+    /// Bitcoin tx-assembly stays in the tested core: the per-scheme
+    /// witness/`script_sig` is built here (P2TR: `[sig]`; P2WPKH: `[sig,
+    /// pubkey]`; P2PKH: `<sig><pubkey>` script_sig), so a signal-less tx cannot
+    /// be produced. A wrong number of signatures is a typed
+    /// [`Signing`](AnnounceError::Signing) error; a signature whose scheme does
+    /// not match the input's script type fails closed with
+    /// [`SignatureSchemeMismatch`](AnnounceError::SignatureSchemeMismatch)
+    /// rather than a panic or a misdiagnosing
+    /// [`UnsupportedScriptType`](AnnounceError::UnsupportedScriptType).
+    pub fn finalize(self, sigs: &[Sig]) -> Result<SignedBeaconTx, AnnounceError> {
+        use esploda::bitcoin::{Witness, blockdata::script::Builder, script::PushBytes};
+        if sigs.len() != self.inputs.len() {
+            return Err(AnnounceError::Signing(format!(
+                "expected {} signatures, got {}",
+                self.inputs.len(),
+                sigs.len()
+            )));
+        }
+        let mut tx = self.tx;
+        for (input, sig) in self.inputs.iter().zip(sigs) {
+            let idx = input.input_index;
+            match (input.scheme, sig) {
+                (BeaconInputScheme::P2tr, Sig::Schnorr(s)) => {
+                    let mut w = Witness::new();
+                    w.push(s.to_vec());
+                    tx.input[idx].witness = w;
+                }
+                (BeaconInputScheme::P2wpkh, Sig::Ecdsa { sig, pubkey }) => {
+                    let mut w = Witness::new();
+                    w.push(sig.to_vec());
+                    w.push(pubkey.to_bytes());
+                    tx.input[idx].witness = w;
+                }
+                (BeaconInputScheme::P2pkh, Sig::Ecdsa { sig, pubkey }) => {
+                    let sig_bytes = sig.to_vec();
+                    let sig_push = <&PushBytes>::try_from(sig_bytes.as_slice())
+                        .map_err(|e| AnnounceError::Signing(e.to_string()))?;
+                    tx.input[idx].script_sig = Builder::new()
+                        .push_slice(sig_push)
+                        .push_key(pubkey)
+                        .into_script();
+                }
+                // Scheme/Sig mismatch (e.g. a Schnorr sig for an ECDSA scheme):
+                // fail closed with the dedicated variant, NOT UnsupportedScriptType.
+                _ => return Err(AnnounceError::SignatureSchemeMismatch { index: idx }),
+            }
+        }
+        SignedBeaconTx::try_from(tx) // re-asserts OP_RETURN <32> (parse-don't-validate)
+    }
+}
+
+/// A caller-supplied signature for one input.
+///
+/// P2TR key-path needs only the Schnorr signature; P2WPKH/P2PKH additionally
+/// need the beacon [`PublicKey`](esploda::bitcoin::PublicKey) for witness /
+/// `script_sig` assembly (the core no longer derives it from the secret).
+#[derive(Clone, Debug)]
+pub enum Sig {
+    /// A BIP340 Schnorr signature for a P2TR key-path input.
+    Schnorr(esploda::bitcoin::taproot::Signature),
+    /// An ECDSA signature plus the beacon public key for a P2PKH/P2WPKH input.
+    Ecdsa {
+        /// The ECDSA signature over this input's sighash.
+        sig: esploda::bitcoin::ecdsa::Signature,
+        /// The beacon public key committed to by the prevout scriptPubKey.
+        pubkey: esploda::bitcoin::PublicKey,
+    },
 }
 
 /// Errors from building or validating a singleton-beacon announcement.
@@ -257,6 +466,75 @@ pub enum AnnounceError {
 
     /// Sighash computation or signing failed.
     Signing(String),
+
+    /// A caller-supplied signature's scheme does not match the input's script
+    /// type (e.g. a Schnorr signature paired with a P2WPKH input). Returned by
+    /// [`UnsignedBeaconTx::finalize`] — distinct from
+    /// [`UnsupportedScriptType`](AnnounceError::UnsupportedScriptType), which
+    /// would misdiagnose this caller-triggerable mismatch.
+    SignatureSchemeMismatch {
+        /// Index of the offending input within the handback.
+        index: usize,
+    },
+
+    /// A byte slice offered as a `Sighash` was not exactly 32 bytes.
+    InvalidSighashLength {
+        /// The actual byte length supplied.
+        len: usize,
+    },
+}
+
+/// BIP341 key-path tweak with NO merkle root (`d' = d + H_TapTweak(P)`).
+///
+/// Returns the tweaked [`KeyPair`](esploda::bitcoin::secp256k1::KeyPair) the
+/// wallet signs a P2TR key-path input with. The tweak modifies the *secret*, so
+/// it runs wallet-side (where the beacon key lives), but the finicky,
+/// fund-moving computation stays this single core helper rather than being
+/// reimplemented per wallet — pinned by the BIP341 known-answer test.
+pub fn beacon_taproot_tweak(
+    secp: &esploda::bitcoin::secp256k1::Secp256k1<esploda::bitcoin::secp256k1::All>,
+    beacon_sk: &esploda::bitcoin::secp256k1::SecretKey,
+) -> esploda::bitcoin::secp256k1::KeyPair {
+    use esploda::bitcoin::{key::TapTweak, secp256k1::KeyPair};
+    let untweaked = KeyPair::from_secret_key(secp, beacon_sk);
+    untweaked.tap_tweak(secp, None).to_inner()
+}
+
+/// Cross-check that `beacon_sk` actually controls `script_pubkey` for its scheme.
+///
+/// Derives the expected script (P2PKH/P2WPKH key-hash, or the P2TR *tweaked*
+/// output key) and compares it to `script_pubkey`. Fails closed with
+/// [`AnnounceError::KeyDoesNotOwnPrevout`] so a foreign-key prevout is never
+/// signed into a silently invalid, fund-committing transaction; `index` names
+/// the offending input for the caller. This guard is the primary mitigation for
+/// the beacon-signing ownership threat, and the P2TR arm's tweaked-key
+/// comparison is pinned permanently by the BIP341 known-answer test.
+pub fn check_prevout_ownership(
+    secp: &esploda::bitcoin::secp256k1::Secp256k1<esploda::bitcoin::secp256k1::All>,
+    beacon_sk: &esploda::bitcoin::secp256k1::SecretKey,
+    index: usize,
+    scheme: BeaconInputScheme,
+    script_pubkey: &esploda::bitcoin::ScriptBuf,
+) -> Result<(), AnnounceError> {
+    use esploda::bitcoin::{PublicKey, ScriptBuf};
+    let bitcoin_pubkey = PublicKey::new(beacon_sk.public_key(secp));
+    let expected = match scheme {
+        BeaconInputScheme::P2pkh => ScriptBuf::new_p2pkh(&bitcoin_pubkey.pubkey_hash()),
+        BeaconInputScheme::P2wpkh => match bitcoin_pubkey.wpubkey_hash() {
+            Some(wpkh) => ScriptBuf::new_v0_p2wpkh(&wpkh),
+            None => return Err(AnnounceError::KeyDoesNotOwnPrevout { index }),
+        },
+        // new_v1_p2tr applies the BIP341 key-path tweak internally — this
+        // compares the TWEAKED output key, the same key the wallet signs with.
+        BeaconInputScheme::P2tr => {
+            let internal = beacon_sk.x_only_public_key(secp).0;
+            ScriptBuf::new_v1_p2tr(secp, internal, None)
+        }
+    };
+    if &expected != script_pubkey {
+        return Err(AnnounceError::KeyDoesNotOwnPrevout { index });
+    }
+    Ok(())
 }
 
 /// Validate that an externally-built transaction is a well-formed singleton
@@ -301,6 +579,20 @@ impl TryFrom<esploda::bitcoin::Transaction> for SignedBeaconTx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Sighash::try_from(Vec<u8>)` is public API (the runtime-length-validating
+    /// constructor). A wrong-length input must be rejected with a typed
+    /// `InvalidSighashLength` carrying the actual length; exactly 32 bytes
+    /// succeed.
+    #[test]
+    fn sighash_try_from_validates_length() {
+        let err = Sighash::try_from(vec![0u8; 31]).expect_err("31 bytes is not a sighash");
+        assert!(
+            matches!(err, AnnounceError::InvalidSighashLength { len: 31 }),
+            "got {err:?}"
+        );
+        Sighash::try_from(vec![0u8; 32]).expect("32 bytes is a valid sighash");
+    }
 
     #[test]
     fn test_invalid_beacon_address_uri() {
@@ -532,5 +824,347 @@ mod tests {
         let err = SignedBeaconTx::try_from(tx)
             .expect_err("a script with a trailing instruction-parse error must be rejected");
         assert!(matches!(err, AnnounceError::MissingOpReturnSignal));
+    }
+
+    // ---- predicted_vsize: exact for P2TR default-sighash, bound for ECDSA
+
+    /// A 1-input / 2-output unsigned beacon tx with the given input scheme. The
+    /// input starts empty (no script_sig / witness); the two outputs (a change
+    /// script + an OP_RETURN 32-byte signal) mirror the real build shape so the
+    /// non-witness serialization matches an actual finalized tx.
+    fn unsigned_one_input(scheme: BeaconInputScheme) -> UnsignedBeaconTx {
+        use esploda::bitcoin::{OutPoint, Sequence, TxIn, Txid, Witness, hashes::Hash};
+        let spk =
+            ScriptBuf::new_v0_p2wpkh(&esploda::bitcoin::WPubkeyHash::from_byte_array([7u8; 20]));
+        let txin = TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0u8; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        };
+        let tx = Transaction {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            input: vec![txin],
+            output: vec![
+                TxOut {
+                    value: 90_000,
+                    script_pubkey: spk.clone(),
+                },
+                op_return_output(&[0x11u8; 32]),
+            ],
+        };
+        let input = BeaconInput {
+            input_index: 0,
+            sighash: Sighash::from([0u8; 32]),
+            scheme,
+            value: 100_000,
+            script_pubkey: spk,
+        };
+        UnsignedBeaconTx {
+            tx,
+            inputs: vec![input],
+        }
+    }
+
+    /// P2TR key-path default sighash uses a fixed 64-byte Schnorr signature, so
+    /// the prediction is EXACT: attaching a real 64-byte witness reproduces the
+    /// predicted vsize to the byte.
+    #[test]
+    fn predicted_vsize_p2tr_is_exact() {
+        use esploda::bitcoin::Witness;
+        let unsigned = unsigned_one_input(BeaconInputScheme::P2tr);
+        let mut signed = unsigned.as_tx().clone();
+        let mut w = Witness::new();
+        w.push([0u8; 64]); // 64-byte key-path default-sighash Schnorr signature
+        signed.input[0].witness = w;
+        assert_eq!(
+            unsigned.predicted_vsize(),
+            u64::try_from(signed.vsize()).expect("vsize fits u64"),
+            "P2TR default-sighash predicted vsize must equal the real signed vsize"
+        );
+    }
+
+    /// P2WPKH ECDSA signatures vary in DER length, so the prediction is an UPPER
+    /// BOUND (never under-pays): a representative ~72-byte-sig witness yields a
+    /// real vsize at or below the prediction.
+    #[test]
+    fn predicted_vsize_p2wpkh_is_upper_bound() {
+        use esploda::bitcoin::Witness;
+        let unsigned = unsigned_one_input(BeaconInputScheme::P2wpkh);
+        let mut signed = unsigned.as_tx().clone();
+        let mut w = Witness::new();
+        w.push([0u8; 72]); // representative max-length DER ECDSA signature
+        w.push([0u8; 33]); // compressed public key
+        signed.input[0].witness = w;
+        assert!(
+            unsigned.predicted_vsize() >= u64::try_from(signed.vsize()).expect("vsize fits u64"),
+            "P2WPKH predicted vsize must be an upper bound on the real signed vsize"
+        );
+    }
+
+    // ---- Task 1/2/3: tweak + ownership helpers, finalize, BIP341 KAT --------
+    mod sign_tests {
+        use super::super::{
+            AnnounceError, BeaconInputScheme, Sig, beacon_taproot_tweak, check_prevout_ownership,
+        };
+        use crate::Update;
+        use crate::beacon::Prevout;
+        use esploda::bitcoin::{
+            Address, Amount, Network as BtcNetwork, OutPoint, PublicKey, ScriptBuf, Txid,
+            consensus, ecdsa,
+            hashes::Hash as _,
+            secp256k1::{All, KeyPair, Message, Secp256k1, SecretKey, schnorr},
+            sighash::{EcdsaSighashType, TapSighashType},
+            taproot,
+        };
+
+        /// A deterministic beacon secret key.
+        fn test_secret_key() -> SecretKey {
+            SecretKey::from_slice(&[0x07; 32]).expect("0x07.. is a valid secret key")
+        }
+
+        fn p2pkh_address(secp: &Secp256k1<All>, sk: &SecretKey) -> Address {
+            Address::p2pkh(&PublicKey::new(sk.public_key(secp)), BtcNetwork::Regtest)
+        }
+        fn p2wpkh_address(secp: &Secp256k1<All>, sk: &SecretKey) -> Address {
+            Address::p2wpkh(&PublicKey::new(sk.public_key(secp)), BtcNetwork::Regtest)
+                .expect("compressed key yields p2wpkh")
+        }
+        fn p2tr_address(secp: &Secp256k1<All>, sk: &SecretKey) -> Address {
+            let (xonly, _) = KeyPair::from_secret_key(secp, sk).x_only_public_key();
+            Address::p2tr(secp, xonly, None, BtcNetwork::Regtest)
+        }
+        fn change_address(secp: &Secp256k1<All>) -> Address {
+            let sk = SecretKey::from_slice(&[0x09; 32]).expect("valid key");
+            p2wpkh_address(secp, &sk)
+        }
+        fn outpoint(n: u32) -> OutPoint {
+            OutPoint {
+                txid: Txid::from_byte_array([n as u8; 32]),
+                vout: n,
+            }
+        }
+        /// The golden signed update is only used as a signal source (finalize /
+        /// build_unsigned consume its `hash()`), so any valid Update works.
+        fn sample_update() -> Update {
+            let raw = include_str!("../fixtures/spec-form/golden-signed-update.json");
+            Update::from_json_string(raw).expect("golden signed update parses")
+        }
+
+        // ---- Task 1: ownership guard fails closed on a non-owning key --------
+
+        /// A P2TR scriptPubKey built from a DIFFERENT key must be rejected by the
+        /// ownership guard as `KeyDoesNotOwnPrevout` (the T1 mitigation).
+        #[test]
+        fn ownership_rejects_foreign_p2tr_key() {
+            let secp = Secp256k1::new();
+            let mine = test_secret_key();
+            let other = SecretKey::from_slice(&[0x11u8; 32]).expect("valid key");
+            let other_internal = other.x_only_public_key(&secp).0;
+            let other_spk = ScriptBuf::new_v1_p2tr(&secp, other_internal, None);
+            assert!(
+                matches!(
+                    check_prevout_ownership(&secp, &mine, 0, BeaconInputScheme::P2tr, &other_spk),
+                    Err(AnnounceError::KeyDoesNotOwnPrevout { index: 0 })
+                ),
+                "a foreign-key P2TR prevout must fail closed"
+            );
+        }
+
+        /// The guard ACCEPTS the P2TR scriptPubKey the key actually owns.
+        #[test]
+        fn ownership_accepts_owning_p2tr_key() {
+            let secp = Secp256k1::new();
+            let sk = test_secret_key();
+            let spk = ScriptBuf::new_v1_p2tr(&secp, sk.x_only_public_key(&secp).0, None);
+            check_prevout_ownership(&secp, &sk, 0, BeaconInputScheme::P2tr, &spk)
+                .expect("owning key must be accepted");
+        }
+
+        // ---- Task 2: finalize failure paths (typed, no panic) ---------------
+
+        /// A wrong number of signatures is a typed `Signing` error.
+        #[test]
+        fn finalize_length_mismatch_is_typed_error() {
+            let unsigned = super::unsigned_one_input(BeaconInputScheme::P2tr);
+            let err = unsigned
+                .finalize(&[])
+                .expect_err("0 sigs for a 1-input tx must error");
+            assert!(matches!(err, AnnounceError::Signing(_)), "got {err:?}");
+        }
+
+        /// A Schnorr signature for a P2WPKH input fails closed with the dedicated
+        /// `SignatureSchemeMismatch` variant, NOT `UnsupportedScriptType`.
+        #[test]
+        fn finalize_scheme_mismatch_is_typed_error() {
+            let unsigned = super::unsigned_one_input(BeaconInputScheme::P2wpkh);
+            let schnorr = schnorr::Signature::from_slice(&[0u8; 64]).expect("64-byte parse");
+            let sig = Sig::Schnorr(taproot::Signature {
+                sig: schnorr,
+                hash_ty: TapSighashType::Default,
+            });
+            let err = unsigned
+                .finalize(&[sig])
+                .expect_err("Schnorr sig on a P2WPKH input must be rejected");
+            assert!(
+                matches!(err, AnnounceError::SignatureSchemeMismatch { index: 0 }),
+                "got {err:?}"
+            );
+        }
+
+        // ---- Task 2: real-signature oracle over finalize's OUTPUT -----------
+
+        /// finalize's assembled P2PKH input passes bitcoinconsensus `Script::verify`.
+        #[test]
+        fn finalize_p2pkh_verifies_under_bitcoinconsensus() {
+            let secp = Secp256k1::new();
+            let sk = test_secret_key();
+            let addr = p2pkh_address(&secp, &sk);
+            let value = 100_000u64;
+            let prevouts = vec![Prevout {
+                outpoint: outpoint(0),
+                value,
+                script_pubkey: addr.script_pubkey(),
+            }];
+            let unsigned = sample_update()
+                .build_unsigned(&addr, &prevouts, 1_000, &change_address(&secp))
+                .expect("build_unsigned");
+            let input = &unsigned.inputs()[0];
+            let msg = Message::from_slice(input.sighash.as_bytes()).expect("32-byte msg");
+            let sig = Sig::Ecdsa {
+                sig: ecdsa::Signature {
+                    sig: secp.sign_ecdsa(&msg, &sk),
+                    hash_ty: EcdsaSighashType::All,
+                },
+                pubkey: PublicKey::new(sk.public_key(&secp)),
+            };
+            let signed = unsigned.finalize(&[sig]).expect("finalize");
+            assert!(
+                !signed.as_tx().input[0].script_sig.is_empty(),
+                "P2PKH finalize must populate script_sig"
+            );
+            let serialized = consensus::encode::serialize(signed.as_tx());
+            addr.script_pubkey()
+                .verify(0, Amount::from_sat(value), &serialized)
+                .expect("finalize's P2PKH output must verify under bitcoinconsensus");
+        }
+
+        /// finalize's assembled P2WPKH witness `[sig, pubkey]` passes bitcoinconsensus.
+        #[test]
+        fn finalize_p2wpkh_verifies_under_bitcoinconsensus() {
+            let secp = Secp256k1::new();
+            let sk = test_secret_key();
+            let addr = p2wpkh_address(&secp, &sk);
+            let value = 100_000u64;
+            let prevouts = vec![Prevout {
+                outpoint: outpoint(0),
+                value,
+                script_pubkey: addr.script_pubkey(),
+            }];
+            let unsigned = sample_update()
+                .build_unsigned(&addr, &prevouts, 1_000, &change_address(&secp))
+                .expect("build_unsigned");
+            let input = &unsigned.inputs()[0];
+            let msg = Message::from_slice(input.sighash.as_bytes()).expect("32-byte msg");
+            let sig = Sig::Ecdsa {
+                sig: ecdsa::Signature {
+                    sig: secp.sign_ecdsa(&msg, &sk),
+                    hash_ty: EcdsaSighashType::All,
+                },
+                pubkey: PublicKey::new(sk.public_key(&secp)),
+            };
+            let signed = unsigned.finalize(&[sig]).expect("finalize");
+            assert_eq!(
+                signed.as_tx().input[0].witness.len(),
+                2,
+                "P2WPKH witness must be [sig, pubkey]"
+            );
+            let serialized = consensus::encode::serialize(signed.as_tx());
+            addr.script_pubkey()
+                .verify(0, Amount::from_sat(value), &serialized)
+                .expect("finalize's P2WPKH output must verify under bitcoinconsensus");
+        }
+
+        /// finalize's assembled P2TR witness `[sig]` verifies as a direct BIP340
+        /// Schnorr signature against the tweaked output key (the pinned
+        /// bitcoinconsensus has no taproot support, so verify directly).
+        #[test]
+        fn finalize_p2tr_verifies_direct_schnorr() {
+            let secp = Secp256k1::new();
+            let sk = test_secret_key();
+            let addr = p2tr_address(&secp, &sk);
+            let value = 100_000u64;
+            let prevouts = vec![Prevout {
+                outpoint: outpoint(0),
+                value,
+                script_pubkey: addr.script_pubkey(),
+            }];
+            let unsigned = sample_update()
+                .build_unsigned(&addr, &prevouts, 1_000, &change_address(&secp))
+                .expect("build_unsigned");
+            let input = &unsigned.inputs()[0];
+            let msg = Message::from_slice(input.sighash.as_bytes()).expect("32-byte msg");
+            let tweaked = beacon_taproot_tweak(&secp, &sk);
+            let schnorr = secp.sign_schnorr_no_aux_rand(&msg, &tweaked);
+            let sig = Sig::Schnorr(taproot::Signature {
+                sig: schnorr,
+                hash_ty: TapSighashType::Default,
+            });
+            let signed = unsigned.finalize(&[sig]).expect("finalize");
+            let witness = signed.as_tx().input[0].witness.to_vec();
+            assert_eq!(witness.len(), 1, "P2TR key-path witness must be [sig]");
+            let (xonly, _) = tweaked.x_only_public_key();
+            let got = schnorr::Signature::from_slice(&witness[0][..64]).expect("64-byte sig");
+            assert!(
+                secp.verify_schnorr(&got, &msg, &xonly).is_ok(),
+                "finalize's P2TR signature must verify against the tweaked output key"
+            );
+        }
+
+        // ---- Task 3: BIP341 known-answer taproot vector (PERMANENT) ---------
+
+        /// BIP341 `wallet-test-vectors.json` `keyPathSpending[0].inputSpending[0]`
+        /// (merkleRoot = None). Permanent KAT pinning the fund-moving P2TR
+        /// tweaked-key + ownership comparison. MUST NOT be deleted or
+        /// `#[ignore]`d.
+        #[test]
+        fn bip341_taproot_known_answer_vector() {
+            let secp = Secp256k1::new();
+            let d = SecretKey::from_slice(
+                &hex::decode("6b973d88838f27366ed61c9ad6367663045cb456e28335c109e30717ae0c6baa")
+                    .unwrap(),
+            )
+            .unwrap();
+            // Secret/signing path: the tweaked keypair == (Q, d').
+            let tweaked = beacon_taproot_tweak(&secp, &d);
+            assert_eq!(
+                hex::encode(tweaked.x_only_public_key().0.serialize()),
+                "53a1f6e454df1aa2776a2814a721372d6258050de330b3c6d10ee8f4e0dda343", // Q
+            );
+            assert_eq!(
+                hex::encode(tweaked.secret_bytes()),
+                "2405b971772ad26915c8dcdf10f238753a9b837e5f8e6a86fd7c0cce5b7296d9", // d'
+            );
+            // Ownership path: derived scriptPubKey == the vector's output script,
+            // and the guard accepts the owning key.
+            let internal = d.x_only_public_key(&secp).0;
+            let spk = ScriptBuf::new_v1_p2tr(&secp, internal, None);
+            assert_eq!(
+                hex::encode(spk.as_bytes()),
+                "512053a1f6e454df1aa2776a2814a721372d6258050de330b3c6d10ee8f4e0dda343",
+            );
+            check_prevout_ownership(&secp, &d, 0, BeaconInputScheme::P2tr, &spk)
+                .expect("owning key accepted");
+            // Failure: a different key must NOT pass the guard for this scriptPubKey.
+            let other = SecretKey::from_slice(&[0x11u8; 32]).unwrap();
+            assert!(matches!(
+                check_prevout_ownership(&secp, &other, 0, BeaconInputScheme::P2tr, &spk),
+                Err(AnnounceError::KeyDoesNotOwnPrevout { index: 0 })
+            ));
+        }
     }
 }
