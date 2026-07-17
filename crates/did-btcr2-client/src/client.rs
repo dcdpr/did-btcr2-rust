@@ -208,7 +208,7 @@ impl<T: BtcTransport> Client<T> {
                 // input (so the measured vsize is deterministic). Multi-input under
                 // a rate fee is deferred.
                 if prevouts.len() > 1 {
-                    return Err(Error::RateFeeRequiresMultipleInputs);
+                    return Err(Error::MultiInputRateFeeUnsupported);
                 }
                 let inputs_total: u64 = prevouts.iter().map(|p| p.value).sum();
                 // Iterate to a fixed point so the fee is sized on the SAME output

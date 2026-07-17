@@ -297,8 +297,8 @@ from the chain. It covers two distinct flows:
 `--sidecar-out`, which is an **output**: `create` does not accept `--sidecar` (a
 resolve input), but it does accept `--sidecar-out` to produce a genesis sidecar
 for a later resolve. `create` still rejects `--esplora-url`. See
-[RUNBOOK.md](./RUNBOOK.md) for both the on-chain-vs-sidecar update flow and the
-`x1` external-creation lifecycle.
+[RUNBOOK-REPRODUCIBLE.md](./RUNBOOK-REPRODUCIBLE.md) for both the
+on-chain-vs-sidecar update flow and the `x1` external-creation lifecycle.
 
 ### Update a document
 

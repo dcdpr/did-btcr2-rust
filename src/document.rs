@@ -1067,7 +1067,10 @@ impl InitialDocument {
 
         if hash_bytes != hash {
             Err(Btcr2Error::InvalidDid(
-                "TODO: description for sidecar_initial_validation() hash mismatch".to_string(),
+                "sidecar initial DID document does not match the DID's genesis hash: \
+                 the intermediate document's JCS SHA-256 differs from the hash committed \
+                 in the identifier"
+                    .to_string(),
             ))?
         } else {
             Ok(self.clone())
@@ -1635,6 +1638,39 @@ mod tests {
         assert!(
             matches!(result, Err(Error::Btcr2Error(Btcr2Error::InvalidDid(_)))),
             "hash mismatch must error InvalidDid, got: {result:?}"
+        );
+    }
+
+    // The sidecar hash-mismatch detail surfaced into
+    // `didResolutionMetadata` must be a real, human-readable string — never the
+    // shipped `TODO` placeholder. This test is fixture-free (it builds the initial
+    // document deterministically via `source_documents`) so the content assertion
+    // always runs, and it drives the same `hash_bytes != hash` branch by passing a
+    // deliberately corrupted hash. It asserts the variant is unchanged
+    // (`InvalidDid`) and the detail is non-empty and contains no `TODO`.
+    #[test]
+    fn sidecar_initial_validation_mismatch_detail_is_real_and_todo_free() {
+        let (_did, _vm_id, initial, _document) = source_documents();
+
+        // The genuine intermediate hash of `initial`; flip one byte so the only
+        // divergence is the hash argument and the mismatch branch is exercised.
+        let mut wrong_bytes = *IntermediateDocument::from_initial(&initial)
+            .hash()
+            .as_bytes();
+        wrong_bytes[0] ^= 0xff;
+        let wrong = Sha256Hash::from(wrong_bytes);
+
+        let result = initial.sidecar_initial_validation(wrong);
+        let Err(Error::Btcr2Error(Btcr2Error::InvalidDid(detail))) = result else {
+            panic!("hash mismatch must error InvalidDid, got: {result:?}");
+        };
+        assert!(
+            !detail.is_empty(),
+            "the sidecar mismatch detail must be non-empty"
+        );
+        assert!(
+            !detail.contains("TODO"),
+            "the sidecar mismatch detail must not contain the TODO placeholder, got: {detail:?}"
         );
     }
 

@@ -92,16 +92,21 @@ pub enum Error {
         target: u16,
     },
 
-    /// A rate fee would require spending more than one funding input. Multi-input
-    /// under a rate fee is deferred to a later phase (the single-input bound keeps
-    /// the measured-vsize fee exact).
-    RateFeeRequiresMultipleInputs,
+    /// A rate fee was requested but funding would need more than one input, which
+    /// is unsupported. Multi-input under a rate fee is deferred to a later phase;
+    /// the single-input bound keeps the measured-vsize fee exact.
+    MultiInputRateFeeUnsupported,
 
-    /// A fee rate was not a usable positive, finite sat/vB value (a negative,
-    /// zero, `NaN`, or infinite rate — e.g. from a malformed `/fee-estimates`
-    /// response or a bad CLI value). Rejected up front rather than coerced to a
-    /// zero-sat fee that would produce a non-relayable transaction.
-    #[error("invalid fee rate {rate} sat/vB: expected a positive, finite value")]
+    /// A fee rate was not a usable sat/vB value: it was negative, zero, `NaN`,
+    /// or infinite; OR it exceeded the accepted maximum (see the client's
+    /// `MAX_FEE_RATE_SAT_PER_VB` ceiling); OR its absolute fee (`ceil(rate *
+    /// vsize)`) would overflow the `u64` fee range. Such rates arrive from a
+    /// malformed/hostile `/fee-estimates` response or a bad CLI value and are
+    /// rejected up front rather than coerced, clamped, or saturated by `as u64`
+    /// into a zero-sat or non-relayable fee.
+    #[error(
+        "invalid fee rate {rate} sat/vB: expected a positive, finite value within the accepted maximum whose absolute fee fits in u64"
+    )]
     InvalidFeeRate {
         /// The offending rate.
         rate: f64,

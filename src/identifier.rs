@@ -413,7 +413,7 @@ impl IdType {
 /// Components of a parsed DID:BTCR2 identifier
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DidComponents {
-    /// Specification version (1-16)
+    /// Specification version (only version 1 is defined)
     version: DidVersion,
     /// Bitcoin network
     network: Network,
