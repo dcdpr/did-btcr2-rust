@@ -196,6 +196,17 @@ pub fn provisional_vsize() -> u64 {
     PROVISIONAL_VSIZE
 }
 
+/// Sum of `value` over the confirmed UTXOs in `utxos` (the true confirmed
+/// balance at the queried address). Single source of truth for the
+/// `found_confirmed_sats` reported by [`Error::NoSpendableUtxo`].
+pub fn confirmed_total(utxos: &[EsploraUtxo]) -> u64 {
+    utxos
+        .iter()
+        .filter(|u| u.status.confirmed)
+        .map(|u| u.value)
+        .sum()
+}
+
 /// Select confirmed UTXOs covering `needed` (the absolute fee) and map each to a
 /// [`Prevout`] locked to `beacon_spk`.
 ///
@@ -208,6 +219,9 @@ pub fn provisional_vsize() -> u64 {
 /// confirmed total is `< needed` (or there are no confirmed UTXOs), return
 /// [`Error::NoSpendableUtxo`].
 ///
+/// `address` is diagnostic-only — used solely to enrich the `NoSpendableUtxo`
+/// error; selection stays keyed on `beacon_spk`.
+///
 /// `script_pubkey` is derived from the beacon address (`beacon_spk`), NEVER from
 /// the `/utxo` response — every selected UTXO is locked to the
 /// beacon address, so a forged scriptPubKey cannot be injected.
@@ -215,13 +229,18 @@ pub fn select(
     utxos: &[EsploraUtxo],
     beacon_spk: &ScriptBuf,
     needed: u64,
+    address: &str,
 ) -> Result<Vec<Prevout>, Error> {
     // Confirmed UTXOs only, sorted largest-first (stable for determinism).
     let mut confirmed: Vec<&EsploraUtxo> = utxos.iter().filter(|u| u.status.confirmed).collect();
     confirmed.sort_by_key(|b| std::cmp::Reverse(b.value));
 
     if confirmed.is_empty() {
-        return Err(Error::NoSpendableUtxo);
+        return Err(Error::NoSpendableUtxo {
+            address: address.to_string(),
+            required_fee_sats: needed,
+            found_confirmed_sats: 0,
+        });
     }
 
     // Single-input preference: the largest UTXO that alone covers `needed`.
@@ -230,9 +249,13 @@ pub fn select(
     }
 
     // Multi-input fallback (absolute-fee path only): largest-first until covered.
-    let total: u64 = confirmed.iter().map(|u| u.value).sum();
+    let total: u64 = confirmed_total(utxos);
     if total < needed {
-        return Err(Error::NoSpendableUtxo);
+        return Err(Error::NoSpendableUtxo {
+            address: address.to_string(),
+            required_fee_sats: needed,
+            found_confirmed_sats: total,
+        });
     }
     let mut acc: u64 = 0;
     let mut chosen = Vec::new();
@@ -290,11 +313,15 @@ mod tests {
 
     const TXID_A: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
+    /// The rendered beacon address string passed to `select` as the diagnostic-only
+    /// `address` argument (matches [`beacon_address`]).
+    const BEACON_ADDR: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+
     #[test]
     fn utxo_to_prevout_uses_beacon_script() {
         let spk = beacon_address().script_pubkey();
         let entry = utxo(TXID_A, 3, 5_000, true);
-        let prevouts = select(&[entry], &spk, 1_000).expect("a covering UTXO selects");
+        let prevouts = select(&[entry], &spk, 1_000, BEACON_ADDR).expect("a covering UTXO selects");
         assert_eq!(prevouts.len(), 1);
         let p = &prevouts[0];
         // script_pubkey is derived from the beacon address, not the response.
@@ -314,8 +341,30 @@ mod tests {
     #[test]
     fn select_errors_when_no_spendable_utxo() {
         let spk = beacon_address().script_pubkey();
-        let err = select(&[], &spk, 1_000).expect_err("an empty UTXO set is not spendable");
-        assert!(matches!(err, Error::NoSpendableUtxo), "got {err:?}");
+        let err =
+            select(&[], &spk, 1_000, BEACON_ADDR).expect_err("an empty UTXO set is not spendable");
+        // Wrong-beacon shape: nothing confirmed at the queried address.
+        match &err {
+            Error::NoSpendableUtxo {
+                address,
+                required_fee_sats,
+                found_confirmed_sats,
+            } => {
+                assert_eq!(address, BEACON_ADDR, "the queried address is reported");
+                assert_eq!(*required_fee_sats, 1_000);
+                assert_eq!(*found_confirmed_sats, 0, "an empty set has zero confirmed");
+            }
+            other => panic!("expected NoSpendableUtxo, got {other:?}"),
+        }
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(BEACON_ADDR),
+            "message names the queried address: {rendered}"
+        );
+        assert!(
+            rendered.contains("found 0 confirmed"),
+            "message reports the wrong-beacon zero-balance shape: {rendered}"
+        );
     }
 
     #[test]
@@ -324,22 +373,42 @@ mod tests {
         // value == fee + 1 (change would be sub-dust): target is `needed = fee`,
         // NOT `fee + dust`, so this SUCCEEDS.
         let entry = utxo(TXID_A, 0, 1_001, true);
-        let prevouts = select(&[entry], &spk, 1_000).expect("fee-only target selects");
+        let prevouts = select(&[entry], &spk, 1_000, BEACON_ADDR).expect("fee-only target selects");
         assert_eq!(prevouts.len(), 1);
         assert_eq!(prevouts[0].value, 1_001);
 
         // A UTXO worth less than the fee is rejected (no spendable coverage).
         let small = utxo(TXID_A, 0, 999, true);
-        let err = select(&[small], &spk, 1_000).expect_err("a below-fee UTXO is rejected");
-        assert!(matches!(err, Error::NoSpendableUtxo), "got {err:?}");
+        let err =
+            select(&[small], &spk, 1_000, BEACON_ADDR).expect_err("a below-fee UTXO is rejected");
+        // Underfunded shape: some confirmed balance exists, but below the fee —
+        // `0 < found < required`, distinct from the wrong-beacon `found == 0`.
+        match &err {
+            Error::NoSpendableUtxo {
+                required_fee_sats,
+                found_confirmed_sats,
+                ..
+            } => {
+                assert!(
+                    *found_confirmed_sats > 0 && *found_confirmed_sats < *required_fee_sats,
+                    "underfunded: 0 < found ({found_confirmed_sats}) < required ({required_fee_sats})"
+                );
+                assert_eq!(
+                    *found_confirmed_sats, 999,
+                    "the true confirmed balance is reported"
+                );
+            }
+            other => panic!("expected NoSpendableUtxo, got {other:?}"),
+        }
     }
 
     #[test]
     fn select_skips_unconfirmed() {
         let spk = beacon_address().script_pubkey();
         let entry = utxo(TXID_A, 0, 5_000, false);
-        let err = select(&[entry], &spk, 1_000).expect_err("an unconfirmed UTXO is not spendable");
-        assert!(matches!(err, Error::NoSpendableUtxo), "got {err:?}");
+        let err = select(&[entry], &spk, 1_000, BEACON_ADDR)
+            .expect_err("an unconfirmed UTXO is not spendable");
+        assert!(matches!(err, Error::NoSpendableUtxo { .. }), "got {err:?}");
     }
 
     #[test]
@@ -465,7 +534,8 @@ mod tests {
         let u1 = utxo(TXID_A, 0, 600, true);
         let u2 = utxo(TXID_A, 1, 600, true);
         // needed = 1_000: no single UTXO covers it, but the total (1_200) does.
-        let prevouts = select(&[u1, u2], &spk, 1_000).expect("multi-input covers for absolute fee");
+        let prevouts = select(&[u1, u2], &spk, 1_000, BEACON_ADDR)
+            .expect("multi-input covers for absolute fee");
         assert!(
             prevouts.len() > 1,
             "no single UTXO covers needed, so absolute-fee selection is multi-input"

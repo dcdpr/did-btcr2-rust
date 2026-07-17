@@ -189,10 +189,16 @@ impl<T: BtcTransport> Client<T> {
         let change_addr = change.unwrap_or_else(|| addr.clone());
 
         let utxos = funding::fetch_utxos(&self.transport, &self.base_url, &addr)?;
+        // Diagnostic-only rendering of the queried beacon address, threaded into
+        // any NoSpendableUtxo raised below. The absolute-fee path reports the
+        // address-wide confirmed total (from funding::select); the rate-fee path
+        // reports the single selected input instead (see the raise sites below),
+        // so no address-wide total is bound here.
+        let addr_str = addr.to_string();
 
         match fee {
             Fee::Absolute(n) => {
-                let prevouts = funding::select(&utxos, &spk, n)?;
+                let prevouts = funding::select(&utxos, &spk, n, &addr_str)?;
                 let unsigned = signed.build_unsigned(&addr, &prevouts, n, &change_addr)?;
                 let sigs = sign_beacon_tx(&unsigned, &beacon_sk)?;
                 let signed_tx = unsigned.finalize(&sigs)?;
@@ -203,7 +209,7 @@ impl<T: BtcTransport> Client<T> {
                 // SELECT the funding input (the final fee comes from the measured
                 // vsize below, not this bootstrap).
                 let provisional = funding::resolve_fee(Fee::Rate(r), funding::provisional_vsize())?;
-                let prevouts = funding::select(&utxos, &spk, provisional)?;
+                let prevouts = funding::select(&utxos, &spk, provisional, &addr_str)?;
                 // Bounded single-input contract: a rate fee MUST fund from one
                 // input (so the measured vsize is deterministic). Multi-input under
                 // a rate fee is deferred.
@@ -224,7 +230,13 @@ impl<T: BtcTransport> Client<T> {
                 let mut fee = provisional;
                 for _ in 0..RATE_FEE_MAX_PASSES {
                     if inputs_total < fee {
-                        return Err(Error::NoSpendableUtxo);
+                        return Err(Error::NoSpendableUtxo {
+                            address: addr_str.clone(),
+                            required_fee_sats: fee,
+                            // Single-input regime: report the one input we can
+                            // actually spend, not the address-wide total.
+                            found_confirmed_sats: inputs_total,
+                        });
                     }
                     let vsize = signed
                         .build_unsigned(&addr, &prevouts, fee, &change_addr)?
@@ -236,7 +248,13 @@ impl<T: BtcTransport> Client<T> {
                     fee = next;
                 }
                 if inputs_total < fee {
-                    return Err(Error::NoSpendableUtxo);
+                    return Err(Error::NoSpendableUtxo {
+                        address: addr_str.clone(),
+                        required_fee_sats: fee,
+                        // Single-input regime: report the one input we can
+                        // actually spend, not the address-wide total.
+                        found_confirmed_sats: inputs_total,
+                    });
                 }
                 // Safety net for the rare value window where the fee alternates
                 // between the folded and change-present output sets without meeting
@@ -248,7 +266,13 @@ impl<T: BtcTransport> Client<T> {
                 let needed = funding::resolve_fee(Fee::Rate(r), unsigned.predicted_vsize())?;
                 let unsigned = if needed > fee {
                     if inputs_total < needed {
-                        return Err(Error::NoSpendableUtxo);
+                        return Err(Error::NoSpendableUtxo {
+                            address: addr_str.clone(),
+                            required_fee_sats: needed,
+                            // Single-input regime: report the one input we can
+                            // actually spend, not the address-wide total.
+                            found_confirmed_sats: inputs_total,
+                        });
                     }
                     signed.build_unsigned(&addr, &prevouts, needed, &change_addr)?
                 } else {
@@ -395,8 +419,13 @@ mod tests {
         txs_body: Vec<u8>,
         /// Chain-tip height served as a bare integer.
         tip: u32,
-        /// A funding UTXO value (sats) served for `GET /address/{a}/utxo`.
+        /// A funding UTXO value (sats) served for `GET /address/{a}/utxo` when
+        /// `utxo_values` is empty (the single-UTXO default).
         utxo_value: u64,
+        /// When non-empty, `GET /address/{a}/utxo` serves one confirmed UTXO per
+        /// entry (each at a distinct outpoint) instead of the single
+        /// `utxo_value`. Used to exercise the multi-UTXO rate-fee path.
+        utxo_values: Vec<u64>,
         /// HTTP status returned for `POST /tx` (200 by default; set non-2xx to
         /// exercise the broadcast-rejection path).
         broadcast_status: u16,
@@ -416,6 +445,7 @@ mod tests {
                 txs_body: txs_body.as_bytes().to_vec(),
                 tip: 100,
                 utxo_value: 100_000,
+                utxo_values: Vec::new(),
                 broadcast_status: 200,
                 force_status: None,
                 echo_wrong_txid: false,
@@ -452,6 +482,16 @@ mod tests {
             }
         }
 
+        /// Serve several confirmed funding UTXOs (one per `value`), each at a
+        /// distinct outpoint. Used to exercise the multi-UTXO rate-fee path,
+        /// where the address-wide total exceeds what any single input can fund.
+        fn with_utxo_values(values: Vec<u64>) -> Self {
+            Self {
+                utxo_values: values,
+                ..Self::new("[]")
+            }
+        }
+
         fn call_count(&self) -> usize {
             *self.calls.borrow()
         }
@@ -460,16 +500,28 @@ mod tests {
             self.post_tx_calls.get()
         }
 
-        /// A synthetic confirmed `/utxo` array funding the announce.
+        /// A synthetic confirmed `/utxo` array funding the announce. Serves the
+        /// entries of `utxo_values` (each at a distinct outpoint) when set,
+        /// otherwise the single `utxo_value`.
         fn utxo_body(&self) -> Vec<u8> {
-            serde_json::json!([{
-                "txid": "0000000000000000000000000000000000000000000000000000000000000001",
-                "vout": 0,
-                "value": self.utxo_value,
-                "status": { "confirmed": true, "block_height": 90 }
-            }])
-            .to_string()
-            .into_bytes()
+            let values: Vec<u64> = if self.utxo_values.is_empty() {
+                vec![self.utxo_value]
+            } else {
+                self.utxo_values.clone()
+            };
+            let entries: Vec<serde_json::Value> = values
+                .iter()
+                .enumerate()
+                .map(|(i, &value)| {
+                    serde_json::json!({
+                        "txid": "0000000000000000000000000000000000000000000000000000000000000001",
+                        "vout": i,
+                        "value": value,
+                        "status": { "confirmed": true, "block_height": 90 }
+                    })
+                })
+                .collect();
+            serde_json::Value::Array(entries).to_string().into_bytes()
         }
     }
 
@@ -1063,9 +1115,70 @@ mod tests {
             .expect_err("the exact rate fee exceeds the provisionally-selected input");
 
         assert!(
-            matches!(err, Error::NoSpendableUtxo),
+            matches!(err, Error::NoSpendableUtxo { .. }),
             "expected NoSpendableUtxo from the coverage guard, got {err:?}",
         );
+    }
+
+    #[test]
+    fn rate_fee_rejection_reports_selected_input_not_address_total() {
+        // Regression: the rate-fee coverage guard funds from a SINGLE
+        // input (multi-input under a rate fee is rejected upstream), so the
+        // `found_confirmed_sats` it reports must be that one selected input —
+        // NOT the address-wide confirmed balance. Reporting the address total
+        // would be self-contradictory here: with two confirmed 12_000-sat UTXOs
+        // the address holds 24_000, which EXCEEDS the ~14_100-sat fee the single
+        // 12_000 input cannot cover, so "found 24_000 / required 14_100" would
+        // read as a surplus rather than the real single-input shortfall.
+        //
+        // rate = 60 sat/vB → provisional fee = 60 * PROVISIONAL_VSIZE(200) =
+        // 12_000. `select` prefers the largest single UTXO that alone covers the
+        // provisional fee: one 12_000 input covers 12_000 exactly, so exactly one
+        // input is selected (inputs_total = 12_000), never triggering the
+        // multi-input rejection. The measured 1-in/2-out P2PKH vsize (~235 vB)
+        // then makes the exact fee ~14_100 > 12_000, firing the coverage guard.
+        let transport = FakeTransport::with_utxo_values(vec![12_000, 12_000]);
+        let client = Client::new("http://fake".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let sk = test_secret_key();
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let signed = doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
+            .expect("a signed update constructs against the genesis document");
+
+        let err = client
+            .build_update_tx(
+                &doc,
+                signed,
+                0, // legacy-P2PKH beacon: its larger input inflates the vsize past 200
+                Fee::Rate(60.0),
+                None,
+                sk,
+            )
+            .expect_err("the exact rate fee exceeds the single 12_000-sat input");
+
+        match err {
+            Error::NoSpendableUtxo {
+                required_fee_sats,
+                found_confirmed_sats,
+                ..
+            } => {
+                // The reported "found" is the single selected input (12_000),
+                // NOT the 24_000-sat address-wide total.
+                assert_eq!(
+                    found_confirmed_sats, 12_000,
+                    "rate path must report the single selected input, not the address total",
+                );
+                // And the message stays internally coherent: found < required.
+                assert!(
+                    found_confirmed_sats < required_fee_sats,
+                    "reported found ({found_confirmed_sats}) must be below the required fee \
+                     ({required_fee_sats}) — a rate-fee rejection is a shortfall, never a surplus",
+                );
+            }
+            other => panic!("expected NoSpendableUtxo from the coverage guard, got {other:?}"),
+        }
     }
 
     #[test]

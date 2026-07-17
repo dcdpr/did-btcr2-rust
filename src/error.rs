@@ -37,10 +37,9 @@ pub enum Btcr2Error {
 
     /// Update payload could not be located in either the supplied sidecar
     /// data nor in CAS (spec MISSING_UPDATE_DATA).
-    ///
-    /// Spec: did-btcr2/src/errors.md:21-23. Added for exactly this variant.
-    /// Other non-spec error variants (ProofTransformation, ProofGeneration,
-    /// Zcap) remain deferred to a later error-vocabulary cleanup.
+    //
+    // Spec reference: did-btcr2/src/errors.md:21-23. Added for exactly this
+    // variant; the other non-spec error variants are handled separately.
     MissingUpdateData {
         /// JSON Document Hash of the update payload that could not be located.
         update_hash: Sha256Hash,
@@ -66,14 +65,16 @@ pub enum Btcr2Error {
     /// Proof generation error
     ProofGeneration(String),
 
-    /// A subject-controlled beacon/CAS path reached an arm not yet implemented
-    /// (CAS Map / Sparse Merkle Tree / genesis-CAS retrieval). Returned instead
-    /// of panicking the resolver, so a remote-published DID reaching these arms
-    /// yields a typed resolution error rather than crashing the process.
-    ///
-    /// PROVISIONAL problem-details code — subject to the deferred error-
-    /// vocabulary audit, which replaces these arms with real implementations
-    /// and may keep or rename this variant and its code.
+    /// A subject-controlled beacon/CAS path (CAS Map / Sparse Merkle Tree /
+    /// genesis-CAS retrieval) reached an arm that is not yet implemented.
+    //
+    // Returned instead of panicking the resolver, so a remote-published DID
+    // reaching these arms yields a typed resolution error rather than crashing
+    // the process.
+    //
+    // The problem-details code is provisional and subject to a later
+    // error-vocabulary audit, which replaces these arms with real
+    // implementations and may keep or rename this variant and its code.
     Unsupported(String),
 }
 
@@ -215,12 +216,12 @@ mod tests {
     }
 
     /// Pins the wire `type` (prefix + `#NAME`) emitted by `ProblemDetails::details`
-    /// for the three `did:btcr2` method errors in the spec `errors.md` registry plus
+    /// for the three `did:btcr2` method errors in the spec error registry plus
     /// the empty-service-genesis `InvalidDidDocument`. Asserting the FULL string
     /// tripwires both a wrong namespace prefix AND a drifted code name — in
     /// particular this is what fails if `LATE_PUBLISHING` ever regresses to the
-    /// old `LATE_PUBLISHING_ERROR` string. (btc1.dev prefix is the deferred
-    /// namespace rename; these assertions must be re-blessed to btcr2.dev then.)
+    /// old `LATE_PUBLISHING_ERROR` string. (The `btc1.dev` prefix is a tracked
+    /// future rename; these assertions must be re-blessed to `btcr2.dev` then.)
     #[test]
     fn error_wire_codes_match_spec_registry() {
         let cases: [(Btcr2Error, &str); 4] = [
@@ -250,5 +251,49 @@ mod tests {
                 .expect("registry error yields problem details");
             assert_eq!(d["type"], expected_type, "wire type mismatch for {err:?}");
         }
+    }
+
+    /// The swept `MissingUpdateData` / `Unsupported` variants render a single
+    /// concise user-facing `Display` (the problem-details `title`) with no
+    /// internal dev commentary: no spec `file:line` refs, no provisional /
+    /// milestone / deferral notes, and no sibling-variant names.
+    #[test]
+    fn swept_variants_display_is_clean() {
+        let missing = Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash::from([0u8; 32]),
+        }
+        .to_string();
+        for banned in [
+            "Spec:",
+            "errors.md",
+            "deferred",
+            "PROVISIONAL",
+            "ProofTransformation",
+            "ProofGeneration",
+            "Zcap",
+        ] {
+            assert!(
+                !missing.contains(banned),
+                "MissingUpdateData Display leaked `{banned}`: {missing:?}",
+            );
+        }
+        assert!(!missing.is_empty(), "MissingUpdateData Display is empty");
+        assert!(
+            !missing.contains('\n'),
+            "MissingUpdateData Display should be a single line: {missing:?}",
+        );
+
+        let unsupported = Btcr2Error::Unsupported("x".into()).to_string();
+        for banned in ["PROVISIONAL", "M2", "deferred"] {
+            assert!(
+                !unsupported.contains(banned),
+                "Unsupported Display leaked `{banned}`: {unsupported:?}",
+            );
+        }
+        assert!(!unsupported.is_empty(), "Unsupported Display is empty");
+        assert!(
+            !unsupported.contains('\n'),
+            "Unsupported Display should be a single line: {unsupported:?}",
+        );
     }
 }

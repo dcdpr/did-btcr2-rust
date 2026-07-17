@@ -90,12 +90,11 @@ DID=$(printf '%s\n' "$GENESIS" | head -1)   # the DID is the first line
 echo "$DID"
 ```
 
-> **Capture the full output first (as above); don't pipe `create` straight into
-> `head`.** `create … | head -1` prints the DID but then the CLI panics with
-> `Broken pipe (os error 32)` when `head` closes the pipe early — a known Rust
-> `println!` + SIGPIPE behavior, not corruption (`$DID` is still captured
-> correctly). Capturing into `$GENESIS` first and slicing the variable sidesteps
-> it entirely.
+> An early-closing reader (`head`, `grep -q`, a quit pager) is handled cleanly:
+> `create … | head -1` prints the DID, and when `head` closes the pipe the CLI
+> exits 0 with no `Broken pipe` on stderr (the output before the close is intact).
+> Capturing into `$GENESIS` first is still handy so you can slice both the DID and
+> the full document from one run.
 
 Read the **P2WPKH beacon address** off that captured document — it is the
 `serviceEndpoint` of the `#initialP2WPKH` service (drop the `bitcoin:` prefix).
@@ -182,13 +181,16 @@ EOF
 > here; the machinery (sign → announce → resolve) is identical.
 
 Broadcast the update. The CLI prints a transaction summary and prompts for
-confirmation; drop `--yes` if you want to show that prompt live:
+confirmation; drop `--yes` if you want to show that prompt live. Pass
+`--sidecar-out ./update-v2.sidecar.json` so the write **emits the update payload**
+to a file — you feed that file back to `resolve` in Step 5:
 
 ```bash
 cargo run -q -p did-btcr2-cli -- update "$DID" \
   --patch ./patch.json \
   --key-file ./demo.hex \
   --network mutinynet \
+  --sidecar-out ./update-v2.sidecar.json \
   --yes
 ```
 
@@ -201,24 +203,39 @@ about to broadcast a beacon-signal transaction:
   outputs: 2
   vsize:   … vB
 broadcast txid: <real txid>
+wrote sidecar: ./update-v2.sidecar.json
 ```
 
 The update key doubles as the beacon key by default (the default singleton
 beacons are spendable by the DID key), and change returns to the beacon address —
 so no extra flags are needed. Tip: `--dry-run` builds and prints the exact
 transaction (txid + raw hex) **without** broadcasting, but it still performs the
-funding lookups, so it too needs the beacon funded.
+funding lookups, so it too needs the beacon funded. The sidecar file is only
+written **after a successful broadcast** — a `--dry-run` or a declined confirm
+writes nothing.
+
+> **The `--sidecar-out` path must be writable, and it accumulates DID state across
+> steps.** Step 4 seeds it with the update payload; Step 6 reads it back in and
+> re-emits the full chain (update + deactivate) to a new file. Keep the paths
+> straight when copy-pasting: each write step's `--sidecar-out` is the next
+> resolve step's `--sidecar`.
 
 ---
 
 ## Step 5 — Resolve after the update confirms (`versionId "2"`)
 
-Once the step-4 transaction confirms (~30s), the OP_RETURN commitment is on-chain
-and a plain `resolve` picks it up, advancing `versionId` to `"2"`:
+Once the step-4 transaction confirms (~30s), resolve with the sidecar file you
+emitted in Step 4, advancing `versionId` to `"2"`:
 
 ```bash
-cargo run -q -p did-btcr2-cli -- resolve --network mutinynet "$DID"
+cargo run -q -p did-btcr2-cli -- resolve --sidecar ./update-v2.sidecar.json \
+  --network mutinynet "$DID"
 ```
+
+The on-chain beacon signal is only a **32-byte commitment**, not the update
+itself, so a plain `resolve` (no `--sidecar`) fails with `MISSING_UPDATE_DATA` for
+a singleton update — the off-chain payload emitted by `--sidecar-out` in Step 4
+**must** be supplied to `resolve --sidecar` for the resolver to reconstruct v2.
 
 Example output — `assertionMethod` now carries the appended entry and the version
 has advanced:
@@ -247,19 +264,26 @@ and the update was proven by a real Bitcoin transaction on mutinynet.**
 
 `deactivate` takes the same key/fee/broadcast flags as `update` with no
 `--patch`. It broadcasts a beacon signal marking the DID deactivated (this spends
-the change UTXO left by step 4, so no re-funding is needed):
+the change UTXO left by step 4, so no re-funding is needed). Pass the Step-4
+sidecar as **input** (`--sidecar ./update-v2.sidecar.json`) and a new
+**output** file (`--sidecar-out ./deactivate-v3.sidecar.json`) so the emitted file
+accumulates the **full chain** — the update *and* the deactivation:
 
 ```bash
 cargo run -q -p did-btcr2-cli -- deactivate "$DID" \
   --key-file ./demo.hex \
   --network mutinynet \
+  --sidecar ./update-v2.sidecar.json \
+  --sidecar-out ./deactivate-v3.sidecar.json \
   --yes
 ```
 
-Once it confirms, resolve once more — `deactivated` flips to `true`:
+Once it confirms, resolve once more with the accumulated sidecar —
+`deactivated` flips to `true` and `versionId` reaches `"3"`:
 
 ```bash
-cargo run -q -p did-btcr2-cli -- resolve --network mutinynet "$DID"
+cargo run -q -p did-btcr2-cli -- resolve --sidecar ./deactivate-v3.sidecar.json \
+  --network mutinynet "$DID"
 ```
 
 ```json
@@ -277,7 +301,7 @@ A deactivated DID is terminal — no further updates apply.
 ## Cleanup
 
 ```bash
-rm -f ./demo.hex ./patch.json
+rm -f ./demo.hex ./patch.json ./update-v2.sidecar.json ./deactivate-v3.sidecar.json
 ```
 
 The DID and its history remain on mutinynet forever (it is a public ledger);

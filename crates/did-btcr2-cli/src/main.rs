@@ -19,7 +19,7 @@ use onlyerror::Error;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod keyload;
@@ -66,6 +66,10 @@ enum Command {
         network: Option<String>,
         esplora_url: Option<String>,
         sidecar: Option<PathBuf>,
+        /// Write the merged wire `SidecarData` (input `--sidecar` chain + the
+        /// newly-signed update) to this path AFTER a successful broadcast, so a
+        /// later `resolve --sidecar` completes the round-trip.
+        sidecar_out: Option<PathBuf>,
     },
     Deactivate {
         did: String,
@@ -82,6 +86,10 @@ enum Command {
         network: Option<String>,
         esplora_url: Option<String>,
         sidecar: Option<PathBuf>,
+        /// Write the merged wire `SidecarData` (input `--sidecar` chain + the
+        /// newly-signed deactivation update) to this path AFTER a successful
+        /// broadcast, so a later `resolve --sidecar` completes the round-trip.
+        sidecar_out: Option<PathBuf>,
     },
 }
 
@@ -145,6 +153,13 @@ enum CliRunError {
     /// I/O error (opening the sidecar/patch file, prompting on stdin).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A write/flush to stdout failed (e.g. the downstream reader closed the
+    /// pipe). Kept distinct from `Io` so `main()` can map ONLY a stdout
+    /// `BrokenPipe` to a clean exit — a closed stdin/file stays `Io` and a
+    /// failure. No `#[from]`: the stdout display sites map into it explicitly.
+    #[error("stdout write failed: {0}")]
+    StdoutClosed(std::io::Error),
 
     /// `--key-stdin` (or `--beacon-key-stdin`) was combined with an interactive
     /// broadcast confirm: both would read stdin, so the key and the y/N answer
@@ -437,6 +452,7 @@ fn parse_write(
     let mut network: Option<String> = None;
     let mut esplora_url: Option<String> = None;
     let mut sidecar: Option<PathBuf> = None;
+    let mut sidecar_out: Option<PathBuf> = None;
 
     while let Some(arg) = sub_args.next() {
         match arg.to_str() {
@@ -455,6 +471,7 @@ fn parse_write(
             Some(p @ "--network") => network = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--esplora-url") => esplora_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--sidecar") => sidecar = Some(sub_args.next().parse_path(p)?),
+            Some(p @ "--sidecar-out") => sidecar_out = Some(sub_args.next().parse_path(p)?),
             Some(s) if !s.starts_with('-') => {
                 if did.is_some() {
                     return Err(CliError::Unknown(arg));
@@ -485,6 +502,7 @@ fn parse_write(
                 network,
                 esplora_url,
                 sidecar,
+                sidecar_out,
             })
         }
         WriteKind::Deactivate => Ok(Command::Deactivate {
@@ -502,6 +520,7 @@ fn parse_write(
             network,
             esplora_url,
             sidecar,
+            sidecar_out,
         }),
     }
 }
@@ -565,7 +584,12 @@ fn run_resolve(
     )?;
     let result = client.resolve(&did, opts)?;
     let out = build_resolution_json(&result);
-    println!("{}", serde_json::to_string_pretty(&out)?);
+    writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        serde_json::to_string_pretty(&out)?
+    )
+    .map_err(CliRunError::StdoutClosed)?;
     Ok(())
 }
 
@@ -589,8 +613,10 @@ fn create_and_print<T: BtcTransport>(
         ))
     })?;
     let did: did_btcr2::identifier::Did = id.parse()?;
-    println!("{id}");
-    println!("{}", serde_json::to_string_pretty(doc.as_ref())?);
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{id}").map_err(CliRunError::StdoutClosed)?;
+    writeln!(stdout, "{}", serde_json::to_string_pretty(doc.as_ref())?)
+        .map_err(CliRunError::StdoutClosed)?;
     Ok(did)
 }
 
@@ -618,8 +644,12 @@ fn create_external_and_print<T: BtcTransport>(
     let intermediate = IntermediateDocument::from_json_value(intermediate_json.clone(), network)
         .map_err(did_btcr2_client::Error::from)?;
     let (did, doc) = client.create_external(intermediate, network)?;
-    println!("{}", did.encode());
-    println!("{}", serde_json::to_string_pretty(doc.as_ref())?);
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{}", did.encode()).map_err(CliRunError::StdoutClosed)?;
+        writeln!(stdout, "{}", serde_json::to_string_pretty(doc.as_ref())?)
+            .map_err(CliRunError::StdoutClosed)?;
+    }
     eprintln!(
         "this x1 DID is not deterministically resolvable; resolve it with: \
          did-btcr2 resolve --sidecar <file>"
@@ -718,7 +748,14 @@ fn run_create(
 
     if let Some(secret_key) = generated_secret {
         eprintln!("store this secret — it controls the DID and is shown only once:");
-        println!("{}", hex::encode(secret_key.secret_bytes()));
+        // secret-key output failure is always FAILURE (never exit-0): a truncated,
+        // unrecoverable secret must map to CliRunError::Io (plain `?`), NOT
+        // StdoutClosed, so `create --generate | head` never silently exits 0.
+        writeln!(
+            std::io::stdout().lock(),
+            "{}",
+            hex::encode(secret_key.secret_bytes())
+        )?;
     }
     Ok(())
 }
@@ -741,6 +778,7 @@ struct WriteDispatch {
     network: Option<String>,
     esplora_url: Option<String>,
     sidecar: Option<PathBuf>,
+    sidecar_out: Option<PathBuf>,
 }
 
 /// Run a write operation (`update` or `deactivate`) through the facade.
@@ -829,6 +867,7 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
             dry_run: d.dry_run,
             yes: d.yes,
             sidecar: d.sidecar,
+            sidecar_out: d.sidecar_out,
         },
     )
 }
@@ -849,6 +888,7 @@ struct WriteParams {
     dry_run: bool,
     yes: bool,
     sidecar: Option<PathBuf>,
+    sidecar_out: Option<PathBuf>,
 }
 
 /// Dispatch a write operation into the facade. Generic over the transport so a
@@ -860,10 +900,34 @@ struct WriteParams {
 /// `client.update` / `client.deactivate`. No FSM pump, UTXO/fee math, or
 /// broadcast logic lives here — those are the facade's.
 fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<(), CliRunError> {
+    // Read the --sidecar INPUT file exactly once into an in-memory buffer, then
+    // parse those same bytes twice: once for the resolve options, once (later, on
+    // the broadcast success path) as the merge base for the --sidecar-out emit.
+    // Reusing the buffer — never re-opening the file — is what makes a same-path
+    // `--sidecar == --sidecar-out` write safe: the input is fully in memory before
+    // the out-file is ever created.
+    let input_bytes: Option<Vec<u8>> = match &p.sidecar {
+        Some(path) => Some(std::fs::read(path)?),
+        None => None,
+    };
+    fn parse_sidecar(bytes: &[u8]) -> Result<SidecarData, CliRunError> {
+        Ok(SidecarData::from_json_value(serde_json::from_slice(
+            bytes,
+        )?)?)
+    }
+
     // Resolve the current document for its version_id. Any
     // --sidecar data is threaded in so a DID with prior sidecar-only updates
     // resolves to its true current state before the next update is built.
-    let current = client.resolve(&p.did, load_sidecar(p.sidecar)?)?;
+    let resolve_sidecar = match &input_bytes {
+        Some(b) => Some(parse_sidecar(b)?),
+        None => None,
+    };
+    let opts = ResolutionOptions {
+        sidecar_data: resolve_sidecar,
+        ..Default::default()
+    };
+    let current = client.resolve(&p.did, opts)?;
     let current_version_id = current.document_metadata.version_id;
     let doc = did_btcr2::Document::from_json_value(current.document.as_ref().clone())
         .map_err(did_btcr2_client::Error::from)?;
@@ -895,14 +959,19 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
             .map_err(did_btcr2_client::Error::from)?,
     };
 
+    // Clone the signed update BEFORE it is moved into build_update_tx, so the
+    // after-broadcast --sidecar-out emit can append it to the merged chain.
+    let signed_for_emit = signed.clone();
+
     // --dry-run — build the tx via the facade, print hex + txid, no POST.
     if p.dry_run {
         let tx =
             client.build_update_tx(&doc, signed, p.beacon_idx, p.fee, p.change, p.beacon_sk)?;
         let raw = esploda::bitcoin::consensus::encode::serialize(tx.as_tx());
-        println!("dry-run: tx not broadcast");
-        println!("txid: {}", tx.as_tx().txid());
-        println!("raw:  {}", hex::encode(raw));
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "dry-run: tx not broadcast").map_err(CliRunError::StdoutClosed)?;
+        writeln!(stdout, "txid: {}", tx.as_tx().txid()).map_err(CliRunError::StdoutClosed)?;
+        writeln!(stdout, "raw:  {}", hex::encode(raw)).map_err(CliRunError::StdoutClosed)?;
         return Ok(());
     }
 
@@ -915,10 +984,11 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
         p.change.clone(),
         p.beacon_sk,
     )?;
-    print_tx_summary(&preview);
+    print_tx_summary(&preview)?;
 
     if !p.yes && !confirm_broadcast()? {
-        println!("aborted: not broadcast");
+        writeln!(std::io::stdout().lock(), "aborted: not broadcast")
+            .map_err(CliRunError::StdoutClosed)?;
         return Ok(());
     }
 
@@ -929,7 +999,61 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
     // from the one shown in the summary. Broadcasting `preview` makes the
     // confirmed bytes and the broadcast bytes identical.
     let txid = client.broadcast(&preview)?;
-    println!("broadcast txid: {txid}");
+    writeln!(std::io::stdout().lock(), "broadcast txid: {txid}")
+        .map_err(CliRunError::StdoutClosed)?;
+
+    // Emit the merged wire SidecarData ONLY after a successful broadcast. This is
+    // the sole emit site: --dry-run and a declined confirm both return earlier, so
+    // a --sidecar-out file only ever exists for a broadcast update.
+    // The merge base is a RE-parse of the same in-memory input buffer (no second
+    // file open), preserving the input's genesisDocument + prior updates.
+    if let Some(out) = &p.sidecar_out {
+        let mut sc = match &input_bytes {
+            Some(b) => parse_sidecar(b)?,
+            None => SidecarData::new(None, Vec::new(), None, None),
+        };
+        sc.push_update(signed_for_emit);
+        // Atomic write: the entire output is built in memory, written to a temp
+        // file in the SAME directory, then renamed over the target. Rename is
+        // atomic on the same filesystem, so a failed/interrupted write (disk full,
+        // permission revoked mid-write, process killed) can never truncate or
+        // corrupt the previous file. This matters because the on-chain artifact is
+        // only a 32-byte OP_RETURN hash pointer — the sidecar file is the sole
+        // durable record of the full signed update chain, including prior updates
+        // preserved across a same-path (--sidecar == --sidecar-out) merge.
+        if let Err(e) = write_sidecar_atomic(out, &sc) {
+            // The broadcast already succeeded, so plainly returning the error would
+            // leave the user with an on-chain update but no emitted payload and no
+            // guidance. Signing is deterministic, so re-running the identical
+            // update/deactivate command (same patch, target, key, prior state)
+            // regenerates the exact payload — surface that recovery path on stderr.
+            eprintln!(
+                "broadcast txid {txid} succeeded but writing sidecar {} failed: {e}\n\
+                 re-run the identical update/deactivate command to regenerate this \
+                 payload (signing is deterministic)",
+                out.display()
+            );
+            return Err(e);
+        }
+        writeln!(std::io::stdout().lock(), "wrote sidecar: {}", out.display())
+            .map_err(CliRunError::StdoutClosed)?;
+    }
+    Ok(())
+}
+
+/// Serialize `sc` and write it to `out` atomically.
+///
+/// The full JSON body is built in memory, written to a temporary file in the same
+/// directory as `out`, then renamed over the target. Rename is atomic on the same
+/// filesystem, so an interrupted or failed write never leaves `out` truncated or
+/// holding invalid JSON — the previous contents survive intact. This is the durable
+/// record of the signed update chain (the chain is only a 32-byte hash on-chain),
+/// so a torn write here would be data loss, not a recoverable transient.
+fn write_sidecar_atomic(out: &Path, sc: &SidecarData) -> Result<(), CliRunError> {
+    let body = serde_json::to_string_pretty(sc)?;
+    let tmp = out.with_extension("json.tmp");
+    std::fs::write(&tmp, body.as_bytes())?;
+    std::fs::rename(&tmp, out)?;
     Ok(())
 }
 
@@ -955,13 +1079,17 @@ fn parse_change_address(
 }
 
 /// Print a one-paragraph transaction summary before the confirm prompt.
-fn print_tx_summary(tx: &did_btcr2::SignedBeaconTx) {
+fn print_tx_summary(tx: &did_btcr2::SignedBeaconTx) -> Result<(), CliRunError> {
     let bitcoin_tx = tx.as_tx();
-    println!("about to broadcast a beacon-signal transaction:");
-    println!("  txid:    {}", bitcoin_tx.txid());
-    println!("  inputs:  {}", bitcoin_tx.input.len());
-    println!("  outputs: {}", bitcoin_tx.output.len());
-    println!("  vsize:   {} vB", bitcoin_tx.vsize());
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "about to broadcast a beacon-signal transaction:")
+        .map_err(CliRunError::StdoutClosed)?;
+    writeln!(stdout, "  txid:    {}", bitcoin_tx.txid()).map_err(CliRunError::StdoutClosed)?;
+    writeln!(stdout, "  inputs:  {}", bitcoin_tx.input.len()).map_err(CliRunError::StdoutClosed)?;
+    writeln!(stdout, "  outputs: {}", bitcoin_tx.output.len())
+        .map_err(CliRunError::StdoutClosed)?;
+    writeln!(stdout, "  vsize:   {} vB", bitcoin_tx.vsize()).map_err(CliRunError::StdoutClosed)?;
+    Ok(())
 }
 
 /// Prompt `y/N` on stderr and read a single answer from stdin. Anything other
@@ -977,7 +1105,7 @@ fn confirm_broadcast() -> Result<bool, CliRunError> {
 
 fn run() -> Result<(), CliRunError> {
     let args: Args = onlyargs::parse()?;
-    match args.command {
+    let result = match args.command {
         Command::Create {
             network,
             key_file,
@@ -1015,6 +1143,7 @@ fn run() -> Result<(), CliRunError> {
             network,
             esplora_url,
             sidecar,
+            sidecar_out,
         } => run_write(WriteDispatch {
             did,
             patch: Some(patch),
@@ -1034,6 +1163,7 @@ fn run() -> Result<(), CliRunError> {
             network,
             esplora_url,
             sidecar,
+            sidecar_out,
         }),
         Command::Deactivate {
             did,
@@ -1050,6 +1180,7 @@ fn run() -> Result<(), CliRunError> {
             network,
             esplora_url,
             sidecar,
+            sidecar_out,
         } => run_write(WriteDispatch {
             did,
             patch: None,
@@ -1069,13 +1200,31 @@ fn run() -> Result<(), CliRunError> {
             network,
             esplora_url,
             sidecar,
+            sidecar_out,
         }),
-    }
+    };
+    // Surface a subcommand error first, then flush any residual buffered stdout so
+    // a late EPIPE (a no-newline `write!` whose bytes were still buffered) is
+    // `?`-propagated as StdoutClosed and catchable in main(), rather than silently
+    // dropped in Stdout's destructor.
+    result?;
+    std::io::stdout()
+        .flush()
+        .map_err(CliRunError::StdoutClosed)?;
+    Ok(())
 }
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        // An early-closing stdout reader (`create … | head`, `… | grep -q`, a quit
+        // pager) is normal Unix pipeline usage, not a failure: map ONLY a stdout
+        // BrokenPipe to a clean exit, printing nothing to stderr. Scoped to the
+        // dedicated StdoutClosed variant (not a chain-wide probe) so a closed
+        // stdin/file BrokenPipe stays CliRunError::Io and remains a FAILURE.
+        Err(CliRunError::StdoutClosed(ref e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("Error: {error}");
             for source in error.sources().skip(1) {
@@ -1189,6 +1338,8 @@ mod tests {
             "k.hex",
             "--fee",
             "500",
+            "--sidecar-out",
+            "out.json",
         ]))
         .unwrap();
         let Command::Update {
@@ -1196,6 +1347,7 @@ mod tests {
             patch,
             key_file,
             fee,
+            sidecar_out,
             ..
         } = parsed.command
         else {
@@ -1205,6 +1357,25 @@ mod tests {
         assert_eq!(patch, PathBuf::from("p.json"));
         assert_eq!(key_file, Some(PathBuf::from("k.hex")));
         assert_eq!(fee, FeeArg::Absolute(500));
+        // The write-path `--sidecar-out` OUTPUT threads to Command::Update.
+        assert_eq!(sidecar_out, Some(PathBuf::from("out.json")));
+    }
+
+    #[test]
+    fn parse_update_sidecar_out_absent_is_none() {
+        let parsed = Args::parse(args_from_strings(&[
+            "update",
+            SAMPLE_DID,
+            "--patch",
+            "p.json",
+            "--key-file",
+            "k.hex",
+        ]))
+        .unwrap();
+        let Command::Update { sidecar_out, .. } = parsed.command else {
+            panic!("expected an Update command");
+        };
+        assert_eq!(sidecar_out, None);
     }
 
     #[test]
@@ -1231,6 +1402,8 @@ mod tests {
             "--yes",
             "--feerate",
             "2.5",
+            "--sidecar-out",
+            "out.json",
         ]))
         .unwrap();
         let Command::Deactivate {
@@ -1238,6 +1411,7 @@ mod tests {
             key_stdin,
             yes,
             fee,
+            sidecar_out,
             ..
         } = parsed.command
         else {
@@ -1247,6 +1421,23 @@ mod tests {
         assert!(key_stdin);
         assert!(yes);
         assert_eq!(fee, FeeArg::Rate(2.5));
+        // The write-path `--sidecar-out` OUTPUT threads to Command::Deactivate.
+        assert_eq!(sidecar_out, Some(PathBuf::from("out.json")));
+    }
+
+    #[test]
+    fn parse_deactivate_sidecar_out_absent_is_none() {
+        let parsed = Args::parse(args_from_strings(&[
+            "deactivate",
+            SAMPLE_DID,
+            "--key-stdin",
+            "--yes",
+        ]))
+        .unwrap();
+        let Command::Deactivate { sidecar_out, .. } = parsed.command else {
+            panic!("expected a Deactivate command");
+        };
+        assert_eq!(sidecar_out, None);
     }
 
     #[test]
@@ -1373,6 +1564,156 @@ mod tests {
         }
     }
 
+    // ── Growing-/txs fake transport (CLI round-trip + same-path tests) ───────
+    //
+    // The constant `FakeTransport` above serves an empty `/txs` forever, pinning
+    // a resolve at genesis (v1) — it can never reach v2/v3. To drive the CLI
+    // round-trip we need a `/txs` snapshot that GROWS by one confirmed announce
+    // tx on each `POST /tx`. Ported from `did-btcr2-client/tests/e2e.rs`.
+
+    use std::cell::RefCell;
+
+    /// Build the served Esplora JSON-API transaction from a recovered broadcast
+    /// `bitcoin::Transaction`. The resolver reads only the LAST output's
+    /// scriptPubKey, the confirmed status, and the txid, so only those carry real
+    /// data; `status.confirmed` MUST be true or the re-resolve hits an
+    /// unconfirmed-beacon-tx error.
+    fn esplora_tx_from_bitcoin(
+        tx: &esploda::bitcoin::Transaction,
+        block_height: u32,
+        block_time: i64,
+    ) -> serde_json::Value {
+        let vout: Vec<serde_json::Value> = tx
+            .output
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "scriptpubkey": o.script_pubkey.to_hex_string(),
+                    "value": o.value,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "txid": tx.txid().to_string(),
+            "version": tx.version,
+            "locktime": 0,
+            "vin": [],
+            "vout": vout,
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": block_height,
+                "block_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                "block_time": block_time,
+            },
+        })
+    }
+
+    /// Shared, interior-mutable state for the growing-/txs transport. Held behind
+    /// an `Rc` so the test keeps a handle after the transport is moved into the
+    /// `Client`. Each test owns its own instance (single-threaded), so
+    /// `RefCell`/`Cell` are correct.
+    #[derive(Default)]
+    struct GrowingFakeState {
+        /// Confirmed beacon announce txs served by `/txs`, as Esplora JSON-API
+        /// values. Starts empty and grows by one on each `POST /tx`.
+        served_txs: RefCell<Vec<serde_json::Value>>,
+        /// Monotonic counter so each `/utxo` call hands back a distinct funding
+        /// UTXO (never starves the second announce build).
+        utxo_seq: Cell<u32>,
+        /// Count of `POST /tx` calls (broadcasts).
+        post_tx_calls: Cell<usize>,
+    }
+
+    /// A stateful in-process transport whose `/txs` snapshot GROWS on each
+    /// broadcast, so a `resolve --sidecar` after the emit reaches the next
+    /// `versionId`.
+    struct GrowingTransport {
+        state: Rc<GrowingFakeState>,
+        /// Chain-tip height (>= each announce tx's `block_height`).
+        tip: u32,
+    }
+
+    impl GrowingTransport {
+        fn new() -> (Self, Rc<GrowingFakeState>) {
+            let state = Rc::new(GrowingFakeState::default());
+            (
+                Self {
+                    state: Rc::clone(&state),
+                    tip: 200,
+                },
+                state,
+            )
+        }
+
+        /// A fresh confirmed funding UTXO (distinct outpoint per call) covering
+        /// the fee, so both the update and deactivate announce builds are funded
+        /// even though the fake does not track spentness.
+        fn utxo_body(&self) -> Vec<u8> {
+            let n = self.state.utxo_seq.get();
+            self.state.utxo_seq.set(n + 1);
+            let txid = format!("{n:064x}");
+            serde_json::json!([{
+                "txid": txid,
+                "vout": 0,
+                "value": 100_000u64,
+                "status": { "confirmed": true, "block_height": 90 }
+            }])
+            .to_string()
+            .into_bytes()
+        }
+    }
+
+    impl BtcTransport for GrowingTransport {
+        fn execute(
+            &self,
+            req: http::Request<Vec<u8>>,
+        ) -> Result<http::Response<Vec<u8>>, did_btcr2_client::TransportError> {
+            let method = req.method().clone();
+            let path = req.uri().path();
+
+            // POST /tx: recover the broadcast tx from hex, BUILD the Esplora
+            // JSON-API shape (not consensus-decode into it), push it into /txs.
+            if method == http::Method::POST && path.ends_with("/tx") {
+                self.state
+                    .post_tx_calls
+                    .set(self.state.post_tx_calls.get() + 1);
+                let raw = hex::decode(req.body()).expect("the facade posts ASCII hex");
+                let tx: esploda::bitcoin::Transaction =
+                    esploda::bitcoin::consensus::encode::deserialize(&raw)
+                        .expect("the facade posts a consensus-encoded tx");
+                let esplora = esplora_tx_from_bitcoin(&tx, 100, 1_700_000_000);
+                self.state.served_txs.borrow_mut().push(esplora);
+                return Ok(http::Response::builder()
+                    .status(200)
+                    .body(tx.txid().to_string().into_bytes())
+                    .expect("static status is valid"));
+            }
+
+            let body: Vec<u8> = if path.ends_with("/blocks/tip/height") {
+                self.tip.to_string().into_bytes()
+            } else if path.contains("/address/") && path.ends_with("/txs") {
+                // The current snapshot of confirmed announce txs.
+                serde_json::Value::Array(self.state.served_txs.borrow().clone())
+                    .to_string()
+                    .into_bytes()
+            } else if path.contains("/address/") && path.ends_with("/utxo") {
+                self.utxo_body()
+            } else if path.ends_with("/fee-estimates") {
+                br#"{"6":1.0}"#.to_vec()
+            } else {
+                b"[]".to_vec()
+            };
+
+            Ok(http::Response::builder()
+                .status(200)
+                .body(body)
+                .expect("static status is valid"))
+        }
+    }
+
     /// The deterministic key backing the DID, the update proof, and the beacon
     /// inputs (default singleton path).
     fn test_secret_key() -> secp256k1::SecretKey {
@@ -1408,6 +1749,12 @@ mod tests {
         // Write a benign patch file the dispatch reads.
         let dir = std::env::temp_dir();
         let patch_path = dir.join(format!("did-btcr2-cli-dryrun-{}.json", std::process::id()));
+        // A fresh --sidecar-out path that must NOT exist after a --dry-run.
+        let sc_path = dir.join(format!(
+            "did-btcr2-cli-dryrun-sidecar-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sc_path);
         std::fs::write(
             &patch_path,
             serde_json::json!([{"op": "add", "path": "/assertionMethod/-", "value": vm_id}])
@@ -1429,6 +1776,7 @@ mod tests {
                 dry_run: true,
                 yes: true,
                 sidecar: None,
+                sidecar_out: Some(sc_path.clone()),
             },
         );
 
@@ -1439,6 +1787,12 @@ mod tests {
 
         // The whole point: a --dry-run issues ZERO POST /tx.
         assert_eq!(post_count.get(), 0, "a --dry-run broadcasts nothing");
+        // A --dry-run --sidecar-out writes NO file (emit sits after broadcast).
+        assert!(
+            !sc_path.exists(),
+            "a --dry-run --sidecar-out writes no file"
+        );
+        let _ = std::fs::remove_file(&sc_path);
     }
 
     #[test]
@@ -1495,6 +1849,7 @@ mod tests {
                 dry_run: false,
                 yes: true, // skip the interactive confirm
                 sidecar: None,
+                sidecar_out: None,
             },
         );
 
@@ -1509,6 +1864,271 @@ mod tests {
             "a real write funds (fetches /utxo) exactly once — the previewed tx \
              is the broadcast tx, not a rebuild"
         );
+    }
+
+    // ── Sidecar round-trip + invariants (the whole point of --sidecar-out) ───
+
+    /// Mint a genesis singleton DID via the facade and return `(did, vm_id)`.
+    fn genesis_did<T: BtcTransport>(client: &Client<T>) -> (did_btcr2::identifier::Did, String) {
+        let sk = test_secret_key();
+        let secp = secp256k1::Secp256k1::new();
+        let pk = sk.public_key(&secp);
+        let doc = client
+            .create(&pk, did_btcr2::identifier::Network::Mutinynet)
+            .expect("create succeeds");
+        let did: did_btcr2::identifier::Did = doc.as_ref()["id"]
+            .as_str()
+            .expect("document has a string id")
+            .parse()
+            .expect("document id parses as a Did");
+        let vm_id = format!("{}#initialKey", did.encode());
+        (did, vm_id)
+    }
+
+    /// Drive the FULL create→update→resolve(v2)→deactivate→resolve(v3) lifecycle
+    /// through the CLI's `execute_write` path (NOT hand-built SidecarData) against
+    /// the growing-/txs fake, emitting real `--sidecar-out` files and feeding each
+    /// back via `resolve --sidecar`. Proves an emitted update sidecar resolves to
+    /// v2 (no MISSING_UPDATE_DATA) and an emitted deactivate sidecar resolves to
+    /// v3 with `deactivated == true` — roadmap criteria #2 and #3.
+    #[test]
+    fn cli_sidecar_out_roundtrip() {
+        let (transport, _state) = GrowingTransport::new();
+        let client = Client::new("http://fake".to_string(), transport);
+        let (did, vm_id) = genesis_did(&client);
+
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let patch_path = dir.join(format!("did-btcr2-cli-rt-patch-{pid}.json"));
+        let v2_path = dir.join(format!("did-btcr2-cli-rt-v2-{pid}.json"));
+        let v3_path = dir.join(format!("did-btcr2-cli-rt-v3-{pid}.json"));
+        std::fs::write(
+            &patch_path,
+            serde_json::json!([{"op": "add", "path": "/assertionMethod/-", "value": vm_id}])
+                .to_string(),
+        )
+        .expect("write patch file");
+
+        // UPDATE: resolves genesis (/txs empty → v1), broadcasts the v2 update
+        // (pushes it into /txs), and emits v2.json = {"updates":[update1]}.
+        execute_write(
+            &client,
+            WriteParams {
+                did: did.clone(),
+                patch: Some(patch_path.clone()),
+                vm_id: vm_id.clone(),
+                update_sk: test_update_sk(),
+                beacon_sk: test_secret_key(),
+                beacon_idx: 1,
+                fee: Fee::Absolute(1_000),
+                change: None,
+                dry_run: false,
+                yes: true,
+                sidecar: None,
+                sidecar_out: Some(v2_path.clone()),
+            },
+        )
+        .expect("the update write broadcasts and emits v2.json");
+
+        // Criterion #2: the emitted update sidecar resolves to v2, not deactivated.
+        let r2 = client
+            .resolve(
+                &did,
+                load_sidecar(Some(v2_path.clone())).expect("v2 sidecar loads"),
+            )
+            .expect("the v2 sidecar resolves (no MISSING_UPDATE_DATA)");
+        assert_eq!(
+            r2.document_metadata.version_id.get(),
+            2,
+            "the emitted update sidecar drives resolve to version 2",
+        );
+        assert!(
+            !r2.document_metadata.deactivated,
+            "the v2 document is not deactivated",
+        );
+
+        // DEACTIVATE: resolves to v2 (v2.json sidecar + /txs=[update1]), broadcasts
+        // the deactivate (pushes it → /txs=[update1, deactivate]), and merges
+        // v2.json + deactivate → v3.json = {"updates":[update1, deactivate]}.
+        execute_write(
+            &client,
+            WriteParams {
+                did: did.clone(),
+                patch: None,
+                vm_id: vm_id.clone(),
+                update_sk: test_update_sk(),
+                beacon_sk: test_secret_key(),
+                beacon_idx: 1,
+                fee: Fee::Absolute(1_000),
+                change: None,
+                dry_run: false,
+                yes: true,
+                sidecar: Some(v2_path.clone()),
+                sidecar_out: Some(v3_path.clone()),
+            },
+        )
+        .expect("the deactivate write broadcasts and emits v3.json");
+
+        // Criterion #3: the emitted deactivate sidecar resolves to v3, deactivated.
+        let r3 = client
+            .resolve(
+                &did,
+                load_sidecar(Some(v3_path.clone())).expect("v3 sidecar loads"),
+            )
+            .expect("the v3 sidecar resolves");
+        assert_eq!(
+            r3.document_metadata.version_id.get(),
+            3,
+            "the emitted deactivate sidecar drives resolve to version 3",
+        );
+        assert!(
+            r3.document_metadata.deactivated,
+            "the v3 document is deactivated",
+        );
+
+        // Keep the client (and its moved-in fake) alive until the assertions.
+        drop(client);
+        let _ = std::fs::remove_file(&patch_path);
+        let _ = std::fs::remove_file(&v2_path);
+        let _ = std::fs::remove_file(&v3_path);
+    }
+
+    /// A declined confirm (no `--yes`, EOF stdin under `cargo test`) returns
+    /// Ok("aborted: not broadcast") BEFORE the broadcast, so a `--sidecar-out`
+    /// file is never written and zero `POST /tx` cross the transport.
+    #[test]
+    fn declined_confirm_writes_no_sidecar() {
+        let post_count = Rc::new(Cell::new(0usize));
+        let transport = FakeTransport::new(Rc::clone(&post_count));
+        let client = Client::new("http://fake".to_string(), transport);
+        let (did, vm_id) = genesis_did(&client);
+
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let patch_path = dir.join(format!("did-btcr2-cli-declined-patch-{pid}.json"));
+        let sc_path = dir.join(format!("did-btcr2-cli-declined-sidecar-{pid}.json"));
+        std::fs::write(
+            &patch_path,
+            serde_json::json!([{"op": "add", "path": "/assertionMethod/-", "value": vm_id}])
+                .to_string(),
+        )
+        .expect("write patch file");
+        // Ensure a stale file from a prior run does not mask the assertion.
+        let _ = std::fs::remove_file(&sc_path);
+
+        let result = execute_write(
+            &client,
+            WriteParams {
+                did,
+                patch: Some(patch_path.clone()),
+                vm_id,
+                update_sk: test_update_sk(),
+                beacon_sk: test_secret_key(),
+                beacon_idx: 1,
+                fee: Fee::Absolute(1_000),
+                change: None,
+                dry_run: false,
+                yes: false, // decline: cargo-test stdin is EOF → confirm returns false
+                sidecar: None,
+                sidecar_out: Some(sc_path.clone()),
+            },
+        );
+
+        drop(client);
+        let _ = std::fs::remove_file(&patch_path);
+        result.expect("a declined confirm returns Ok (aborted is not an error)");
+
+        assert!(
+            !sc_path.exists(),
+            "a declined confirm --sidecar-out writes no file",
+        );
+        assert_eq!(post_count.get(), 0, "a declined confirm broadcasts nothing",);
+        let _ = std::fs::remove_file(&sc_path);
+    }
+
+    /// Reading and truncating the SAME path (`--sidecar` == `--sidecar-out`)
+    /// does not corrupt or lose the merged chain. Emit a v2 file at `p` via a real
+    /// update, then run a real deactivate with `p` as BOTH input and output — the
+    /// resulting `p` must still resolve to v3 with `deactivated == true`.
+    #[test]
+    fn cli_sidecar_same_path_in_out_roundtrips() {
+        let (transport, _state) = GrowingTransport::new();
+        let client = Client::new("http://fake".to_string(), transport);
+        let (did, vm_id) = genesis_did(&client);
+
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let patch_path = dir.join(format!("did-btcr2-cli-samepath-patch-{pid}.json"));
+        let p = dir.join(format!("did-btcr2-cli-samepath-sidecar-{pid}.json"));
+        std::fs::write(
+            &patch_path,
+            serde_json::json!([{"op": "add", "path": "/assertionMethod/-", "value": vm_id}])
+                .to_string(),
+        )
+        .expect("write patch file");
+
+        // Real update: emit v2 at `p` (no input sidecar).
+        execute_write(
+            &client,
+            WriteParams {
+                did: did.clone(),
+                patch: Some(patch_path.clone()),
+                vm_id: vm_id.clone(),
+                update_sk: test_update_sk(),
+                beacon_sk: test_secret_key(),
+                beacon_idx: 1,
+                fee: Fee::Absolute(1_000),
+                change: None,
+                dry_run: false,
+                yes: true,
+                sidecar: None,
+                sidecar_out: Some(p.clone()),
+            },
+        )
+        .expect("the update write emits v2 at p");
+
+        let r2 = client
+            .resolve(&did, load_sidecar(Some(p.clone())).expect("p loads"))
+            .expect("p resolves to v2");
+        assert_eq!(r2.document_metadata.version_id.get(), 2, "p is at v2");
+
+        // Real deactivate with the SAME path for input AND output: read-fully then
+        // truncate-write must not lose the merged chain.
+        execute_write(
+            &client,
+            WriteParams {
+                did: did.clone(),
+                patch: None,
+                vm_id: vm_id.clone(),
+                update_sk: test_update_sk(),
+                beacon_sk: test_secret_key(),
+                beacon_idx: 1,
+                fee: Fee::Absolute(1_000),
+                change: None,
+                dry_run: false,
+                yes: true,
+                sidecar: Some(p.clone()),
+                sidecar_out: Some(p.clone()),
+            },
+        )
+        .expect("the same-path deactivate write succeeds");
+
+        let r3 = client
+            .resolve(&did, load_sidecar(Some(p.clone())).expect("p loads"))
+            .expect("p resolves to v3");
+        assert_eq!(
+            r3.document_metadata.version_id.get(),
+            3,
+            "the same-path write still round-trips to v3",
+        );
+        assert!(
+            r3.document_metadata.deactivated,
+            "the same-path v3 document is deactivated",
+        );
+
+        drop(client);
+        let _ = std::fs::remove_file(&patch_path);
+        let _ = std::fs::remove_file(&p);
     }
 
     // ── create: parse paths ──────────────────────────────────────────────────
@@ -1744,6 +2364,43 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         std::env::temp_dir().join(format!("did-btcr2-cli-test-{tag}-{pid}-{n}.json"))
+    }
+
+    #[test]
+    fn write_sidecar_atomic_replaces_without_torn_write() {
+        // The sidecar file is the sole durable record of the signed update chain
+        // (on-chain is only a 32-byte hash), so the emit MUST be atomic: an
+        // existing file is either the old contents or the fully-written new
+        // contents, never a truncated/half-written mix, and no temp file is left
+        // behind on success.
+        let out = unique_temp_path("atomic-write");
+        let genesis = serde_json::json!({ "id": "did:btcr2:example", "marker": 1 });
+
+        // Pre-seed the target with prior valid contents so we exercise the
+        // rename-over-existing path (not just first-write).
+        let first = SidecarData::new(Some(genesis.clone()), Vec::new(), None, None);
+        write_sidecar_atomic(&out, &first).expect("first atomic write succeeds");
+
+        // Overwrite with new contents; rename replaces the prior file atomically.
+        let second_genesis = serde_json::json!({ "id": "did:btcr2:example", "marker": 2 });
+        let second = SidecarData::new(Some(second_genesis.clone()), Vec::new(), None, None);
+        write_sidecar_atomic(&out, &second).expect("second atomic write succeeds");
+
+        // The file holds the fully-written second payload (valid JSON, not torn),
+        // and the sibling temp file was renamed away — none is left behind.
+        let bytes = std::fs::read(&out).expect("sidecar file exists after write");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("sidecar file is valid JSON, not truncated");
+        assert_eq!(value["genesisDocument"]["marker"], 2);
+        let tmp = out.with_extension("json.tmp");
+        assert!(
+            !tmp.exists(),
+            "temp file {} must not be left behind after a successful atomic write",
+            tmp.display()
+        );
+
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use esploda::bitcoin::Address;
 use json_patch::Patch;
 use nonempty::NonEmpty;
 use onlyerror::Error;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs, num::NonZeroU64, path::Path, str::FromStr};
 
@@ -554,6 +554,52 @@ impl<'de> Deserialize<'de> for SidecarData {
     }
 }
 
+/// Private borrowing wire-ref mirror of [`SidecarDataWire`], driving the manual
+/// `Serialize` for [`SidecarData`]. The read side ([`SidecarDataWire`]) and this
+/// emit side carry the SAME four spec wire fields in the same order, so the
+/// serialize/deserialize contract stays visibly paired: `genesisDocument`,
+/// `updates`, `casUpdates`, `smtProofs`. The two non-wire fields
+/// (`update_lookup_table`, `initial_document`) are simply absent here, so they
+/// can never leak onto the wire.
+///
+/// Borrowing shape note: the Option fields are `Option<&'a T>` (populated via
+/// `.as_ref()`), NOT `&'a Option<T>`. With the latter, serde's
+/// `skip_serializing_if = "Option::is_none"` would hand `Option::is_none` a
+/// `&&Option<T>` and fail to compile.
+#[derive(Serialize)]
+struct SidecarDataWireRef<'a> {
+    #[serde(rename = "genesisDocument", skip_serializing_if = "Option::is_none")]
+    genesis_document: Option<&'a Value>,
+    /// Each element is the corresponding `Update`'s stored signed wire JSON
+    /// (`&update.json`) surfaced verbatim — NOT re-encoded from typed fields, so
+    /// the spec-fixed shapes (e.g. `targetVersionId` as an unquoted number)
+    /// survive unchanged.
+    updates: Vec<&'a Value>,
+    #[serde(rename = "casUpdates", skip_serializing_if = "Option::is_none")]
+    cas_updates: Option<&'a Vec<Value>>,
+    #[serde(rename = "smtProofs", skip_serializing_if = "Option::is_none")]
+    smt_proofs: Option<&'a Vec<Value>>,
+}
+
+impl Serialize for SidecarData {
+    /// Emit exactly the four spec wire fields the manual `Deserialize` reads
+    /// back — surfacing each `Update`'s stored wire JSON rather than
+    /// re-serializing typed fields. `None` Options are omitted (never `null`);
+    /// `update_lookup_table` and `initial_document` never appear.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        SidecarDataWireRef {
+            genesis_document: self.genesis_document.as_ref(),
+            updates: self.updates.iter().map(|u| &u.json).collect(),
+            cas_updates: self.cas_updates.as_ref(),
+            smt_proofs: self.smt_proofs.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
 impl SidecarData {
     /// Construct from wire-form parts and build `update_lookup_table` eagerly
     pub fn new(
@@ -589,6 +635,22 @@ impl SidecarData {
     /// `serde_json::from_value::<SidecarData>` directly (which skips the table).
     pub fn rebuild_lookup_table(&mut self) {
         self.update_lookup_table = self.updates.iter().map(|u| (u.hash(), u.clone())).collect();
+    }
+
+    /// Append a signed update to the sidecar and rebuild the lookup table.
+    ///
+    /// This method is dedup-on-hash by design: it skips the append if an update
+    /// with the same [`Update::hash()`] is already present (the resolver
+    /// collapses dupes, but a clean file is preferred). It preserves
+    /// `genesis_document` (and the other wire fields) untouched, so the CLI — a
+    /// separate crate that cannot reach the `pub(crate)` wire fields — can
+    /// accumulate the update chain without dropping an external DID's genesis.
+    pub fn push_update(&mut self, update: Update) {
+        if self.updates.iter().any(|u| u.hash() == update.hash()) {
+            return;
+        }
+        self.updates.push(update);
+        self.rebuild_lookup_table();
     }
 }
 
@@ -2103,6 +2165,115 @@ mod tests {
         assert!(data.cas_updates.is_some());
         assert!(data.smt_proofs.is_some());
         assert!(data.update_lookup_table.is_empty());
+    }
+
+    /// Load the two distinct valid signed updates from the shared
+    /// `sidecar-two-updates.json` fixture (real BIP340 proofs, spec-form
+    /// `targetVersionId` numbers), returning them as `(u1, u2)`. Reused by the
+    /// emit-side round-trip tests so no proof is hand-fabricated.
+    fn two_fixture_updates() -> (Update, Update) {
+        let raw = include_str!("../fixtures/spec-form/sidecar-two-updates.json");
+        let value: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        let updates = value["updates"].as_array().expect("updates array");
+        assert_eq!(updates.len(), 2, "fixture must carry exactly two updates");
+        let u1 = Update::from_json_value(updates[0].clone()).expect("update 0 parses");
+        let u2 = Update::from_json_value(updates[1].clone()).expect("update 1 parses");
+        (u1, u2)
+    }
+
+    /// The emit half of the round-trip (roadmap criterion #5, core half): a
+    /// `SidecarData` built in memory serializes to spec wire JSON and re-parses
+    /// equal. Updates match by [`Update::hash()`] (they have no `PartialEq`).
+    /// Also pins that `targetVersionId` stays an unquoted JSON *number* (D-7a) —
+    /// so a future "clean up to typed serialize" refactor cannot silently quote
+    /// it — and that no non-wire field ever leaks.
+    #[test]
+    fn sidecar_serialize_roundtrip() {
+        let (update, _) = two_fixture_updates();
+        let sc = SidecarData::new(None, vec![update.clone()], None, None);
+
+        let v = serde_json::to_value(&sc).expect("SidecarData serializes");
+        let obj = v
+            .as_object()
+            .expect("serialized SidecarData is a JSON object");
+
+        // Exactly the `updates` wire field is present; no genesis / CAS / SMT
+        // (all None), and NEITHER internal field ever emits.
+        assert_eq!(v["updates"].as_array().expect("updates array").len(), 1);
+        assert!(!obj.contains_key("genesisDocument"));
+        assert!(!obj.contains_key("casUpdates"));
+        assert!(!obj.contains_key("smtProofs"));
+        assert!(!obj.contains_key("update_lookup_table"));
+        assert!(!obj.contains_key("initial_document"));
+
+        // Each emitted update equals the Update's stored wire JSON verbatim.
+        assert_eq!(v["updates"][0], update.json);
+
+        // targetVersionId number pin (D-7a).
+        let u0 = v["updates"][0]
+            .as_object()
+            .expect("emitted update is an object");
+        let tvid = u0
+            .get("targetVersionId")
+            .expect("fixture update carries targetVersionId");
+        assert!(tvid.is_number(), "targetVersionId must stay a JSON number");
+        assert!(
+            !tvid.is_string(),
+            "targetVersionId must NOT be quoted as a string"
+        );
+
+        // serialize -> deserialize identity: the update survives by hash and the
+        // lookup table is rebuilt on the parse boundary.
+        let back = SidecarData::from_json_value(v).expect("emitted wire re-parses");
+        assert_eq!(back.updates.len(), 1);
+        assert_eq!(back.updates[0].hash(), update.hash());
+        assert!(back.update_lookup_table.contains_key(&update.hash()));
+    }
+
+    /// `push_update` preserves an existing `genesisDocument` while appending an
+    /// update (the merge invariant), and the merged `SidecarData` emits the
+    /// genesis + both updates and re-parses equal. Genesis is a plain `Value`
+    /// (compared by `==`); updates compare by [`Update::hash()`].
+    #[test]
+    fn push_update_preserves_genesis() {
+        let (u1, u2) = two_fixture_updates();
+        let genesis_value = json!({
+            "id": "did:btcr2:_",
+            "@context": ["https://www.w3.org/ns/did/v1.1"],
+        });
+
+        let mut sc = SidecarData::new(Some(genesis_value.clone()), vec![u1.clone()], None, None);
+        sc.push_update(u2.clone());
+
+        // Append kept genesis and produced [u1, u2].
+        assert_eq!(sc.updates.len(), 2);
+        assert_eq!(sc.genesis_document, Some(genesis_value.clone()));
+        assert_eq!(sc.updates[0].hash(), u1.hash());
+        assert_eq!(sc.updates[1].hash(), u2.hash());
+
+        // Dedup-on-hash: re-pushing an already-present update is a no-op.
+        sc.push_update(u1.clone());
+        assert_eq!(
+            sc.updates.len(),
+            2,
+            "push_update must dedup on Update::hash()"
+        );
+
+        // Emit carries the genesis and both updates.
+        let v = serde_json::to_value(&sc).expect("merged SidecarData serializes");
+        assert_eq!(
+            v.get("genesisDocument"),
+            Some(&genesis_value),
+            "genesisDocument must survive the merge and emit unchanged"
+        );
+        assert_eq!(v["updates"].as_array().expect("updates array").len(), 2);
+
+        // serialize -> deserialize identity through the merged form.
+        let back = SidecarData::from_json_value(v).expect("merged wire re-parses");
+        assert_eq!(back.updates.len(), 2);
+        assert_eq!(back.genesis_document, Some(genesis_value));
+        assert!(back.update_lookup_table.contains_key(&u1.hash()));
+        assert!(back.update_lookup_table.contains_key(&u2.hash()));
     }
 
     /// DocumentMetadata.version_id round-trips

@@ -107,15 +107,19 @@ that writes a genesis sidecar for an external (`x1`) DID (see the `x1`
 external-creation lifecycle below). The resolve-time `--sidecar` governs how
 resolver inputs that are not on the chain reach the resolver:
 
-- **on-chain (default):** the beacon transaction carries an OP_RETURN commitment;
-  the resolver reads the update from the chain.
-- **update sidecar:** the update payload is delivered out-of-band as a file,
-  passed to `resolve --sidecar <file>`.
+- **on-chain commitment:** the beacon transaction carries only a 32-byte OP_RETURN
+  commitment, not the update payload. The resolver learns *that* an update exists
+  but cannot reconstruct it from the chain alone.
+- **update sidecar:** the update payload is delivered out-of-band as a file (the
+  one emitted by `update --sidecar-out`), passed to `resolve --sidecar <file>` so
+  the resolver can apply it. For a singleton update this is **required** to reach
+  the new version — a plain resolve stays at `versionId "1"`.
 - **genesis sidecar:** an `x1` DID's genesis (intermediate) document is delivered
   out-of-band; the same `resolve --sidecar <file>` bridges it into the initial
   document and validates it against the `x1` genesis bytes.
 
-Step 5 shows both paths for the update→resolve leg.
+Step 5 shows both the sidecar path (which reaches v2) and the plain resolve (which
+does not) for the update→resolve leg.
 
 ### `x1` external-creation lifecycle (create-external → sidecar-out → resolve)
 
@@ -241,7 +245,9 @@ beacon.
 ]
 ```
 
-Broadcast the update (`--yes` skips the confirm prompt):
+Broadcast the update (`--yes` skips the confirm prompt). Pass
+`--sidecar-out ./update-v2.sidecar.json` so the write emits the update payload to a
+file — you feed that file back to `resolve` in Step 5:
 
 ```bash
 cargo run -p did-btcr2-cli -- update \
@@ -249,27 +255,32 @@ cargo run -p did-btcr2-cli -- update \
   --patch ./patch.json \
   --key-file ./demo.hex \
   --network mutinynet \
+  --sidecar-out ./update-v2.sidecar.json \
   --yes
 ```
 
-SAMPLE broadcast output (illustrative txid — not real):
+SAMPLE broadcast output (illustrative txid — not real); the sidecar line is
+emitted only after a successful broadcast:
 
 ```
 SAMPLE  broadcast update beacon signal
 SAMPLE  txid: 1111111111111111111111111111111111111111111111111111111111111111
+SAMPLE  wrote sidecar: ./update-v2.sidecar.json
 ```
 
 ---
 
-## Step 5 — Resolve after update (both delivery paths)
+## Step 5 — Resolve after update (sidecar required for a singleton update)
 
-### 5a. On-chain path (default) — USER-run, SAMPLE output
+### 5a. Sidecar path (default) — USER-run, SAMPLE output
 
-Once the step-4 transaction confirms, the OP_RETURN commitment is on-chain and a
-plain `resolve` picks it up, advancing `versionId` to `"2"`:
+Once the step-4 transaction confirms, resolve with the sidecar file emitted in
+Step 4 to reach `versionId "2"`. The on-chain beacon signal is only a 32-byte
+commitment — the update payload itself lives in the sidecar, so `resolve` needs it:
 
 ```bash
-cargo run -p did-btcr2-cli -- resolve --network mutinynet \
+cargo run -p did-btcr2-cli -- resolve --sidecar ./update-v2.sidecar.json \
+  --network mutinynet \
   did:btcr2:k1q5p8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqr4e30t
 ```
 
@@ -289,20 +300,21 @@ SAMPLE output (depends on a real broadcast — not captured here):
 }
 ```
 
-### 5b. Sidecar path — USER-run, SAMPLE output
+### 5b. Plain resolve (no sidecar) — yields only `versionId "1"`
 
-If the update payload was delivered out-of-band (as `sidecar.json`) instead of via
-the on-chain OP_RETURN, pass it to `resolve --sidecar`:
+A plain `resolve` with no `--sidecar` does **not** reach v2 for this singleton
+update. The on-chain OP_RETURN is a bare commitment, not the update payload, so the
+resolver has nothing to apply — it returns the genesis document at `versionId "1"`
+(a plain resolve of an update whose payload is off-chain fails with
+`MISSING_UPDATE_DATA` rather than silently advancing):
 
 ```bash
 cargo run -p did-btcr2-cli -- resolve --network mutinynet \
-  --sidecar ./sidecar.json \
   did:btcr2:k1q5p8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqr4e30t
 ```
 
-SAMPLE output: the same resolved document and `"versionId": "2"` as 5a — the
-difference is only *how the update payload reached the resolver* (out-of-band file
-vs. on-chain), not the result.
+To reach v2 the operator MUST pass the emitted sidecar, as in 5a — the difference
+is whether the update payload reaches the resolver at all, not merely *how*.
 
 ---
 
@@ -310,13 +322,18 @@ vs. on-chain), not the result.
 
 `deactivate` takes the same key/fee/broadcast flags as `update`, with no
 `--patch`. It broadcasts a beacon signal marking the DID deactivated — user-run,
-SAMPLE output:
+SAMPLE output. Pass the Step-4 sidecar as **input**
+(`--sidecar ./update-v2.sidecar.json`) and a new **output** file
+(`--sidecar-out ./deactivate-v3.sidecar.json`) so the emitted file accumulates the
+full chain (update + deactivation):
 
 ```bash
 cargo run -p did-btcr2-cli -- deactivate \
   did:btcr2:k1q5p8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqr4e30t \
   --key-file ./demo.hex \
   --network mutinynet \
+  --sidecar ./update-v2.sidecar.json \
+  --sidecar-out ./deactivate-v3.sidecar.json \
   --yes
 ```
 
@@ -325,12 +342,15 @@ SAMPLE broadcast output (illustrative txid — not real):
 ```
 SAMPLE  broadcast deactivate beacon signal
 SAMPLE  txid: 2222222222222222222222222222222222222222222222222222222222222222
+SAMPLE  wrote sidecar: ./deactivate-v3.sidecar.json
 ```
 
-Resolve once the deactivation confirms — `deactivated` flips to `true`:
+Resolve once the deactivation confirms, passing the accumulated sidecar —
+`deactivated` flips to `true` and `versionId` reaches `"3"`:
 
 ```bash
-cargo run -p did-btcr2-cli -- resolve --network mutinynet \
+cargo run -p did-btcr2-cli -- resolve --sidecar ./deactivate-v3.sidecar.json \
+  --network mutinynet \
   did:btcr2:k1q5p8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqr4e30t
 ```
 
@@ -356,7 +376,8 @@ A deactivated DID is terminal — no further updates apply.
 ## Cleanup
 
 ```bash
-rm -f ./demo.hex ./patch.json ./sidecar.json
+rm -f ./demo.hex ./patch.json ./sidecar.json \
+  ./update-v2.sidecar.json ./deactivate-v3.sidecar.json
 ```
 
 See **[README.md](./README.md)** for the full command/flag reference.

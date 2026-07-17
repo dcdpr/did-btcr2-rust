@@ -74,9 +74,22 @@ pub enum Error {
     #[error("version_id overflow: the DID is already at the maximum version")]
     VersionIdOverflow,
 
-    /// No confirmed beacon UTXO covers the required fee (nothing to fund the
-    /// announcement with).
-    NoSpendableUtxo,
+    /// No confirmed beacon UTXO covers the required fee.
+    #[error(
+        "no confirmed UTXO at beacon address {address} covers the required fee of {required_fee_sats} sats (found {found_confirmed_sats} confirmed)"
+    )]
+    NoSpendableUtxo {
+        /// The beacon address queried for spendable UTXOs (rendered form).
+        address: String,
+        /// The fee (sats) the funding needed to cover.
+        required_fee_sats: u64,
+        /// The confirmed sats that were weighed against the fee and fell short
+        /// (sats): the full confirmed balance at `address` on the absolute-fee
+        /// path, or the single funding input the single-input rate-fee path is
+        /// bounded to. Reporting the address total on the rate path would be
+        /// self-contradictory (it can exceed the fee the one usable input can't).
+        found_confirmed_sats: u64,
+    },
 
     /// The resolved document has no beacon at the requested index.
     NoBeacon,
