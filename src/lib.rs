@@ -35,6 +35,9 @@ mod zcap;
 #[cfg(test)]
 mod test_signing;
 
+#[cfg(test)]
+mod test_vectors;
+
 // Re-exports of key components
 pub use beacon::{
     AnnounceError, BeaconInput, BeaconInputScheme, Prevout, Sig, Sighash, SignedBeaconTx,

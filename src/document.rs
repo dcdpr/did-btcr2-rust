@@ -1374,6 +1374,7 @@ mod tests {
     // feature-gated under `old-spec-fixtures`. Gate the import to match.
     #[cfg(feature = "old-spec-fixtures")]
     use crate::resolver::ResolverState;
+    use crate::test_vectors::read_fixture_or_skip;
 
     impl Did {
         fn hash_unchecked(&self) -> Sha256Hash {
@@ -1409,53 +1410,6 @@ mod tests {
         assert_eq!(v["sibling"], "did:btcr2:x1abcXYZ");
         assert_eq!(v["list"][0], "did:btcr2:_"); // exercises Array recursion arm
         assert_eq!(v["list"][1], "did:btcr2:_#svc");
-    }
-
-    /// True iff the `test-suite/` submodule is checked out (vs. an empty
-    /// placeholder directory left by a non-recursive clone). The probe is the
-    /// presence of the `test-suite/regtest/` directory — the common root of every
-    /// operation-vector fixture; a non-recursive clone leaves `test-suite/` empty
-    /// with no `regtest/` child.
-    ///
-    /// Intentionally duplicated in the `resolver.rs` test module — a private
-    /// `#[cfg(test)]` helper in one file cannot be shared into another file's
-    /// test module.
-    fn test_suite_checked_out() -> bool {
-        let root = format!("{}/test-suite/regtest", env!("CARGO_MANIFEST_DIR"));
-        std::path::Path::new(&root).is_dir()
-    }
-
-    /// Read a fixture from the nested `test-suite/` submodule at RUNTIME.
-    ///
-    /// Distinguishes two cases: the submodule is **entirely absent**
-    /// (non-recursive clone) — return `None` with a SKIP note so the caller can
-    /// cleanly skip; or it is **present but this specific fixture is
-    /// missing** (partial checkout / upstream rename of one vector) — `panic!`,
-    /// because a silent `return` here would skip every later vector in the loop
-    /// and pass the test vacuously. Submodule-backed tests SKIP
-    /// cleanly on a non-recursive clone instead of failing to compile (which is
-    /// what `include_str!`, a compile-time read, would do).
-    ///
-    /// Intentionally duplicated in the `resolver.rs` test module — a private
-    /// `#[cfg(test)]` helper in one file cannot be shared into another file's
-    /// test module.
-    fn read_fixture_or_skip(rel: &str) -> Option<String> {
-        let path = format!("{}/test-suite/{}", env!("CARGO_MANIFEST_DIR"), rel);
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Some(s),
-            Err(e) if !test_suite_checked_out() => {
-                eprintln!(
-                    "SKIP: test-suite submodule absent ({path}: {e}); \
-                     run `git submodule update --init --recursive` to enable"
-                );
-                None
-            }
-            Err(e) => panic!(
-                "test-suite submodule is checked out but fixture is missing: {path} ({e}). \
-                 A partial checkout or an upstream rename must fail the suite, not skip it \
-                 silently."
-            ),
-        }
     }
 
     // This helper reads the legacy fixture `resolutionOptions.json`, which keys

@@ -623,321 +623,405 @@ impl From<&ResolutionOptions> for TargetCondition {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use crate::test_vectors::{
+        AssertionKind, DRIVEN_FLOOR, NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES, SkipOverride,
+        Vector, VectorIdType, discover, expected_driven_with, field_bool, field_hex,
+        field_nonzero_version_id, field_str, field_u64, field_version_id,
+        network_dirs_with_vectors, read_fixture_or_skip, read_vector_fixture,
+        reconcile_driven_with, redundant_overrides, render_summary_with, stale_overrides,
+        test_suite_checked_out, unclassified_rows_with,
+    };
+    use std::collections::BTreeSet;
 
-    /// Read a fixture from the nested `test-suite/` submodule at RUNTIME,
-    /// returning `None` (with a clear SKIP note on stderr) when the submodule is
-    /// absent. The un-`#[ignore]`'d submodule-backed tests run
-    /// by default but SKIP cleanly on a non-recursive clone instead of failing
-    /// to compile, which is what `include_str!` (a compile-time read) would do.
+    /// The discovered vector set, or `None` when the `test-suite/` submodule is
+    /// absent — the non-recursive-clone case every op-vector test skips green on.
     ///
-    /// True iff the `test-suite/` submodule is checked out (vs. an empty
-    /// placeholder directory left by a non-recursive clone). The probe is the
-    /// presence of the `test-suite/regtest/` directory — the common root of every
-    /// operation-vector fixture; a non-recursive clone leaves `test-suite/` empty
-    /// with no `regtest/` child.
-    ///
-    /// Intentionally duplicated in the `document.rs` test module — a private
-    /// `#[cfg(test)]` helper in one file cannot be shared into another file's
-    /// test module.
-    fn test_suite_checked_out() -> bool {
-        let root = format!("{}/test-suite/regtest", env!("CARGO_MANIFEST_DIR"));
-        std::path::Path::new(&root).is_dir()
-    }
-
-    /// Read a fixture from the nested `test-suite/` submodule at RUNTIME.
-    ///
-    /// Distinguishes two cases:
-    /// - the submodule is **entirely absent** (non-recursive clone): return `None`
-    ///   with a SKIP note so the caller can cleanly skip;
-    /// - the submodule is **present but this specific fixture is missing**
-    ///   (partial checkout, upstream rename of one vector): `panic!`, because a
-    ///   silent `return` here would skip every later vector in the loop and pass
-    ///   the test vacuously — a guard that no-ops without failing.
-    ///
-    /// Intentionally duplicated in the `document.rs` test module — a private
-    /// `#[cfg(test)]` helper in one file cannot be shared into another file's
-    /// test module.
-    fn read_fixture_or_skip(rel: &str) -> Option<String> {
-        let path = format!("{}/test-suite/{}", env!("CARGO_MANIFEST_DIR"), rel);
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Some(s),
-            Err(e) if !test_suite_checked_out() => {
-                eprintln!(
-                    "SKIP: test-suite submodule absent ({path}: {e}); \
-                     run `git submodule update --init --recursive` to enable"
-                );
-                None
-            }
-            Err(e) => panic!(
-                "test-suite submodule is checked out but fixture is missing: {path} ({e}). \
-                 A partial checkout or an upstream rename must fail the suite, not skip it \
-                 silently."
-            ),
-        }
-    }
-
-    /// `read_fixture_or_skip` must NOT no-op silently when the submodule
-    /// is present but a specific fixture is missing — that path must panic, so a
-    /// partial checkout (or an upstream rename of one vector) fails the suite
-    /// rather than skipping every later vector and passing vacuously.
-    ///
-    /// This test only asserts the panic when the submodule is actually checked
-    /// out (the normal CI / dev state); on a non-recursive clone the helper is
-    /// expected to skip, so the test skips too — matching the skip contract for
-    /// the surrounding op-vector tests.
-    #[test]
-    fn missing_fixture_under_checked_out_submodule_panics() {
+    /// The skip probe is the submodule's PRESENCE, not an empty discovery
+    /// result. Those are different failures: a checked-out submodule that yields
+    /// no vectors is a partial checkout or an upstream layout change, and gating
+    /// on `vectors.is_empty()` would report it as "submodule absent" and pass
+    /// green — the same silent-coverage-loss the ledger exists to catch.
+    fn discovered_vectors_or_skip() -> Option<Vec<Vector>> {
         if !test_suite_checked_out() {
-            eprintln!("SKIP: test-suite submodule absent; panic path not exercised");
-            return;
+            eprintln!(
+                "SKIP: test-suite submodule absent; \
+                 run `git submodule update --init --recursive` to enable"
+            );
+            return None;
         }
-        // A path that cannot exist under a checked-out submodule.
-        let result = std::panic::catch_unwind(|| {
-            read_fixture_or_skip("regtest/k1/__nonexistent_vector__/create/input.json")
-        });
+        let vectors = discover();
         assert!(
-            result.is_err(),
-            "a missing fixture under a checked-out submodule must panic, not return None"
+            !vectors.is_empty(),
+            "test-suite is checked out but no operation vectors were discovered — \
+             a partial checkout or an upstream layout change"
         );
+        Some(vectors)
     }
 
-    /// The 6 migrated regtest operation vectors (did-btcr2-test-suite @21fcef23):
-    /// `(kind, short-id, has_update)`. `has_update` is false for the two vectors
-    /// that ship no `update/` directory (qgpakaw4, q2fz9mz6).
-    const VECTORS: &[(&str, &str, bool)] = &[
-        ("k1", "qgpakaw4", false),
-        ("k1", "qgppexmy", true),
-        ("k1", "qgpy0hmm", true),
-        ("x1", "q26jeds9", true),
-        ("x1", "q2fz9mz6", false),
-        ("x1", "qfl7se8f", true),
-    ];
-
-    /// CREATE driver: for each operation vector, drive the crate's create path
-    /// from `create/input.json` and assert the encoded DID equals the vector's
-    /// `create/output.json.did` — re-derived through the real code path, not a
-    /// trust-the-blob compare.
+    /// CREATE driver: for EVERY vector discovered under `test-suite/` at
+    /// runtime, drive the crate's create path from `create/input.json` and
+    /// assert the encoded DID equals the vector's `create/output.json.did` —
+    /// re-derived through the real code path, not a trust-the-blob compare.
     ///
     /// KEY (k1): the 33-byte compressed pubkey `genesisBytes` → `IdType::Key` →
     /// `DidComponents` → `Did`. EXTERNAL (x1): the 32-byte `genesisBytes` IS the
-    /// intermediate-document hash → `IdType::External` → `Did`.
+    /// intermediate-document hash → `IdType::External` → `Did`. The network
+    /// comes from the discovered vector, not a hardcoded constant, so a vector
+    /// on any network the crate models derives with the right network nibble.
+    ///
+    /// Coverage is observed, not declared: the loop accumulates the ids it
+    /// actually asserted against and `reconcile_driven` compares that set with
+    /// the vector ledger's expectation for `AssertionKind::Derivation`. Dropping
+    /// a vector — by deleting it from the walk or by slipping a `continue` into
+    /// the loop body — fails the test instead of silently shrinking coverage.
     #[test]
     fn op_vectors_create_derives_expected_did() {
-        use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network};
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        drive_derivation(&vectors, SKIP_OVERRIDES);
+    }
+
+    /// The CREATE/derivation driver body, over an explicit override table so the
+    /// same code path can be exercised with a hand-written skip in place.
+    fn drive_derivation(vectors: &[Vector], overrides: &[SkipOverride]) {
+        use crate::identifier::{Did, DidComponents, DidVersion, IdType};
         use crate::key::PublicKey;
 
-        for (kind, short_id, _has_update) in VECTORS {
-            let Some(input) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/create/input.json"))
-            else {
-                return;
-            };
-            let Some(output) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/create/output.json"))
-            else {
-                return;
-            };
+        let mut observed = BTreeSet::new();
+        for vector in vectors {
+            if !vector.should_drive_with(AssertionKind::Derivation, overrides) {
+                continue;
+            }
+            let id = &vector.id;
 
-            let input: serde_json::Value = serde_json::from_str(&input).unwrap();
-            let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+            let input = read_vector_fixture(&format!("{id}/create/input.json"));
+            let output = read_vector_fixture(&format!("{id}/create/output.json"));
 
-            let id_type_str = input["idType"].as_str().unwrap();
-            assert_eq!(input["version"].as_u64().unwrap(), 1, "version is 1");
-            assert_eq!(input["network"].as_str().unwrap(), "regtest");
-            let genesis_bytes = hex::decode(input["genesisBytes"].as_str().unwrap()).unwrap();
-            let expected_did = output["did"].as_str().unwrap();
+            assert_eq!(field_u64(&input, "version", id), 1, "{id}: version is 1");
+            let genesis_bytes = field_hex(&input, "genesisBytes", id);
+            let expected_did = field_str(&output, "did", id);
 
-            let id_type = match id_type_str {
-                "KEY" => {
+            // `vector.id_type` is the `<kind>/` directory segment mapped through
+            // `id_type_from_kind` and cross-checked against this fixture's own
+            // `create/input.json.idType` at discovery time, so branching on it
+            // here is branching on both.
+            let id_type = match vector.id_type {
+                VectorIdType::Key => {
                     assert_eq!(
                         genesis_bytes.len(),
                         33,
-                        "KEY genesisBytes is a 33-byte pubkey"
+                        "{id}: KEY genesisBytes is a 33-byte pubkey"
                     );
-                    IdType::from(PublicKey::from_slice(&genesis_bytes).unwrap())
+                    IdType::from(PublicKey::from_slice(&genesis_bytes).unwrap_or_else(|e| {
+                        panic!("{id}: create/input.json.genesisBytes is not a public key: {e}")
+                    }))
                 }
-                "EXTERNAL" => {
+                VectorIdType::External => {
                     assert_eq!(
                         genesis_bytes.len(),
                         32,
-                        "EXTERNAL genesisBytes is a 32-byte hash"
+                        "{id}: EXTERNAL genesisBytes is a 32-byte hash"
                     );
-                    IdType::from_sha256_hash(&genesis_bytes).unwrap()
+                    IdType::from_sha256_hash(&genesis_bytes).unwrap_or_else(|e| {
+                        panic!("{id}: create/input.json.genesisBytes is not a sha256 hash: {e}")
+                    })
                 }
-                other => panic!("unexpected idType {other}"),
             };
 
-            let components =
-                DidComponents::new(DidVersion::One, Network::Regtest, id_type).unwrap();
-            let did = Did::try_from(components).unwrap();
+            let components = DidComponents::new(DidVersion::One, vector.network, id_type)
+                .unwrap_or_else(|e| panic!("{id}: create/input.json does not form a DID: {e}"));
+            let did = Did::try_from(components)
+                .unwrap_or_else(|e| panic!("{id}: create/input.json does not form a DID: {e}"));
             assert_eq!(
                 did.encode(),
                 expected_did,
-                "create-derived DID for {kind}/{short_id} must equal create/output.json.did"
+                "{id}: create-derived DID must equal create/output.json.did"
             );
+
+            observed.insert(id.clone());
         }
+        reconcile_driven_with(AssertionKind::Derivation, vectors, &observed, overrides);
     }
 
-    /// CREATE BLESS check: load `other.json.genesisKeys.secret`, derive its public
-    /// key, and for KEY vectors confirm it equals `create/input.json.genesisBytes`
-    /// (the descriptor IS the genesis key, not a hand-edited blob). Where an
-    /// `update/` exists, also assert the genesis secret equals
-    /// `update/input.json.signingMaterial`. This retires the trust-the-blob
-    /// concern.
+    /// CREATE BLESS check, over EVERY vector discovered under `test-suite/` at
+    /// runtime: load `other.json.genesisKeys.secret` and derive its public key,
+    /// then tie that key to the vector's own artifacts.
+    ///
+    /// HOW THE KEY IS TIED depends on the id type, because the two have
+    /// different genesis sources. For KEY (k1) vectors the descriptor IS the
+    /// genesis key, so the derived key must equal
+    /// `create/input.json.genesisBytes` — not a hand-edited blob. For EXTERNAL
+    /// (x1) vectors the descriptor is a hash of a document supplied out of band,
+    /// so the derived key is compared against
+    /// `other.json.genesisDocument.verificationMethod[0].publicKeyMultibase`.
+    /// Without that second branch an update-less external vector executed
+    /// exactly one assertion — that `secp256k1` derives its own public key from
+    /// its own secret key — which touches neither the vector's DID nor its
+    /// documents while being reported as full coverage.
+    ///
+    /// Then walk EVERY update step the vector ships — flat `update/` or numbered
+    /// `update/NN/` alike — and assert the genesis secret equals that step's
+    /// `signingMaterial`, so a multi-step vector is corroborated at every step
+    /// rather than only its first. This retires the trust-the-blob concern.
+    ///
+    /// Coverage is observed, not declared: the loop accumulates the ids it
+    /// actually asserted against and `reconcile_driven` compares that set with
+    /// the vector ledger's expectation for `AssertionKind::GenesisKey`.
     #[test]
     fn op_vectors_create_genesis_key_corroborated() {
-        use crate::key::PublicKey;
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        drive_genesis_key(&vectors, SKIP_OVERRIDES);
+    }
+
+    /// The genesis-key driver body, over an explicit override table so the same
+    /// code path can be exercised with a hand-written skip in place.
+    fn drive_genesis_key(vectors: &[Vector], overrides: &[SkipOverride]) {
+        use crate::key::{PublicKey, PublicKeyExt as _};
         use secp256k1::{Secp256k1, SecretKey};
 
         let secp = Secp256k1::new();
-        for (kind, short_id, has_update) in VECTORS {
-            let Some(input) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/create/input.json"))
-            else {
-                return;
-            };
-            let Some(other) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/other.json"))
-            else {
-                return;
-            };
+        let mut observed = BTreeSet::new();
+        for vector in vectors {
+            if !vector.should_drive_with(AssertionKind::GenesisKey, overrides) {
+                continue;
+            }
+            let id = &vector.id;
 
-            let input: serde_json::Value = serde_json::from_str(&input).unwrap();
-            let other: serde_json::Value = serde_json::from_str(&other).unwrap();
+            let input = read_vector_fixture(&format!("{id}/create/input.json"));
+            let other = read_vector_fixture(&format!("{id}/other.json"));
 
-            let secret_hex = other["genesisKeys"]["secret"].as_str().unwrap();
-            let secret = SecretKey::from_slice(&hex::decode(secret_hex).unwrap()).unwrap();
+            let secret_hex = field_str(&other, "genesisKeys.secret", id);
+            let secret = SecretKey::from_slice(&field_hex(&other, "genesisKeys.secret", id))
+                .unwrap_or_else(|e| {
+                    panic!("{id}: other.json.genesisKeys.secret is not a secret key: {e}")
+                });
             let derived: PublicKey = secret.public_key(&secp);
 
             // other.json.genesisKeys.public corroborates the derived key.
-            let stated_public = other["genesisKeys"]["public"].as_str().unwrap();
             assert_eq!(
                 hex::encode(derived.serialize()),
-                stated_public,
-                "{kind}/{short_id}: derived public key must equal other.json.genesisKeys.public"
+                field_str(&other, "genesisKeys.public", id),
+                "{id}: derived public key must equal other.json.genesisKeys.public"
             );
 
-            // For KEY vectors the genesis key IS the descriptor.
-            if input["idType"].as_str().unwrap() == "KEY" {
-                assert_eq!(
+            match vector.id_type {
+                // For KEY vectors the genesis key IS the descriptor.
+                VectorIdType::Key => assert_eq!(
                     hex::encode(derived.serialize()),
-                    input["genesisBytes"].as_str().unwrap(),
-                    "{kind}/{short_id}: KEY genesisBytes must be the genesis public key"
+                    field_str(&input, "genesisBytes", id),
+                    "{id}: KEY genesisBytes must be the genesis public key"
+                ),
+                // For EXTERNAL vectors the descriptor is a hash of a document
+                // supplied out of band, so the key has to be tied to the vector
+                // through that document instead. Without this the only assertion
+                // an update-less external vector executes is that secp256k1
+                // derives its own public key from its own secret key — a test of
+                // the dependency, touching neither the vector's DID nor its
+                // documents, reported as full genesis-key coverage.
+                VectorIdType::External => assert_eq!(
+                    derived.to_multikey(),
+                    field_str(
+                        &other,
+                        "genesisDocument.verificationMethod.0.publicKeyMultibase",
+                        id
+                    ),
+                    "{id}: the genesis secret must derive the key the genesis document \
+                     publishes as its first verification method"
+                ),
+            }
+
+            for step in vector.update_layout.step_prefixes() {
+                let update_input = read_vector_fixture(&format!("{id}/{step}/input.json"));
+                assert_eq!(
+                    field_str(&update_input, "signingMaterial", id),
+                    secret_hex,
+                    "{id}: {step}/input.json signingMaterial must equal \
+                     other.json.genesisKeys.secret"
                 );
             }
 
-            if *has_update {
-                let Some(update_input) =
-                    read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/update/input.json"))
-                else {
-                    return;
-                };
-                let update_input: serde_json::Value = serde_json::from_str(&update_input).unwrap();
-                assert_eq!(
-                    update_input["signingMaterial"].as_str().unwrap(),
-                    secret_hex,
-                    "{kind}/{short_id}: update signingMaterial must equal genesisKeys.secret"
-                );
-            }
+            observed.insert(id.clone());
         }
+        reconcile_driven_with(AssertionKind::GenesisKey, vectors, &observed, overrides);
     }
 
-    /// RESOLVE driver: for each vector, validate the resolve/output.json metadata
-    /// whitelist and (for the no-signal version-1 vectors) drive the FSM to its
-    /// terminal state with empty beacon responses and assert the resolved
-    /// didDocument hashes equal to resolve/output.json.didDocument.
+    /// RESOLVE driver: for EVERY vector discovered under `test-suite/` at
+    /// runtime, validate the `resolve/output.json` metadata whitelist, and for
+    /// the rows the ledger expects driven, drive the FSM to its terminal state
+    /// with empty beacon responses and assert the resolved `didDocument` equals
+    /// `resolve/output.json.didDocument`.
     ///
-    /// COVERAGE SCOPE (narrower than the name implies):
-    /// the metadata whitelist + `didDocument`-parse runs for ALL 6 vectors, but the
-    /// full FSM drive + `didDocument` content-equality assertion runs ONLY for the
-    /// version-1 vectors — both `k1` (KEY) and `x1` (EXTERNAL). For x1 the
-    /// externally-authored genesis document (spec-form `did:btcr2:_` placeholder)
-    /// is supplied as sidecar `initial_document`; for k1 it is generated
-    /// deterministically from the DID's public key. One exclusion remains:
-    ///   - **version-2** vectors only run the metadata whitelist + `didDocument`
-    ///     parse, not the FSM drive, because their resolution requires applying
-    ///     on-chain beacon signals that are absent from the offline vector tree.
-    ///     Driving them would require bridging synthetic signals (as the
-    ///     `announce_round_trip` / `create_update_deactivate_reresolve` round-trip
-    ///     tests do). That bridging is NOT attempted here; the version-2
-    ///     resolve-vector content equality is an explicit, tracked deferral
-    ///     (deferred) — it
-    ///     is deliberately not asserted rather than silently assumed.
+    /// TWO SCOPES, deliberately different. WELL-FORMEDNESS checks run for every
+    /// discovered vector, driven or not — a schema drift anywhere in the suite
+    /// is worth catching, and no maintainer decision could make a malformed
+    /// fixture acceptable. POLICY checks — the ones a maintainer might
+    /// legitimately want to record as a classified skip — sit BELOW the drive
+    /// gate, so a `SKIP_OVERRIDES` entry can reach them. The `versionId`
+    /// encoding pin is the concrete case: placed above the gate, an upstream
+    /// vector on a new network carrying the known encoding defect would turn the
+    /// suite red with no way to record it as a skipped row, leaving only two
+    /// remedies (edit driver code, or edit the upstream fixture) for exactly the
+    /// situation the escape hatch exists for.
     ///
-    /// Observation-dependent metadata is whitelisted (FINDINGS item 4):
-    /// `versionId` and `deactivated` are asserted by value; `confirmations` and
-    /// `updated` (environment-derived, drift) are asserted only by presence/type
-    /// when present, NEVER by literal value. The version-2 vectors require
-    /// applying on-chain beacon signals that are absent from the offline vector
-    /// tree, so their full FSM drive is not attempted here — only the metadata
-    /// whitelist + didDocument-parse are asserted for those.
+    /// Only the full FSM drive is reconciled as this vector's `resolve` row:
+    /// `observed` is filled after the drive, and `reconcile_driven` compares it
+    /// with the ledger's expectation for `AssertionKind::Resolve`. The rows that
+    /// are NOT driven are enumerated by the vector ledger as
+    /// skipped-with-reason (`NeedsOnChainSignals`, `Unanchored`, `CasDelivery`,
+    /// `SmtDelivery`); its summary table is the place to read the coverage
+    /// story, not a narrative in this comment.
+    ///
+    /// Observation-dependent metadata is whitelisted: `deactivated` is asserted
+    /// BY VALUE against the vector's stated flag on a driven row; `confirmations`,
+    /// `updated` and `created` are environment-derived and drift, so they are
+    /// asserted only by presence/type when present, NEVER by literal value.
+    /// mutinynet vectors omit `confirmations` entirely and carry `created: null`;
+    /// indexing a missing key yields `Value::Null`, which the `is_null` guards
+    /// already tolerate. `versionId` carries three separate checks: it is READ
+    /// through `version_id_u64`, which accepts the regtest string encoding and
+    /// the mutinynet number encoding and panics on anything else; its ENCODING is
+    /// pinned to `NUMBER_ENCODED_VERSION_ID`, the explicit set of known-bad
+    /// fixtures, in both directions; and on a driven row the resolved value is
+    /// COMPARED against the vector's stated one. That last comparison is not yet
+    /// a cross-check with independent operands — `is_drivable(Resolve)` requires
+    /// `expected_version_id == 1`, so on every driven row the stated value is 1
+    /// and the assertion pins the resolver's genesis-era `versionId` to 1. It
+    /// becomes a genuine cross-check once past-genesis rows are drivable. The
+    /// crate's own emit-a-string / reject-a-number contract is pinned by the
+    /// fixture-independent `DocumentMetadata` round-trip test in `document.rs`.
+    ///
+    /// EXTERNAL (x1) genesis comes from
+    /// `resolve/input.json.resolutionOptions.sidecar.genesisDocument` and stays
+    /// there on purpose. `other.json.genesisDocument` exists for every external
+    /// vector and is byte-identical where both are present, but reading it would
+    /// hand the resolver a genesis document the vector intends to be fetched
+    /// from content-addressed storage — asserting resolve logic while silently
+    /// bypassing the delivery mechanism and leaving no row to mark the gap.
+    /// Every row that remains driven has a sidecar genesis document; a missing
+    /// one on a driven row is a loud failure, not a fallback. KEY (k1)
+    /// resolution needs no sidecar: the genesis document is generated
+    /// deterministically from the DID's embedded public key.
     #[test]
     fn op_vectors_resolve_matches_output() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        drive_resolve(&vectors, SKIP_OVERRIDES);
+    }
+
+    /// The RESOLVE driver body, over an explicit override table so the same code
+    /// path can be exercised with a hand-written skip in place.
+    fn drive_resolve(vectors: &[Vector], overrides: &[SkipOverride]) {
         use crate::document::IntermediateDocument;
-        use crate::identifier::{Did, Network};
+        use crate::identifier::Did;
 
-        for (kind, short_id, _has_update) in VECTORS {
-            let Some(input) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/resolve/input.json"))
-            else {
-                return;
-            };
-            let Some(output) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/resolve/output.json"))
-            else {
-                return;
-            };
-            let input: serde_json::Value = serde_json::from_str(&input).unwrap();
-            let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let mut observed = BTreeSet::new();
+        for vector in vectors {
+            let id = &vector.id;
 
-            // Metadata whitelist (asserted for every vector).
+            let input = read_vector_fixture(&format!("{id}/resolve/input.json"));
+            let output = read_vector_fixture(&format!("{id}/resolve/output.json"));
+
+            // Well-formedness whitelist (asserted for every discovered vector,
+            // driven or not: no maintainer decision makes a malformed fixture
+            // acceptable, so none of these belongs below the drive gate).
             let metadata = &output["didDocumentMetadata"];
-            assert!(
-                metadata["versionId"].is_string(),
-                "{kind}/{short_id}: versionId must be an ASCII string"
-            );
+            if !metadata["versionId"].is_number() {
+                assert!(
+                    metadata["versionId"].is_string(),
+                    "{id}: versionId must be an ASCII string (the specification's encoding)"
+                );
+            }
             assert!(
                 metadata["deactivated"].is_boolean(),
-                "{kind}/{short_id}: deactivated must be a bool"
+                "{id}: deactivated must be a bool"
             );
             if !metadata["confirmations"].is_null() {
                 assert!(
                     metadata["confirmations"].is_number(),
-                    "{kind}/{short_id}: confirmations is observation-dependent — assert TYPE only"
+                    "{id}: confirmations is observation-dependent — assert TYPE only"
                 );
             }
             if !metadata["updated"].is_null() {
                 assert!(
                     metadata["updated"].is_string(),
-                    "{kind}/{short_id}: updated is observation-dependent — assert TYPE only"
+                    "{id}: updated is observation-dependent — assert TYPE only"
+                );
+            }
+            if !metadata["created"].is_null() {
+                assert!(
+                    metadata["created"].is_string(),
+                    "{id}: created is observation-dependent — assert TYPE only"
                 );
             }
 
-            // The resolved didDocument must parse as a conformant Document.
-            let expected_doc =
-                Document::from_json_string(&output["didDocument"].to_string()).unwrap();
-
-            // Full FSM drive is only attempted for the no-signal (version-1)
-            // vectors; version-2 vectors need absent on-chain beacon signals.
-            if metadata["versionId"].as_str().unwrap() != "1" {
+            if !vector.should_drive_with(AssertionKind::Resolve, overrides) {
                 continue;
             }
 
-            let did: Did = input["did"].as_str().unwrap().parse().unwrap();
+            // POLICY, not well-formedness — hence below the drive gate, where a
+            // hand-written skip can classify a non-conformant vector instead of
+            // leaving "edit driver code or edit the upstream fixture" as the
+            // only remedies.
+            //
+            // The specification requires didDocumentMetadata.versionId to be an
+            // ASCII string. Sixteen fixtures encode it as a JSON number, a known
+            // upstream defect pinned to an explicit id set and checked in BOTH
+            // directions: an unlisted offender fails as a NEW defect rather than
+            // being absorbed by the encoding-tolerant read, and a listed vector
+            // that is now string-encoded fails saying the list is stale. Keying
+            // this on the network directory instead would auto-forgive a newly
+            // added defective vector and would red on a partial upstream
+            // conformance fix. The ledger's summary reports the running tally.
+            let known_bad = NUMBER_ENCODED_VERSION_ID.contains(&id.as_str());
+            assert!(
+                metadata["versionId"].is_number() == known_bad,
+                "{id}: {}",
+                if metadata["versionId"].is_number() {
+                    "NEW versionId encoding defect — resolve/output.json encodes versionId as a \
+                     JSON number, but the specification requires an ASCII string. Fix the \
+                     fixture, or add this id to NUMBER_ENCODED_VERSION_ID to record it as \
+                     known-bad."
+                } else {
+                    "versionId is now correctly encoded as an ASCII string — delete this id \
+                     from NUMBER_ENCODED_VERSION_ID."
+                }
+            );
 
-            // KEY (k1) resolution generates the genesis document deterministically
-            // from the DID's embedded public key, so no sidecar initial document is
-            // needed. EXTERNAL (x1) resolution instead binds the externally-authored
-            // genesis document supplied as sidecar data: the vector carries it under
-            // `resolutionOptions.sidecar.genesisDocument` with the spec-form
-            // `did:btcr2:_` placeholder, which `into_initial` substitutes for the
-            // real DID.
-            let resolution_options = if *kind == "x1" {
+            // The resolved didDocument must parse as a conformant Document.
+            // This sits BELOW the drive gate, not with the metadata whitelist:
+            // it is an assertion about the document a driven row resolves to,
+            // and a skipped row's document is by definition not asserted.
+            // `mutinynet/x1/qh66uy2s` makes the difference concrete — its
+            // expected document carries `service: []` and so does not parse
+            // ("updatable DID document must contain at least one beacon
+            // service"), which is corroborating evidence for the ledger's
+            // classification of that row as CAS-delivered and skipped.
+            let _expected_doc = Document::from_json_string(&output["didDocument"].to_string())
+                .unwrap_or_else(|e| {
+                    panic!("{id}: resolve/output.json.didDocument must parse as a Document: {e}")
+                });
+
+            let did: Did = field_str(&input, "did", id).parse().unwrap_or_else(|e| {
+                panic!("{id}: resolve/input.json.did must parse as a DID: {e}")
+            });
+
+            let resolution_options = if vector.id_type == VectorIdType::External {
                 let genesis = &input["resolutionOptions"]["sidecar"]["genesisDocument"];
                 let intermediate =
-                    IntermediateDocument::from_json_value(genesis.clone(), Network::Regtest)
-                        .unwrap();
-                let initial_doc = intermediate.into_initial(&did).unwrap();
+                    IntermediateDocument::from_json_value(genesis.clone(), vector.network)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "{id}: resolve/input.json sidecar genesisDocument must parse as \
+                                 an intermediate document: {e}"
+                            )
+                        });
+                let initial_doc = intermediate.into_initial(&did).unwrap_or_else(|e| {
+                    panic!("{id}: the sidecar genesis document must bind to the vector's DID: {e}")
+                });
                 ResolutionOptions {
                     sidecar_data: Some(SidecarData {
                         initial_document: Some(initial_doc),
@@ -952,7 +1036,8 @@ mod tests {
                 }
             };
 
-            let resolver = Document::resolve(&did, resolution_options).unwrap();
+            let resolver = Document::resolve(&did, resolution_options)
+                .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}"));
             let result = resolve_with_no_signals(resolver);
 
             // The resolved document and the spec test vector agree on EVERY
@@ -960,128 +1045,543 @@ mod tests {
             // (incl. publicKeyMultibase), the SingletonBeacon services +
             // endpoints, and the four relationship sets. Both the KEY (k1) path
             // (genesis generated deterministically) and the EXTERNAL (x1) path
-            // (genesis supplied verbatim) now emit the spec `@context`
+            // (genesis supplied verbatim) emit the spec `@context`
             // (`www.w3.org/ns/did/v1.1` / `btcr2.dev/context/v1`) and no
             // top-level `controller`, so the full content matches with no
             // field masking.
-            let got: serde_json::Value =
-                serde_json::from_str(&serde_json::to_string(result.document.as_ref()).unwrap())
-                    .unwrap();
-            let want: serde_json::Value =
-                serde_json::from_str(&output["didDocument"].to_string()).unwrap();
+            let got: serde_json::Value = serde_json::from_str(
+                &serde_json::to_string(result.document.as_ref())
+                    .unwrap_or_else(|e| panic!("{id}: the resolved document must serialize: {e}")),
+            )
+            .unwrap_or_else(|e| panic!("{id}: the resolved document must round-trip: {e}"));
+            let want: serde_json::Value = output["didDocument"].clone();
             assert_eq!(
                 got, want,
-                "{kind}/{short_id}: resolved didDocument content (incl. @context) \
+                "{id}: resolved didDocument content (incl. @context) \
                  must equal resolve/output.json.didDocument"
             );
-            // The two normalized-out fields are the ONLY divergence: the spec
-            // vector still parsed into a Document above (`expected_doc`).
-            let _ = &expected_doc;
 
             assert_eq!(
-                result.document_metadata.version_id,
-                NonZeroU64::MIN,
-                "{kind}/{short_id}: version-1 vector resolves at versionId 1"
+                result.document_metadata.version_id.get(),
+                vector.expected_version_id,
+                "{id}: resolved versionId must equal \
+                 resolve/output.json.didDocumentMetadata.versionId"
             );
+            assert_eq!(
+                result.document_metadata.deactivated,
+                field_bool(&output, "didDocumentMetadata.deactivated", id),
+                "{id}: resolved deactivated must equal \
+                 resolve/output.json.didDocumentMetadata.deactivated"
+            );
+
+            observed.insert(id.clone());
+        }
+        reconcile_driven_with(AssertionKind::Resolve, vectors, &observed, overrides);
+    }
+
+    /// UPDATE driver: for EVERY vector discovered under `test-suite/` that ships
+    /// update steps, walk those steps IN ORDER as a chain — flat `update/` and
+    /// numbered `update/NN/` alike — driving `Document::construct_signed_update`
+    /// at each step and asserting the produced [`Update`]'s content-bound triple
+    /// (`sourceHash`, `targetHash`, `targetVersionId`) against that step's
+    /// `update/**/output.json.signedUpdate`.
+    ///
+    /// A CHAIN, NOT N INDEPENDENT SIGNATURE CHECKS. Three linkage assertions
+    /// hold the sequence together:
+    ///   1. step ordering — step NN's `sourceVersionId` is NN (1-based), so a
+    ///      renumbered or reordered walk fails;
+    ///   2. hash continuity — step NN's `signedUpdate.sourceHash` equals step
+    ///      NN-1's `targetHash`;
+    ///   3. document continuity — the document carried forward from step NN-1's
+    ///      `apply_update` equals step NN's stated `sourceDocument`.
+    ///
+    /// What that adds over `apply_update` alone: `apply_update` ends with
+    /// `if self.hash() != update.target_hash { return Err(...) }`, so a
+    /// successful application already proves the patched document is
+    /// equal-by-JCS-hash to that step's stated `targetHash`. It says nothing
+    /// about ORDER or CONTINUITY across steps — that is exactly what (1) and (2)
+    /// add. Coverage is observed, not declared: `observed.insert` runs once per
+    /// vector AFTER its last step, so a chain that aborts part-way can never be
+    /// counted as covered, and `reconcile_driven` compares the accumulated set
+    /// with the ledger's expectation for `AssertionKind::UpdateCrypto`.
+    ///
+    /// The chain starts from step 01's `input.sourceDocument`, which already
+    /// carries the real DID — not `other.json.genesisDocument`, whose id is the
+    /// `did:btcr2:_` placeholder and would need `into_initial` first.
+    ///
+    /// SAFE MID-WALK. Deactivation is the TERMINAL step in both multi-update
+    /// vectors (`q5m2fh36` 01=add service / 02=deactivate; `qky9e7qz`
+    /// 01,02=add service / 03=deactivate), so the walk never applies an update to
+    /// an already-deactivated document and never trips `apply_update`'s
+    /// "a deactivated DID is terminal" guard. The patches add NON-beacon services
+    /// (`DIDCommMessaging`, `DecentralizedWebNode`), which the document parser
+    /// retains and ignores.
+    ///
+    /// The raw `proofValue` is NOT byte-compared: BIP340 Schnorr signing here is
+    /// deterministic (no-aux-rand), but the suite's vector was produced by a
+    /// different signer that may pin `k` differently, so the bytes need not
+    /// match. Instead the produced proof is VERIFIED by applying the update back
+    /// to the source document (`InitialDocument::apply_update` runs full BIP340
+    /// proof verification), and the proof's cryptosuite is asserted structurally.
+    #[test]
+    fn op_vectors_update_signs_to_expected_hashes() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        drive_update_crypto(&vectors, SKIP_OVERRIDES);
+    }
+
+    /// One update step's fixtures plus the update the crate produced from them.
+    struct StepFixtures {
+        input: serde_json::Value,
+        output: serde_json::Value,
+        update: Update,
+    }
+
+    /// Read one update step's fixtures and drive `construct_signed_update` over
+    /// them.
+    ///
+    /// The update-crypto and end-state drivers both need exactly this sequence —
+    /// the two fixture reads, patch deserialization, `targetVersionId` coercion,
+    /// verification-method id, secret decoding and the signing call — and the
+    /// two copies of it were byte-for-byte identical, so a divergence between
+    /// them would have been silent.
+    ///
+    /// The source document is built straight from the vector's `sourceDocument`
+    /// (spec `@context`, no top-level controller), so its JCS hash equals the
+    /// vector's `sourceHash` without touching the create-path residuals.
+    fn signed_update_for_step(id: &str, step: &str) -> StepFixtures {
+        use crate::key::SecretKey;
+        use json_patch::Patch;
+
+        let input = read_vector_fixture(&format!("{id}/{step}/input.json"));
+        let output = read_vector_fixture(&format!("{id}/{step}/output.json"));
+
+        let ctx = format!("{id} {step}");
+        let source_doc = Document::from_json_string(&input["sourceDocument"].to_string())
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: input.json.sourceDocument must parse as a Document: {e}")
+            });
+        let patch: Patch = serde_json::from_value(input["patches"].clone())
+            .unwrap_or_else(|e| panic!("{ctx}: input.json.patches must be a JSON Patch: {e}"));
+        let target_version_id =
+            field_nonzero_version_id(&output, "signedUpdate.targetVersionId", &ctx);
+        let vm_id = field_str(&input, "verificationMethodId", &ctx);
+        let secret = SecretKey::try_from(field_hex(&input, "signingMaterial", &ctx))
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: input.json.signingMaterial is not a secret key: {e}")
+            });
+
+        let update = source_doc
+            .construct_signed_update(patch, target_version_id, vm_id, secret)
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: construct_signed_update must succeed for the vector inputs: {e}")
+            });
+
+        StepFixtures {
+            input,
+            output,
+            update,
+        }
+    }
+
+    /// The UPDATE-crypto driver body, over an explicit override table so the same
+    /// code path can be exercised with a hand-written skip in place.
+    fn drive_update_crypto(vectors: &[Vector], overrides: &[SkipOverride]) {
+        use crate::document::InitialDocument;
+
+        let to_b64 = |h: &Sha256Hash| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.as_bytes())
+        };
+
+        let mut observed = BTreeSet::new();
+        for vector in vectors {
+            if !vector.should_drive_with(AssertionKind::UpdateCrypto, overrides) {
+                continue;
+            }
+            let id = &vector.id;
+
+            let mut previous_target_hash: Option<String> = None;
+            let mut carried: Option<InitialDocument> = None;
+
+            for (step_index, step) in vector.update_layout.step_prefixes().iter().enumerate() {
+                let StepFixtures {
+                    input,
+                    output,
+                    update,
+                } = signed_update_for_step(id, step);
+
+                // (a) Step-index linkage: step NN is update number NN.
+                assert_eq!(
+                    field_version_id(&input, "sourceVersionId", id),
+                    step_index as u64 + 1,
+                    "{id}: {step} must be update number {} in the chain",
+                    step_index + 1
+                );
+
+                let stated_source_hash = field_str(&output, "signedUpdate.sourceHash", id);
+                let stated_target_hash = field_str(&output, "signedUpdate.targetHash", id);
+
+                // (b) Hash linkage: this step continues the previous one.
+                if let Some(prev) = &previous_target_hash {
+                    assert_eq!(
+                        stated_source_hash, prev,
+                        "{id}: {step} sourceHash must equal the previous step's targetHash"
+                    );
+                }
+
+                // (c) Document linkage: the document the previous step produced
+                // IS this step's stated source. Compared as `Value`s so the diff
+                // is on content, not key ordering.
+                if let Some(carried_doc) = &carried {
+                    let carried_json: serde_json::Value = carried_doc.as_ref().clone();
+                    assert_eq!(
+                        carried_json, input["sourceDocument"],
+                        "{id}: {step} sourceDocument must equal the document produced \
+                         by the previous step"
+                    );
+                }
+
+                // (d) Content-bound triple must equal the vector's signedUpdate.
+                assert_eq!(
+                    to_b64(&update.source_hash),
+                    stated_source_hash,
+                    "{id}: {step} sourceHash"
+                );
+                assert_eq!(
+                    to_b64(&update.target_hash),
+                    stated_target_hash,
+                    "{id}: {step} targetHash"
+                );
+                assert_eq!(
+                    u64::from(update.target_version_id),
+                    field_version_id(&output, "signedUpdate.targetVersionId", id),
+                    "{id}: {step} targetVersionId"
+                );
+
+                // (e) Proof must VERIFY (not byte-compare proofValue): apply the
+                // produced update back to the source initial document.
+                // apply_update runs full BIP340 proof verification + target-hash
+                // check.
+                let mut initial =
+                    InitialDocument::from_json_string(&input["sourceDocument"].to_string())
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "{id}: {step} sourceDocument must parse as an initial \
+                                 document: {e}"
+                            )
+                        });
+                initial
+                    .apply_update(&update)
+                    .unwrap_or_else(|e| panic!("{id}: {step} produced proof must verify: {e}"));
+
+                // (f) Structural proof shape.
+                assert_eq!(
+                    field_str(&output, "signedUpdate.proof.cryptosuite", id),
+                    "bip340-jcs-2025",
+                    "{id}: {step} vector proof cryptosuite"
+                );
+
+                // (g) Carry forward into the next step.
+                previous_target_hash = Some(stated_target_hash.to_string());
+                carried = Some(initial);
+            }
+
+            observed.insert(id.clone());
+        }
+        reconcile_driven_with(AssertionKind::UpdateCrypto, vectors, &observed, overrides);
+    }
+
+    /// END-STATE driver: for every update-bearing vector, apply EVERY update
+    /// step in order starting from step 01's stated `sourceDocument`, and assert
+    /// the resulting document equals `resolve/output.json.didDocument`.
+    ///
+    /// This closes the offline document-CONTENT gap for every update-bearing
+    /// vector. What remains unassertable for these vectors is chain-derived
+    /// only: beacon-signal discovery, `versionId`/confirmation provenance, and
+    /// late-publishing detection.
+    ///
+    /// WHAT THIS ADDS OVER THE UPDATE-CRYPTO DRIVER — this is not duplicate
+    /// work. `apply_update` ends with
+    /// `if self.hash() != update.target_hash { return Err(...) }`
+    /// (`document.rs:1226`), so every successful application already proves the
+    /// patched document is equal-by-JCS-hash to that step's stated `targetHash`;
+    /// the patch arithmetic is therefore covered already. The genuinely new
+    /// content here is exactly ONE link: **the final step's target document
+    /// equals `resolve/output.json.didDocument`** — that the chain of stated
+    /// hashes actually terminates at the vector's expected resolved document,
+    /// rather than at some other document that merely hashes to the last
+    /// `targetHash` the fixture states. If that link holds, exact equality
+    /// follows structurally; if it does not, the fixture set is internally
+    /// inconsistent, which is worth failing on.
+    ///
+    /// The walk starts from `update/01/input.json.sourceDocument`, which already
+    /// carries the real DID — not `other.json.genesisDocument`, whose id is the
+    /// `did:btcr2:_` placeholder and would need `into_initial` first.
+    ///
+    /// SAFE MID-WALK: deactivation is the TERMINAL step in both multi-update
+    /// vectors (`q5m2fh36` 01=add service / 02=deactivate; `qky9e7qz` 01,02=add
+    /// service / 03=deactivate), so the walk never applies an update to an
+    /// already-deactivated document and never trips `apply_update`'s
+    /// "a deactivated DID is terminal" guard.
+    ///
+    /// The comparison is EXACT and needs no key normalization. `InitialDocument`
+    /// derives only `Clone, Debug, PartialEq, Eq` (`document.rs:977`) — it is
+    /// neither `Serialize` nor `Deserialize` — so the accessor is
+    /// `impl AsRef<Value>` (`document.rs:1236`), whose backing `json_data` is
+    /// already a `serde_json::Value`. Both sides are therefore `Value`, whose
+    /// `PartialEq` compares objects by key set and value rather than by textual
+    /// key order. In particular `deactivated` is OMITTED (not `false`) when
+    /// unset on both sides, so no key is normalized away here.
+    ///
+    /// Coverage is observed, not declared: `observed.insert` runs once per
+    /// vector AFTER the end-state comparison, so a chain that aborts part-way
+    /// can never be counted as covered.
+    #[test]
+    fn op_vectors_updates_apply_to_expected_end_state() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        drive_end_state(&vectors, SKIP_OVERRIDES);
+    }
+
+    /// The END-STATE driver body, over an explicit override table so the same
+    /// code path can be exercised with a hand-written skip in place.
+    fn drive_end_state(vectors: &[Vector], overrides: &[SkipOverride]) {
+        use crate::document::InitialDocument;
+
+        let mut observed = BTreeSet::new();
+        for vector in vectors {
+            if !vector.should_drive_with(AssertionKind::EndState, overrides) {
+                continue;
+            }
+            let id = &vector.id;
+
+            let steps = vector.update_layout.step_prefixes();
+
+            // The walk starts from step 01's stated source document and carries
+            // each step's result forward.
+            let mut carried: Option<InitialDocument> = None;
+
+            for (step_index, step) in steps.iter().enumerate() {
+                let StepFixtures { input, update, .. } = signed_update_for_step(id, step);
+
+                // Step-index linkage, mirrored from the update-crypto driver:
+                // step NN is update number NN. Without it a mis-ordered walk
+                // surfaces here only as an opaque target-hash mismatch, naming
+                // the symptom rather than the cause.
+                assert_eq!(
+                    field_version_id(&input, "sourceVersionId", id),
+                    step_index as u64 + 1,
+                    "{id}: {step} must be update number {} in the chain",
+                    step_index + 1
+                );
+
+                let mut doc = match carried.take() {
+                    Some(doc) => doc,
+                    None => InitialDocument::from_json_string(&input["sourceDocument"].to_string())
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "{id}: {step} sourceDocument must parse as an initial \
+                                 document: {e}"
+                            )
+                        }),
+                };
+                doc.apply_update(&update)
+                    .unwrap_or_else(|e| panic!("{id}: applying {step} must succeed: {e}"));
+                carried = Some(doc);
+            }
+
+            let doc = carried
+                .unwrap_or_else(|| panic!("{id}: an end-state row ships at least one update step"));
+
+            let output = read_vector_fixture(&format!("{id}/resolve/output.json"));
+            let got: serde_json::Value = doc.as_ref().clone();
+            let want: serde_json::Value = output["didDocument"].clone();
+            assert_eq!(
+                got, want,
+                "{id}: applying every update step in order must reproduce \
+                 resolve/output.json.didDocument"
+            );
+
+            observed.insert(id.clone());
+        }
+        reconcile_driven_with(AssertionKind::EndState, vectors, &observed, overrides);
+    }
+
+    /// The vector ledger's cross-cutting invariant: every discovered
+    /// (vector x assertion) row is either driven by one of the drivers above or
+    /// carries a stated skip reason, every hand-written skip still matches a row
+    /// that exists, and no row's two classifications contradict each other.
+    ///
+    /// The five drivers each reconcile their own kind's coverage. This test owns
+    /// the half none of them can see: that discovery ran and found something, that
+    /// coverage has not silently shrunk, that no row fell through the
+    /// classification rules, that no skip entry outlived the row it described,
+    /// that no hand-written skip duplicates a derived rule, and that a green run
+    /// says out loud what it actually checked.
+    #[test]
+    fn op_vectors_every_row_is_driven_or_skipped_with_reason() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+
+        for network_dir in network_dirs_with_vectors() {
             assert!(
-                !result.document_metadata.deactivated,
-                "{kind}/{short_id}: vector is not deactivated"
+                vectors.iter().any(|v| v.network_dir == network_dir),
+                "network directory `{network_dir}` was probed as holding vectors but \
+                 contributed none"
+            );
+        }
+
+        check_driven_floor(&vectors);
+        check_ledger_invariants(&vectors, SKIP_OVERRIDES);
+
+        eprintln!("{}", render_summary_with(&vectors, SKIP_OVERRIDES));
+    }
+
+    /// The coverage ratchet: each assertion kind still drives at least
+    /// `DRIVEN_FLOOR` rows.
+    ///
+    /// `reconcile_driven_with` passes trivially when both sets are empty, so
+    /// upstream churn that made every row of a kind skipped-with-a-reason would
+    /// zero that kind's coverage while every driver stayed green — only the
+    /// stderr summary would change. Resolve is the live exposure: its four rows
+    /// all turn on fixture properties outside this repo, and dropping the
+    /// external vectors' sidecar genesis document upstream would take it to
+    /// zero.
+    ///
+    /// Takes only the vector set and evaluates against an EMPTY override table
+    /// by construction. Reading the live table here would let a legitimate
+    /// hand-written skip trip the ratchet, which is exactly the "the escape
+    /// hatch turns the suite red when it is used" failure the rest of this
+    /// module is built to avoid.
+    fn check_driven_floor(vectors: &[Vector]) {
+        for (kind, floor) in DRIVEN_FLOOR {
+            let driven = expected_driven_with(*kind, vectors, &[]).len();
+            assert!(
+                driven >= *floor,
+                "{kind} coverage fell to {driven} driven row(s), below the floor of {floor}. \
+                 Upstream churn or a new derived skip rule has silently shrunk what this suite \
+                 checks. Restore the coverage, or lower the floor deliberately and say why."
             );
         }
     }
 
-    /// UPDATE driver: for each vector that ships an `update/`, parse
-    /// `update/input.json`, drive `Document::construct_signed_update`, and assert
-    /// the produced [`Update`]'s content-bound triple — `sourceHash`,
-    /// `targetHash`, `targetVersionId` — equals `update/output.json.signedUpdate`.
+    /// The cross-cutting ledger checks, over an explicit override table: no
+    /// hand-written skip duplicates a derived rule, no row fell through
+    /// classification, and no skip entry outlived the row it described.
+    fn check_ledger_invariants(vectors: &[Vector], overrides: &[SkipOverride]) {
+        let redundant = redundant_overrides(vectors, overrides);
+        assert!(
+            redundant.is_empty(),
+            "{} hand-written skip(s) duplicate a derived rule:\n{}",
+            redundant.len(),
+            redundant.join("\n"),
+        );
+
+        let unclassified = unclassified_rows_with(vectors, overrides);
+        assert!(
+            unclassified.is_empty(),
+            "{} vector row(s) are neither driven nor skipped with a reason:\n{}",
+            unclassified.len(),
+            unclassified.join("\n"),
+        );
+
+        let stale = stale_overrides(overrides, vectors);
+        assert!(
+            stale.is_empty(),
+            "{} SKIP override(s) match no discovered row:\n{}",
+            stale.len(),
+            stale.join("\n"),
+        );
+    }
+
+    /// A hand-written skip must keep the suite green when it is used, not turn it
+    /// red. The live table is empty by design, so this replays every driver body
+    /// and the cross-cutting checks against a table that names one otherwise-driven
+    /// row per assertion kind — the shape a real set of entries would take.
     ///
-    /// The raw `proofValue` is NOT byte-compared: BIP340 Schnorr signing here is
-    /// deterministic (no-aux-rand), but the suite's vector was produced by
-    /// a different signer that may pin `k` differently, so the bytes need not
-    /// match. Instead the produced proof is VERIFIED by applying the update back
-    /// to the source document (`InitialDocument::apply_update` runs full BIP340
-    /// proof verification), and the proof's cryptosuite/non-empty proofValue is
-    /// asserted structurally.
+    /// Every kind is covered on purpose. An earlier revision exercised only the
+    /// derivation driver, and passed while a populated table still turned other
+    /// suite members red; a partial replay is what let that ship.
+    ///
+    /// The named rows must still exist: `stale_overrides` reporting nothing is the
+    /// guard that keeps this test from passing vacuously after an upstream rename.
+    ///
+    /// The coverage ratchet is replayed here too. A floor evaluated against the
+    /// live override table would fire on a legitimate hand-written skip, so this
+    /// asserts the opposite: a populated table must NOT trip it.
     #[test]
-    fn op_vectors_update_signs_to_expected_hashes() {
-        use crate::document::InitialDocument;
-        use crate::key::SecretKey;
-        use json_patch::Patch;
+    fn a_live_skip_override_keeps_every_driver_green() {
+        const REASON: &str = "stands in for a hand-written skip; the live table is empty";
+        const LIVE_OVERRIDE: &[SkipOverride] = &[
+            SkipOverride {
+                vector: "regtest/x1/q2fz9mz6",
+                kind: AssertionKind::Derivation,
+                reason: REASON,
+            },
+            SkipOverride {
+                vector: "regtest/k1/qgpakaw4",
+                kind: AssertionKind::GenesisKey,
+                reason: REASON,
+            },
+            SkipOverride {
+                vector: "regtest/k1/qgpakaw4",
+                kind: AssertionKind::Resolve,
+                reason: REASON,
+            },
+            SkipOverride {
+                vector: "mutinynet/x1/q5m2fh36",
+                kind: AssertionKind::UpdateCrypto,
+                reason: REASON,
+            },
+            SkipOverride {
+                vector: "mutinynet/x1/q5m2fh36",
+                kind: AssertionKind::EndState,
+                reason: REASON,
+            },
+        ];
 
-        for (kind, short_id, has_update) in VECTORS {
-            if !*has_update {
-                continue;
-            }
-            let Some(input) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/update/input.json"))
-            else {
-                return;
-            };
-            let Some(output) =
-                read_fixture_or_skip(&format!("regtest/{kind}/{short_id}/update/output.json"))
-            else {
-                return;
-            };
-            let input: serde_json::Value = serde_json::from_str(&input).unwrap();
-            let output: serde_json::Value = serde_json::from_str(&output).unwrap();
-            let signed = &output["signedUpdate"];
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
 
-            // Build the source Document straight from the vector's sourceDocument
-            // (spec @context, no top-level controller), so its JCS hash equals the
-            // vector's sourceHash without touching the create-path residuals.
-            let source_doc =
-                Document::from_json_string(&input["sourceDocument"].to_string()).unwrap();
-
-            let patch: Patch = serde_json::from_value(input["patches"].clone()).unwrap();
-            let target_version_id =
-                NonZeroU64::new(signed["targetVersionId"].as_u64().unwrap()).unwrap();
-            let vm_id = input["verificationMethodId"].as_str().unwrap();
-            let secret = SecretKey::try_from(
-                hex::decode(input["signingMaterial"].as_str().unwrap()).unwrap(),
-            )
-            .unwrap();
-
-            let update = source_doc
-                .construct_signed_update(patch, target_version_id, vm_id, secret)
-                .expect("construct_signed_update succeeds for the vector inputs");
-
-            // Content-bound triple must equal the vector's signedUpdate.
-            let to_b64 = |h: &Sha256Hash| {
-                use base64::Engine as _;
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.as_bytes())
-            };
-            assert_eq!(
-                to_b64(&update.source_hash),
-                signed["sourceHash"].as_str().unwrap(),
-                "{kind}/{short_id}: sourceHash"
+        // Every entry names a real row, and every one of those rows is driven
+        // without it — so each override genuinely changes the expectation.
+        assert!(
+            stale_overrides(LIVE_OVERRIDE, &vectors).is_empty(),
+            "an override names a row that no longer exists — repoint it at a discovered vector"
+        );
+        for entry in LIVE_OVERRIDE {
+            assert!(
+                expected_driven_with(entry.kind, &vectors, &[]).contains(entry.vector),
+                "{}: without the override the row is driven for {}, so the override changes \
+                 something",
+                entry.vector,
+                entry.kind,
             );
-            assert_eq!(
-                to_b64(&update.target_hash),
-                signed["targetHash"].as_str().unwrap(),
-                "{kind}/{short_id}: targetHash"
-            );
-            assert_eq!(
-                u64::from(update.target_version_id),
-                signed["targetVersionId"].as_u64().unwrap(),
-                "{kind}/{short_id}: targetVersionId"
-            );
-
-            // Proof must VERIFY (not byte-compare proofValue): apply the produced
-            // update back to the source initial document. apply_update runs full
-            // BIP340 proof verification + target-hash check.
-            let mut initial =
-                InitialDocument::from_json_string(&input["sourceDocument"].to_string()).unwrap();
-            initial
-                .apply_update(&update)
-                .expect("produced proof must verify against the source document");
-
-            // Structural proof shape.
-            assert_eq!(
-                signed["proof"]["cryptosuite"].as_str().unwrap(),
-                "bip340-jcs-2025",
-                "{kind}/{short_id}: vector proof cryptosuite"
+            assert!(
+                !expected_driven_with(entry.kind, &vectors, LIVE_OVERRIDE).contains(entry.vector),
+                "{}: a live override must remove the row from the {} expectation",
+                entry.vector,
+                entry.kind,
             );
         }
+
+        // With the overrides live: every driver reconciles against its reduced
+        // set and the ledger stays valid.
+        drive_derivation(&vectors, LIVE_OVERRIDE);
+        drive_genesis_key(&vectors, LIVE_OVERRIDE);
+        drive_resolve(&vectors, LIVE_OVERRIDE);
+        drive_update_crypto(&vectors, LIVE_OVERRIDE);
+        drive_end_state(&vectors, LIVE_OVERRIDE);
+        check_ledger_invariants(&vectors, LIVE_OVERRIDE);
+
+        // And the ratchet does not fire: it reads the derived rules alone, so a
+        // hand-written skip cannot lower it.
+        check_driven_floor(&vectors);
     }
 
     /// The in-crate transactions fixture, shared by the two unconfirmed-tx tests.
