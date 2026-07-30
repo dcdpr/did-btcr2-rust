@@ -1,0 +1,313 @@
+{
+  "captured_at": "2026-07-31T22:01:49.008190594+00:00",
+  "endpoint": "http://localhost:3000",
+  "network": "regtest",
+  "vector": "minted/late-publishing-fork",
+  "did": "did:btcr2:k1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv",
+  "tip_height": 768,
+  "signals": [
+    {
+      "address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+      "txid": "b647c51854359b14687e707d9f37a420e15739fd0ae2800da1f364aa26f64458",
+      "block_height": 768,
+      "block_time": 1785535303,
+      "update_hash": "bb5bf217cbcebe1ac688f863c32f3a1169f9408b21b330553fa294e039e32455"
+    },
+    {
+      "address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+      "txid": "ac5e4830e4ef7851b50540c64fe6dedc37807d034d5c846a8e89a9d7561b7c7c",
+      "block_height": 766,
+      "block_time": 1785535245,
+      "update_hash": "d988ced9600856e8010f78e701ce9e61fa850aa898954f29b4b049e4e0098c74"
+    }
+  ],
+  "addresses": {
+    "bcrt1p39rv2tj07wycswu7mvyg03mx3wzk2dty0fd0cpl80sg482ma8umqn2rp9k": [],
+    "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k": [
+      {
+        "fee": 1000,
+        "locktime": 0,
+        "size": 235,
+        "status": {
+          "block_hash": "5f85daf4523312c03dae3297ee6eaf38765e3318d702249987c6b75c24214390",
+          "block_height": 768,
+          "block_time": 1785535303,
+          "confirmed": true
+        },
+        "txid": "b647c51854359b14687e707d9f37a420e15739fd0ae2800da1f364aa26f64458",
+        "version": 2,
+        "vin": [
+          {
+            "is_coinbase": false,
+            "prevout": {
+              "scriptpubkey": "00144abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+              "scriptpubkey_address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+              "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 4abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+              "scriptpubkey_type": "v0_p2wpkh",
+              "value": 6000
+            },
+            "scriptsig": "",
+            "scriptsig_asm": "",
+            "sequence": 4294967293,
+            "txid": "69d7aba9873bb3b222c341c1869cea939ac58c3e724eae581f1fa35d2a8d9723",
+            "vout": 0,
+            "witness": [
+              "30450221008ad8254f98ce23d7cd8fe6586b67ef2d30d8794203c4ae380a2f43120fd025e502201dd50cde4f976afba9d76a7339a1897f82fe68b4c4626f58cecc9775756a10f001",
+              "0308b0df2812984a82d70fdf6cad453682239833b09eb164f6a2edef3a0aa424bd"
+            ]
+          }
+        ],
+        "vout": [
+          {
+            "scriptpubkey": "00144abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+            "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 4abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_type": "v0_p2wpkh",
+            "value": 5000
+          },
+          {
+            "scriptpubkey": "6a20bb5bf217cbcebe1ac688f863c32f3a1169f9408b21b330553fa294e039e32455",
+            "scriptpubkey_asm": "OP_RETURN OP_PUSHBYTES_32 bb5bf217cbcebe1ac688f863c32f3a1169f9408b21b330553fa294e039e32455",
+            "scriptpubkey_type": "op_return",
+            "value": 0
+          }
+        ],
+        "weight": 610
+      },
+      {
+        "fee": 2820,
+        "locktime": 766,
+        "size": 222,
+        "status": {
+          "block_hash": "46f05398f7a8ed31e1bbe1c6553c7b7be0f8c9b559caadb91f0baa476a369ea0",
+          "block_height": 767,
+          "block_time": 1785535249,
+          "confirmed": true
+        },
+        "txid": "69d7aba9873bb3b222c341c1869cea939ac58c3e724eae581f1fa35d2a8d9723",
+        "version": 2,
+        "vin": [
+          {
+            "is_coinbase": false,
+            "prevout": {
+              "scriptpubkey": "00142ce8414c2060a6855cfcc34020d33d1f6024ca58",
+              "scriptpubkey_address": "bcrt1q9n5yznpqvzng2h8ucdqzp5earaszfjjcsj5ha6",
+              "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 2ce8414c2060a6855cfcc34020d33d1f6024ca58",
+              "scriptpubkey_type": "v0_p2wpkh",
+              "value": 312491180
+            },
+            "scriptsig": "",
+            "scriptsig_asm": "",
+            "sequence": 4294967293,
+            "txid": "4352542847a29235191be44343bd0b76071dc21ee7d0d9c44c81c3183ca3758b",
+            "vout": 0,
+            "witness": [
+              "3044022063a7c8ffeea56e0b02d2262885df8b59899ea6c7aadd1a80ec31efa08a4011920220098878541556eab4d4f3777675ec7a90da96e9dd9ee7489bf642dd04deef60d201",
+              "02a3cfbe4c187d47fd619cf38ff13206134b98bf168cc3f6b6affac7fbf3065b40"
+            ]
+          }
+        ],
+        "vout": [
+          {
+            "scriptpubkey": "00144abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+            "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 4abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_type": "v0_p2wpkh",
+            "value": 6000
+          },
+          {
+            "scriptpubkey": "00147fd8287b33c99a1ac7d44b9b470ed2b6ae3d3d74",
+            "scriptpubkey_address": "bcrt1q0lvzs7enexdp4375fwd5wrkjk6hr60t5a8zjqk",
+            "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 7fd8287b33c99a1ac7d44b9b470ed2b6ae3d3d74",
+            "scriptpubkey_type": "v0_p2wpkh",
+            "value": 312482360
+          }
+        ],
+        "weight": 561
+      },
+      {
+        "fee": 1000,
+        "locktime": 0,
+        "size": 235,
+        "status": {
+          "block_hash": "2b80fb0103ee7c8092170ca2610619115280f3485b5cefc1c3099128d2fa8c73",
+          "block_height": 766,
+          "block_time": 1785535245,
+          "confirmed": true
+        },
+        "txid": "ac5e4830e4ef7851b50540c64fe6dedc37807d034d5c846a8e89a9d7561b7c7c",
+        "version": 2,
+        "vin": [
+          {
+            "is_coinbase": false,
+            "prevout": {
+              "scriptpubkey": "00144abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+              "scriptpubkey_address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+              "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 4abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+              "scriptpubkey_type": "v0_p2wpkh",
+              "value": 6000
+            },
+            "scriptsig": "",
+            "scriptsig_asm": "",
+            "sequence": 4294967293,
+            "txid": "4352542847a29235191be44343bd0b76071dc21ee7d0d9c44c81c3183ca3758b",
+            "vout": 1,
+            "witness": [
+              "3045022100aefc3983b499a08a8d479ea8b609571a98716fd47de23c6d36c8f0c50a4a441202206125bf3d123ab13588a2ef1f85ac476a92550d7e14539ed6f1604f132f12055d01",
+              "0308b0df2812984a82d70fdf6cad453682239833b09eb164f6a2edef3a0aa424bd"
+            ]
+          }
+        ],
+        "vout": [
+          {
+            "scriptpubkey": "00144abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+            "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 4abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_type": "v0_p2wpkh",
+            "value": 5000
+          },
+          {
+            "scriptpubkey": "6a20d988ced9600856e8010f78e701ce9e61fa850aa898954f29b4b049e4e0098c74",
+            "scriptpubkey_asm": "OP_RETURN OP_PUSHBYTES_32 d988ced9600856e8010f78e701ce9e61fa850aa898954f29b4b049e4e0098c74",
+            "scriptpubkey_type": "op_return",
+            "value": 0
+          }
+        ],
+        "weight": 610
+      },
+      {
+        "fee": 2820,
+        "locktime": 764,
+        "size": 222,
+        "status": {
+          "block_hash": "3c9d2d8a4834baf430a66eb9b48bd11d728e58cc4a0e56cbd16570ce738e55f9",
+          "block_height": 765,
+          "block_time": 1785535231,
+          "confirmed": true
+        },
+        "txid": "4352542847a29235191be44343bd0b76071dc21ee7d0d9c44c81c3183ca3758b",
+        "version": 2,
+        "vin": [
+          {
+            "is_coinbase": false,
+            "prevout": {
+              "scriptpubkey": "0014e671b9ea39f47e668d4262a9baa4d9da16d90859",
+              "scriptpubkey_address": "bcrt1quecmn63e73lxdr2zv25m4fxemgtdjzze0ctaec",
+              "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 e671b9ea39f47e668d4262a9baa4d9da16d90859",
+              "scriptpubkey_type": "v0_p2wpkh",
+              "value": 312500000
+            },
+            "scriptsig": "",
+            "scriptsig_asm": "",
+            "sequence": 4294967293,
+            "txid": "66afbc80eb5fbcec25150d3d3eb628cbcc97964540d8a006d794893a42e4fa19",
+            "vout": 0,
+            "witness": [
+              "3044022025fdd4c89b4a2d6da68ea3d32edf6bc3d8f639650292fe50d20d1f369554669c02205ee84511045a76d28a298f0441f42b912370ae8762c66e6a46bfcd7b96491a2201",
+              "03ab6716a50c60b0f38cded6cd40b12e22ea4a04b71778dda8d6250a4310f59074"
+            ]
+          }
+        ],
+        "vout": [
+          {
+            "scriptpubkey": "00142ce8414c2060a6855cfcc34020d33d1f6024ca58",
+            "scriptpubkey_address": "bcrt1q9n5yznpqvzng2h8ucdqzp5earaszfjjcsj5ha6",
+            "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 2ce8414c2060a6855cfcc34020d33d1f6024ca58",
+            "scriptpubkey_type": "v0_p2wpkh",
+            "value": 312491180
+          },
+          {
+            "scriptpubkey": "00144abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_address": "bcrt1qf2lpewe4fdshhe5lfk2dy8u8n62uh8ylrg4k8k",
+            "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 4abe1cbb354b617be69f4d94d21f879e95cb9c9f",
+            "scriptpubkey_type": "v0_p2wpkh",
+            "value": 6000
+          }
+        ],
+        "weight": 561
+      }
+    ],
+    "mnLA3UjFokjXK7FJNv9uqtQ9CHFVdoaBwN": []
+  },
+  "sidecar": {
+    "updates": [
+      {
+        "@context": [
+          "https://w3id.org/security/v2",
+          "https://w3id.org/zcap/v1",
+          "https://w3id.org/json-ld-patch/v1",
+          "https://btcr2.dev/context/v1"
+        ],
+        "patch": [
+          {
+            "op": "add",
+            "path": "/service/3",
+            "value": {
+              "id": "did:btcr2:k1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv#v2-branch-a",
+              "serviceEndpoint": "http://example.com/v2-branch-a",
+              "type": "DecentralizedWebNode"
+            }
+          }
+        ],
+        "proof": {
+          "@context": [
+            "https://w3id.org/security/v2",
+            "https://w3id.org/zcap/v1",
+            "https://w3id.org/json-ld-patch/v1",
+            "https://btcr2.dev/context/v1"
+          ],
+          "capability": "urn:zcap:root:did%3Abtcr2%3Ak1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv",
+          "capabilityAction": "Write",
+          "cryptosuite": "bip340-jcs-2025",
+          "proofPurpose": "capabilityInvocation",
+          "proofValue": "zgzxKijoZtvPZcvwKALidJziACzaPVjvCuVqBr48KHkbVtkpY3fBW7MmSZ35cT7PizPyCL6QC89zPdGJ112y7Vjw",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:btcr2:k1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv#initialKey"
+        },
+        "sourceHash": "M2yt3qc0TjqMb0WNp94UDc400a6a02NFxPW2Y5Ujo-0",
+        "targetHash": "Nl2BmeFVSSZ4ESROLfrVX-EA6a0EDy9vdLy5yn9m-RE",
+        "targetVersionId": 2
+      },
+      {
+        "@context": [
+          "https://w3id.org/security/v2",
+          "https://w3id.org/zcap/v1",
+          "https://w3id.org/json-ld-patch/v1",
+          "https://btcr2.dev/context/v1"
+        ],
+        "patch": [
+          {
+            "op": "add",
+            "path": "/service/3",
+            "value": {
+              "id": "did:btcr2:k1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv#v2-branch-b",
+              "serviceEndpoint": "http://example.com/v2-branch-b",
+              "type": "DecentralizedWebNode"
+            }
+          }
+        ],
+        "proof": {
+          "@context": [
+            "https://w3id.org/security/v2",
+            "https://w3id.org/zcap/v1",
+            "https://w3id.org/json-ld-patch/v1",
+            "https://btcr2.dev/context/v1"
+          ],
+          "capability": "urn:zcap:root:did%3Abtcr2%3Ak1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv",
+          "capabilityAction": "Write",
+          "cryptosuite": "bip340-jcs-2025",
+          "proofPurpose": "capabilityInvocation",
+          "proofValue": "z4WL3DfBsVnMo2dYwzPAP1stXg4ov71g8MA5YBGZRop15DDF7LhvduB1WFm6RpvtrEEWPsoZcnDe91Aokwe8mcmME",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:btcr2:k1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv#initialKey"
+        },
+        "sourceHash": "M2yt3qc0TjqMb0WNp94UDc400a6a02NFxPW2Y5Ujo-0",
+        "targetHash": "LHY8M2-4sy5-CemI53CCXknrkKAPFjgv1PJYewJEMyw",
+        "targetVersionId": 2
+      }
+    ]
+  },
+  "expected": {
+    "error": "LATE_PUBLISHING"
+  }
+}

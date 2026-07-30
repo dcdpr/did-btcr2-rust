@@ -23,8 +23,8 @@ mod url;
 pub use client::Client;
 pub use error::{Error, TransportError};
 pub use funding::{
-    DEFAULT_CONF_TARGET, EsploraUtxo, Fee, fetch_fee_estimates, fetch_utxos, rate_from_estimates,
-    resolve_fee, select,
+    DEFAULT_CONF_TARGET, EsploraUtxo, Fee, UtxoStatus, confirmed_total, fetch_fee_estimates,
+    fetch_utxos, rate_from_estimates, resolve_fee, select,
 };
 pub use signing::sign_beacon_tx;
 pub use transport::{BtcTransport, UreqTransport};

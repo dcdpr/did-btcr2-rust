@@ -110,6 +110,16 @@ pub fn fixture_root() -> PathBuf {
 /// rejected before anything is joined, so a hostile or fat-fingered
 /// `--vector ../../../etc/x` cannot reach outside the fixture root.
 pub fn fixture_path(vector: &str) -> Result<PathBuf, FixtureError> {
+    fixture_path_in(&fixture_root(), vector)
+}
+
+/// [`fixture_path`] against an explicit root, so a caller that has to ask "is this
+/// capture written yet?" can be exercised against a scratch tree instead of the
+/// repository's own.
+///
+/// The id check is identical and lives only here, so no caller can join an
+/// unchecked id onto any root.
+pub fn fixture_path_in(root: &Path, vector: &str) -> Result<PathBuf, FixtureError> {
     let relative = Path::new(vector);
     let mut segments = 0usize;
     for component in relative.components() {
@@ -123,7 +133,7 @@ pub fn fixture_path(vector: &str) -> Result<PathBuf, FixtureError> {
     if segments == 0 {
         return Err(FixtureError::UnsafeVectorId(vector.to_string()));
     }
-    Ok(fixture_root().join(format!("{vector}.json")))
+    Ok(root.join(format!("{vector}.json")))
 }
 
 /// Serialize `fixture` and write it to its derived path atomically.

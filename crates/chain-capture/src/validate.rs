@@ -109,10 +109,9 @@ struct SidecarUpdate {
 /// sidecar entry the resolver would reject is rejected here too, and the bytes
 /// hashed are exactly the JSON value the core would have stored.
 // The gate reaches the recipe through `sidecar_updates`, which also needs each
-// update's target version; this projection is what the tests of this module and
-// of `capture` use, and what the minting path — which has to put these very
-// hashes into an OP_RETURN — will call.
-#[allow(dead_code)]
+// update's target version; this projection is what the minted-fixture emission
+// calls to find the announcements a minted session's own updates must be matched
+// by.
 pub fn update_hashes(vector: &str, sidecar: &Value) -> Result<Vec<[u8; 32]>, ValidateError> {
     Ok(sidecar_updates(vector, sidecar)?
         .into_iter()

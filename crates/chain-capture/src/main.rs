@@ -24,7 +24,9 @@
 //! timeout. This crate holds no HTTP client of its own.
 
 mod capture;
+mod chain;
 mod fixture;
+mod mint;
 mod record;
 mod targets;
 mod validate;
@@ -107,11 +109,8 @@ enum CaptureRunError {
     /// The capture session failed.
     Capture(#[from] capture::CaptureError),
 
-    /// A subcommand whose body has not been written yet. A deliberately visible
-    /// stub: the arm exists, parses its full flag set, and refuses to pretend it
-    /// did the work.
-    #[error("subcommand `{0}` lands in a later step of this phase")]
-    NotImplemented(String),
+    /// The minting session failed.
+    Mint(#[from] mint::MintError),
 }
 
 impl OnlyArgs for Args {
@@ -228,6 +227,10 @@ fn parse_capture(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command
             Some(p @ "--network") => network = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--esplora-url") => esplora_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--vector") => vector = Some(sub_args.next().parse_str(p)?),
+            // `chain-capture capture --help` is what an operator reaches for; the
+            // global scan above only sees a leading `--help`, so each subcommand
+            // answers it too rather than reporting an unknown argument.
+            Some("--help") | Some("-h") => Args::help(),
             _ => return Err(CliError::Unknown(arg)),
         }
     }
@@ -264,6 +267,7 @@ fn parse_mint(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command, C
             Some(p @ "--state-file") => state_file = Some(sub_args.next().parse_path(p)?),
             Some(p @ "--fee") => fee = sub_args.next().parse_int::<u64, _>(p)?,
             Some("--yes") => yes = true,
+            Some("--help") | Some("-h") => Args::help(),
             _ => return Err(CliError::Unknown(arg)),
         }
     }
@@ -284,8 +288,8 @@ fn parse_mint(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command, C
     })
 }
 
-/// Describe a parsed command for the stub error, so an operator can see the
-/// tool understood their flags even though the body is not written yet.
+/// Describe a parsed command back to the operator at session start, so a long
+/// session says out loud which chain, endpoint and files it is about to use.
 ///
 /// `--bitcoind-auth` is reported as present/absent and NEVER echoed: the
 /// credential belongs in an `Authorization` header, not in this tool's output or
@@ -330,6 +334,10 @@ fn describe(command: &Command) -> String {
 
 fn run() -> Result<(), CaptureRunError> {
     let args: Args = onlyargs::parse()?;
+    // The session's own report goes to stderr, so a shell pipeline reading stdout
+    // is unaffected by it. The bitcoind credential is reported as present or
+    // absent and never echoed.
+    eprintln!("{}", describe(&args.command));
 
     match args.command {
         Command::Capture {
@@ -337,12 +345,27 @@ fn run() -> Result<(), CaptureRunError> {
             esplora_url,
             vector,
         } => Ok(capture::run(&network, esplora_url, vector)?),
-        // Still a visible stub: the flags parse and are reported back, and the
-        // tool refuses rather than pretending to have minted anything. A later
-        // step of this phase replaces this arm with its body.
-        ref command @ Command::Mint { .. } => {
-            Err(CaptureRunError::NotImplemented(describe(command)))
-        }
+        Command::Mint {
+            scenario,
+            network,
+            esplora_url,
+            bitcoind_url,
+            bitcoind_auth,
+            key_file,
+            state_file,
+            fee,
+            yes,
+        } => Ok(mint::run(
+            &scenario,
+            &network,
+            esplora_url,
+            bitcoind_url,
+            bitcoind_auth,
+            &key_file,
+            &state_file,
+            fee,
+            yes,
+        )?),
     }
 }
 

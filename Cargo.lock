@@ -354,6 +354,7 @@ dependencies = [
  "esploda",
  "hex",
  "http",
+ "json-patch",
  "onlyargs",
  "onlyerror",
  "secp256k1",

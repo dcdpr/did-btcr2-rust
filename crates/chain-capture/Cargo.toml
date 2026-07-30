@@ -24,3 +24,10 @@ hex = "0.4"
 base64 = "0.22"
 esploda = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+# Applying a scenario's own patch to the document it is built for, so the tests
+# prove the RFC-6902 paths exist rather than only that the patch parses. The
+# tool itself never applies a patch — the core crate does that inside the
+# resolver — so this is a test-only dependency.
+json-patch = "4"
