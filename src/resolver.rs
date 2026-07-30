@@ -1585,11 +1585,15 @@ mod tests {
     }
 
     /// The in-crate transactions fixture, shared by the two unconfirmed-tx tests.
-    /// A generic singleton-beacon tx carrying a valid OP_RETURN signal output;
-    /// confirmed by default, overridden to `confirmed:false` per test.
-    const UNCONFIRMED_FIXTURE: &str = include_str!(
-        "../fixtures/k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp-transactions.json"
-    );
+    ///
+    /// A beacon-tx UNIT fixture, not a capture of any DID's history: a generic
+    /// singleton-beacon transaction carrying a valid OP_RETURN signal output,
+    /// confirmed by default and overridden to `confirmed: false` per test. It
+    /// bears no relationship to any test-suite vector — `find_next_signals` does
+    /// not cross-check transactions against beacon addresses, so these tests
+    /// need none. Distinct from `fixtures/chain/`, which holds real captured
+    /// per-vector chain snapshots.
+    const UNCONFIRMED_FIXTURE: &str = include_str!("../fixtures/singleton-beacon-signal-txs.json");
 
     /// a *needed* unconfirmed signal — one whose
     /// announced hash is present in the sidecar update-lookup table — must raise a
@@ -1741,97 +1745,6 @@ mod tests {
             signals[0].signal_bytes, good_signal,
             "the surviving signal is the well-formed one, not the malformed-tail masquerade"
         );
-    }
-
-    // this legacy test drives a full multi-block FSM traversal
-    // over the OLD flat mutinynet fixture layout (txid-keyed signalsMetadata with
-    // Base58 `sourceHash`/`targetHash`, a hardcoded `targetDocument.json`, and
-    // testnet beacon-address URLs). That flat layout was DELETED upstream; its
-    // behavioural coverage (beacon-request generation, multi-block FSM
-    // resolution, update application, target-doc hash match) is now provided
-    // against REAL spec vectors by the operation-vector adapter
-    // (`op_vectors_resolve_matches_output` + `op_vectors_update_signs_to_expected_hashes`).
-    // It additionally decodes under the OLD nibble layout, which is
-    // spec-owned.
-    //
-    // RETAINED, gated + `#[ignore]`'d, only as legacy scaffolding: the dead
-    // `include_str!` reads are re-pointed to SURVIVING regtest vector files so
-    // `--all-features` still COMPILES. It is never executed (its hardcoded
-    // testnet URLs/hashes do not match the regtest files), so the path mismatch
-    // cannot assert. Un-gate / delete once the nibble-layout change lands.
-    #[cfg(feature = "old-spec-fixtures")]
-    #[ignore = "2026-06-22 nibble-layout-pending (spec-owned): legacy flat-layout \
-                FSM traversal superseded by the operation-vector adapter; reads re-pointed to \
-                surviving regtest fixtures so --all-features compiles. Un-gate when the layout lands."]
-    #[test]
-    fn test_traversal() {
-        // Reads re-pointed to surviving regtest vectors so the gated build
-        // compiles (test is #[ignore]'d; reads are never asserted against).
-        let initial_document = InitialDocument::from_json_string(include_str!(
-            "../test-suite/regtest/k1/qgppexmy/update/input.json"
-        ))
-        .unwrap();
-
-        let resolution_options = ResolutionOptions::from_json_string(include_str!(
-            "../test-suite/regtest/k1/qgppexmy/resolve/input.json"
-        ));
-
-        let fsm = Resolver::new(initial_document, resolution_options);
-        let ResolverState::Requests(next_state, requests) = fsm.resolve().unwrap() else {
-            unreachable!()
-        };
-
-        let request_urls = requests[&BeaconType::Singleton]
-            .iter()
-            .map(|req| req.uri().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            request_urls,
-            [
-                "https://blockstream.info/testnet/api/address/mtA1SshFsJtD2Di1KBSTmyuD23eBqUekQ3/txs",
-                "https://blockstream.info/testnet/api/address/tb1q323c0l0fapjeg4ux9ayumnpqh8xzqgk3wg82dy/txs",
-                "https://blockstream.info/testnet/api/address/tb1pecc8w64wdvn6x2np8yr8qvsz2pclydkd9t5jde2gf0hy0musfxxsn23q20/txs",
-            ]
-        );
-
-        let json = include_str!(
-            "../fixtures/k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp-transactions.json"
-        );
-        let transactions: HashMap<_, _> = serde_json::from_str(json).unwrap();
-        let fsm = next_state.process_responses(transactions.clone());
-
-        let ResolverState::Requests(next_state, requests) = fsm.resolve().unwrap() else {
-            unreachable!()
-        };
-
-        let request_urls = requests[&BeaconType::Singleton]
-            .iter()
-            .map(|req| req.uri().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            request_urls,
-            [
-                "https://blockstream.info/testnet/api/address/tb1qcs60r4j6ema8x4gf07hgt83x45e650dr97q3qv/txs",
-            ]
-        );
-
-        let fsm = next_state.process_responses(transactions);
-
-        let ResolverState::Resolved(result) = fsm.resolve().unwrap() else {
-            unreachable!()
-        };
-
-        assert_eq!(
-            result.document.fields.id.encode(),
-            "did:btcr2:k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp",
-        );
-
-        // Re-pointed to a surviving regtest vector so the gated build compiles.
-        let target_doc = Document::from_json_string(include_str!(
-            "../test-suite/regtest/k1/qgppexmy/resolve/output.json"
-        ))
-        .unwrap();
-        assert_eq!(result.document.hash(), target_doc.hash());
     }
 
     /// Build a minimal Singleton-beacon resolver over the regtest k1 qgpakaw4

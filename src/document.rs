@@ -1419,9 +1419,9 @@ mod tests {
     // discarded here and the update payloads are collected into a
     // `SidecarData` whose `update_lookup_table` is built by `SidecarData::new`.
     //
-    // Feature-gated to match its only remaining callers — the two
-    // `old-spec-fixtures`-gated legacy tests (`test_document_from_did_components`
-    // and `resolver::tests::test_traversal`). The default-build re-homed tests
+    // Feature-gated to match its only remaining caller — the
+    // `old-spec-fixtures`-gated legacy test `test_document_from_did_components`.
+    // The default-build re-homed tests
     // build their `ResolutionOptions` directly from the regtest operation
     // vectors via the operation-vector adapter, so this legacy
     // signalsMetadata-by-txid reader is no longer on the default path.

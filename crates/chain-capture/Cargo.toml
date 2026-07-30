@@ -1,0 +1,26 @@
+[package]
+name = "chain-capture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "chain-capture"
+path = "src/main.rs"
+
+[dependencies]
+did-btcr2 = { path = "../.." }
+did-btcr2-client = { path = "../did-btcr2-client" }
+onlyargs = "0.2"
+onlyerror = "0.1"
+error-iter = "0.4"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.1"
+sha2 = "0.10"
+secp256k1 = { version = "0.27", features = ["rand"] }
+hex = "0.4"
+base64 = "0.22"
+esploda = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

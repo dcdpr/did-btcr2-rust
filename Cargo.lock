@@ -343,6 +343,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chain-capture"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "did-btcr2",
+ "did-btcr2-client",
+ "error-iter",
+ "esploda",
+ "hex",
+ "http",
+ "onlyargs",
+ "onlyerror",
+ "secp256k1",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"

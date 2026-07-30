@@ -53,8 +53,9 @@ urlencoding = "2"
 bitcoin = { version = "0.30", features = ["bitcoinconsensus"] }
 
 [features]
-# Gates the legacy Base58-encoded test-suite fixtures (e.g. test_traversal in
-# resolver.rs) so CI can stay green after the hash-encoding switch
+# Gates the legacy Base58-encoded test-suite fixtures (e.g.
+# test_document_from_did_components in document.rs) so CI can stay green after
+# the hash-encoding switch
 # encoding to base64url-no-pad. Off by default; enabled only when running the
 # pre-rename fixtures.
 old-spec-fixtures = []
