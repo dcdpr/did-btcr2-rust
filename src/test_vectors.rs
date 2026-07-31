@@ -9,6 +9,7 @@
 #![cfg(test)]
 
 use crate::identifier::Network;
+use esploda::esplora::{Status, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -19,6 +20,215 @@ use std::path::{Path, PathBuf};
 /// caller's working directory.
 pub(crate) fn test_suite_root() -> PathBuf {
     PathBuf::from(format!("{}/test-suite", env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Absolute path of the in-crate captured-chain fixture tree.
+///
+/// Sibling of [`test_suite_root`], and deliberately NOT in the submodule: these
+/// fixtures are ours, so they are always present and an absence is a bug.
+pub(crate) fn chain_fixture_root() -> PathBuf {
+    PathBuf::from(format!("{}/fixtures/chain", env!("CARGO_MANIFEST_DIR")))
+}
+
+/// `regtest/k1/qgppexmy` -> `<crate>/fixtures/chain/regtest/k1/qgppexmy.json`.
+pub(crate) fn chain_fixture_path(vector_id: &str) -> PathBuf {
+    chain_fixture_root().join(format!("{vector_id}.json"))
+}
+
+/// Every captured chain fixture committed to this repository.
+///
+/// Written down on purpose, unlike the `test-suite/` vectors, which are
+/// discovered: a fixture that vanished from disk would simply stop being walked
+/// by a directory scan, which is the silent-coverage-loss this whole module
+/// exists to prevent. Listing them makes a deletion fail by name.
+pub(crate) const ALL_CHAIN_FIXTURES: &[&str] = &[
+    "regtest/k1/qgppexmy",
+    "regtest/k1/qgpy0hmm",
+    "regtest/x1/q26jeds9",
+    "regtest/x1/qfl7se8f",
+    "mutinynet/k1/q5p6w9su",
+    "mutinynet/k1/q5pgeu9z",
+    "mutinynet/x1/q5ugrf3w",
+    "minted/clean-rotating-beacons",
+    "minted/late-publishing-fork",
+];
+
+/// One captured chain snapshot: what the beacon addresses returned, the tip they
+/// were read against, and the signals found in them.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ChainFixture {
+    /// The Esplora endpoint the snapshot was read from. Recorded, not used as a
+    /// routing key: replay keys on the ADDRESS, because the resolver builds its
+    /// request URIs from its own `rpc_host`.
+    pub(crate) endpoint: String,
+    /// The chain the snapshot came from. Read, never assumed: each rung of the
+    /// minting ladder re-mints the minted fixtures on a different network.
+    pub(crate) network: String,
+    pub(crate) tip_height: u32,
+    pub(crate) signals: Vec<CapturedSignal>,
+    /// A key present with an empty vector means captured-and-empty; a key ABSENT
+    /// means never captured, and only the latter is a replay failure.
+    pub(crate) addresses: BTreeMap<String, Vec<Transaction>>,
+    /// The DID the capture resolved.
+    #[serde(default)]
+    pub(crate) did: Option<String>,
+    /// Minted scenarios only.
+    #[serde(default)]
+    pub(crate) sidecar: Option<serde_json::Value>,
+    /// Minted scenarios only.
+    #[serde(default)]
+    pub(crate) expected: Option<serde_json::Value>,
+}
+
+/// One beacon signal found in a captured snapshot: which address announced it,
+/// in which transaction and block, and the update hash it pushed.
+///
+/// DERIVED from [`ChainFixture::addresses`] at capture time and committed next
+/// to its source; [`assert_signals_consistent`] re-derives it on every read.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CapturedSignal {
+    pub(crate) address: String,
+    pub(crate) txid: String,
+    pub(crate) block_height: u32,
+    pub(crate) block_time: i64,
+    pub(crate) update_hash: String,
+}
+
+impl ChainFixture {
+    /// The signal in the highest block — the most-recently-applied update's
+    /// block, which is what `confirmations` is computed from
+    /// (`resolver.rs`, the `applied_block_height` overwrite).
+    pub(crate) fn latest_signal(&self) -> Option<&CapturedSignal> {
+        self.signals.iter().max_by_key(|signal| signal.block_height)
+    }
+
+    /// The minimum `block_time` across the signals — the anchor for a
+    /// `versionTime` probe that must land BEFORE the first update.
+    pub(crate) fn earliest_block_time(&self) -> Option<i64> {
+        self.signals.iter().map(|signal| signal.block_time).min()
+    }
+}
+
+/// The command that (re)produces the fixture for `vector_id`, for the panic
+/// messages. Vendor vectors are captured off a chain; the two minted scenarios
+/// are published onto one first.
+fn chain_capture_command(vector_id: &str) -> String {
+    let network = vector_id.split('/').next().unwrap_or(vector_id);
+    if network == "minted" {
+        let scenario = match vector_id {
+            "minted/clean-rotating-beacons" => "clean",
+            "minted/late-publishing-fork" => "poisoned",
+            _ => "clean | poisoned",
+        };
+        format!("cargo run -p chain-capture -- mint --scenario {scenario} --network <net>")
+    } else {
+        format!("cargo run -p chain-capture -- capture --network {network} --vector {vector_id}")
+    }
+}
+
+/// Re-derive every `signals` entry from `addresses` and require agreement.
+///
+/// `signals` is DERIVED data committed next to its source, which is convenient
+/// for the assertions but means a hand edit or a partial re-capture could
+/// desynchronize the two — and then a confirmations assertion would be comparing
+/// resolver output against a stale parallel copy. Checking on read gives the
+/// fixture one source of truth without giving up the convenience.
+fn assert_signals_consistent(fixture: &ChainFixture, vector_id: &str) {
+    let rerun = chain_capture_command(vector_id);
+    for signal in &fixture.signals {
+        let address = &signal.address;
+        let txid = &signal.txid;
+
+        let txs = fixture.addresses.get(address).unwrap_or_else(|| {
+            panic!(
+                "{vector_id}: signal {txid} names address {address}, which the capture holds \
+                 no response for — `signals` is derived from `addresses`, so re-run \
+                 `{rerun}` rather than editing the fixture"
+            )
+        });
+        let tx = txs
+            .iter()
+            .find(|tx| tx.txid.to_string() == *txid)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{vector_id}: signal txid {txid} is not among the {} transaction(s) \
+                     captured for address {address} — re-run `{rerun}` rather than editing \
+                     the fixture",
+                    txs.len()
+                )
+            });
+
+        let Status::Confirmed {
+            block_height,
+            block_time,
+            ..
+        } = &tx.status
+        else {
+            panic!(
+                "{vector_id}: signal txid {txid} is unconfirmed in the capture, so it cannot \
+                 carry a block_height — re-run `{rerun}`"
+            )
+        };
+        assert_eq!(
+            *block_height, signal.block_height,
+            "{vector_id}: signal {txid} records block_height {} but its captured transaction \
+             confirmed at {block_height} — re-run `{rerun}` rather than editing the fixture",
+            signal.block_height
+        );
+        assert_eq!(
+            block_time.timestamp(),
+            signal.block_time,
+            "{vector_id}: signal {txid} records block_time {} but its captured transaction \
+             confirmed at {} — re-run `{rerun}` rather than editing the fixture",
+            signal.block_time,
+            block_time.timestamp()
+        );
+
+        // The LAST output only, mirroring `find_next_signals`: the spec puts the
+        // Signal Bytes there, so a signal derived from any other output would be
+        // one the resolver will never read.
+        let script = tx
+            .outputs
+            .last()
+            .map(|txout| hex::encode(txout.script_pubkey.as_bytes()))
+            .unwrap_or_default();
+        assert_eq!(
+            script,
+            format!("6a20{}", signal.update_hash),
+            "{vector_id}: signal {txid} records update_hash {} but its captured transaction's \
+             LAST output is {script} — re-run `{rerun}` rather than editing the fixture",
+            signal.update_hash
+        );
+    }
+}
+
+/// Read a captured chain fixture. **Panics** when it is not there, or when its
+/// derived `signals` no longer agree with its source `addresses`.
+///
+/// Deliberately unlike [`read_fixture_or_skip`], whose absent arm returns `None`
+/// for the legitimately-absent test-suite submodule. These fixtures live in this
+/// repository: a missing one for a row the ledger says is driven is a bug, and
+/// skipping would let on-chain coverage vanish while the suite stayed green.
+pub(crate) fn read_chain_fixture(vector_id: &str) -> ChainFixture {
+    let path = chain_fixture_path(vector_id);
+    let rerun = chain_capture_command(vector_id);
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{vector_id}: no captured chain fixture at {} ({e}). These fixtures live in this \
+             repository, not a submodule, so an absent one is a bug — run `{rerun}` (see \
+             crates/chain-capture/RUNBOOK.md).",
+            path.display()
+        )
+    });
+    let fixture: ChainFixture = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        panic!(
+            "{vector_id}: {} does not deserialize as a capture envelope ({e}) — re-run \
+             `{rerun}` rather than editing the fixture.",
+            path.display()
+        )
+    });
+    assert_signals_consistent(&fixture, vector_id);
+    fixture
 }
 
 /// Read `dir`, distinguishing "the path is not there" from "the path is there
@@ -752,9 +962,24 @@ impl fmt::Display for AssertionKind {
 ///
 /// A skipped row carries EVERY applicable reason, not a first-match winner, so
 /// each downstream body of work has a mechanically derivable target set: rows
-/// reading exactly `{NeedsOnChainSignals}` become drivable once beacon
-/// transactions can be replayed offline, and the `CasDelivery` / `SmtDelivery`
-/// rows once aggregated delivery is implemented.
+/// carrying `UnsupportedBeaconType` are what the aggregation milestone unlocks
+/// — the resolver refuses to issue a request for a CAS or SMT beacon at all —
+/// and the `CasDelivery` / `SmtDelivery` rows are what an implemented
+/// aggregated delivery unlocks.
+///
+/// "Past genesis" is no longer among these. A vector whose expected resolution
+/// is version 2 or later is driven from a captured chain snapshot under
+/// `fixtures/chain/`, so its beacon signals are replayed offline like any other
+/// input.
+///
+/// There is deliberately no derived reason for "this vector is v2+ but its
+/// chain data cannot be captured" any more. If a new v2+ Singleton, non-pending
+/// vector arrives whose beacon transactions are gone — a mutinynet reset, say —
+/// it becomes a driven row with no fixture and `read_chain_fixture` panics. The
+/// remedy is a `SKIP_OVERRIDES` entry with the reason stated, not resurrecting
+/// a derived rule: an override is visible in the summary and
+/// redundancy-checked, whereas a derived rule would silently re-skip every
+/// future v2 vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum SkipReason {
     /// `pending.json`: the vector's updates are not fully anchored on chain.
@@ -763,9 +988,13 @@ pub(crate) enum SkipReason {
     CasDelivery,
     /// The vector's genesis document or delivery recipe uses SMT aggregation.
     SmtDelivery,
-    /// The expected resolution is past genesis and needs on-chain beacon
-    /// signals the suite does not ship.
-    NeedsOnChainSignals,
+    /// The genesis document declares a beacon the resolver cannot query at all:
+    /// building the next round of requests returns `Unsupported` on the first
+    /// CAS or SMT beacon, before any transaction is read. Distinct from
+    /// `CasDelivery`/`SmtDelivery`, which are about how the genesis document or
+    /// an announcement is DELIVERED — a different problem fixed in different
+    /// code. Both are recorded when both apply.
+    UnsupportedBeaconType,
     /// A one-off no derived rule expresses; the payload is the stated reason.
     Override(&'static str),
 }
@@ -776,9 +1005,9 @@ impl fmt::Display for SkipReason {
             Self::Unanchored => f.write_str("unanchored (pending.json)"),
             Self::CasDelivery => f.write_str("CAS-aggregated delivery not implemented"),
             Self::SmtDelivery => f.write_str("SMT-aggregated delivery not implemented"),
-            Self::NeedsOnChainSignals => {
-                f.write_str("needs on-chain beacon signals (not replayable offline yet)")
-            }
+            Self::UnsupportedBeaconType => f.write_str(
+                "resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)",
+            ),
             Self::Override(reason) => f.write_str(reason),
         }
     }
@@ -848,9 +1077,12 @@ pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[
 /// when both the expected and the observed set are empty, so upstream churn
 /// that made every row of a kind skipped-with-a-reason would zero that kind's
 /// coverage without failing anything — only the stderr summary would change.
-/// Resolve is the live exposure: its four rows all depend on fixture properties
-/// outside this repo (`versionId == 1`, and for external vectors the presence of
-/// `resolve/input.json.resolutionOptions.sidecar.genesisDocument`).
+/// Resolve is the live exposure: its eleven rows depend on fixture properties
+/// outside this repository (for an external vector, the presence of
+/// `resolve/input.json.resolutionOptions.sidecar.genesisDocument`) AND, for the
+/// seven past-genesis rows, on captured chain fixtures inside it. Either kind of
+/// loss — an upstream vector losing its sidecar genesis document, or a deleted
+/// capture — must fail here rather than shrink coverage quietly.
 ///
 /// Compared with `>=`, so upstream ADDING vectors raises coverage without
 /// failing; only silent coverage LOSS fails.
@@ -862,7 +1094,7 @@ pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[
 pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
     (AssertionKind::Derivation, 22),
     (AssertionKind::GenesisKey, 22),
-    (AssertionKind::Resolve, 4),
+    (AssertionKind::Resolve, 11),
     (AssertionKind::UpdateCrypto, 17),
     (AssertionKind::EndState, 17),
 ];
@@ -870,22 +1102,29 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
 /// Derive the reasons a vector's `resolve` row cannot be driven, from the
 /// vector's own files.
 ///
-/// Four rules, all additive — a row keeps every reason that applies:
+/// Three rules, all additive — a row keeps every reason that applies:
 /// 1. `pending.json` present            -> `Unanchored`
-/// 2. expected `versionId` > 1          -> `NeedsOnChainSignals`
-/// 3. a `CASBeacon` / `SMTBeacon` service in the genesis document
-///    -> `CasDelivery` / `SmtDelivery`
-/// 4. `scenario.json.delivery.genesis` or `.announcement` is `"cas"` / `"smt"`
+/// 2. a `CASBeacon` / `SMTBeacon` service in the genesis document
+///    -> `CasDelivery` / `SmtDelivery`, AND `UnsupportedBeaconType`
+/// 3. `scenario.json.delivery.genesis` or `.announcement` is `"cas"` / `"smt"`
 ///    -> `CasDelivery` / `SmtDelivery`
 ///
-/// Rule 4 is what accounts for the one genesis-era vector whose genesis
+/// Rule 3 is what accounts for the one genesis-era vector whose genesis
 /// document is declared CAS-delivered while carrying no beacon-type signal at
-/// all (empty `service`, no `pending.json`, expected `versionId` 1). Rule 3
-/// gates nothing on its own today — every vector it fires on is already caught
-/// by rule 2 — and exists so the reason set stays complete. Build nothing on
-/// top of rule 3.
+/// all (empty `service`, no `pending.json`, expected `versionId` 1).
+///
+/// Rule 2 is what makes the aggregation milestone's target set mechanically
+/// derivable: a CAS or SMT beacon in the genesis document blocks resolve twice
+/// over — the delivery mechanism is unimplemented, and the resolver refuses to
+/// issue a request for that beacon type at all — and those are fixed in
+/// different code. Rows carrying `UnsupportedBeaconType` are the ones that stay
+/// skipped now that every anchored update can be replayed off a captured chain.
+///
+/// The expected `versionId` is deliberately NOT read. A past-genesis vector is
+/// driven from its captured chain snapshot, so "past genesis" is no longer a
+/// reason to skip; see [`SkipReason`] for the escape route a v2+ vector whose
+/// chain data cannot be captured takes instead.
 pub(crate) fn derived_resolve_skip_reasons(
-    expected_version_id: u64,
     has_pending: bool,
     delivery_genesis: Option<&str>,
     delivery_announcement: Option<&str>,
@@ -898,23 +1137,28 @@ pub(crate) fn derived_resolve_skip_reasons(
         reasons.insert(SkipReason::Unanchored);
     }
 
-    // Rule 2: anything past genesis needs beacon signals read off the chain.
-    if expected_version_id > 1 {
-        reasons.insert(SkipReason::NeedsOnChainSignals);
-    }
-
-    // Rule 3: the genesis document's beacon services, by their wire strings.
+    // Rule 2: the genesis document's beacon services, by their wire strings.
+    // A CAS or SMT beacon blocks resolve TWICE over: the delivery mechanism is
+    // unimplemented, AND the resolver refuses to issue a request for that beacon
+    // type at all. Recording both keeps each downstream target set precise.
     for service_type in genesis_service_types {
         match service_type.as_str() {
-            "CASBeacon" => reasons.insert(SkipReason::CasDelivery),
-            "SMTBeacon" => reasons.insert(SkipReason::SmtDelivery),
-            // `SingletonBeacon` is drivable, and a non-beacon service (DIDComm,
-            // a web node) says nothing about delivery.
-            _ => false,
-        };
+            "CASBeacon" => {
+                reasons.insert(SkipReason::CasDelivery);
+                reasons.insert(SkipReason::UnsupportedBeaconType);
+            }
+            "SMTBeacon" => {
+                reasons.insert(SkipReason::SmtDelivery);
+                reasons.insert(SkipReason::UnsupportedBeaconType);
+            }
+            // `SingletonBeacon` is drivable, and a non-beacon service
+            // (DIDComm, a web node) says nothing about delivery OR about
+            // whether the resolver can query a beacon.
+            _ => {}
+        }
     }
 
-    // Rule 4: the scenario's declared delivery mechanism. Any other value is
+    // Rule 3: the scenario's declared delivery mechanism. Any other value is
     // generator metadata, not a delivery mechanism, and is ignored.
     for declared in [delivery_genesis, delivery_announcement]
         .into_iter()
@@ -957,16 +1201,23 @@ impl Vector {
     pub(crate) fn is_drivable(&self, kind: AssertionKind) -> bool {
         match kind {
             AssertionKind::Derivation | AssertionKind::GenesisKey => true,
-            // The resolve driver needs a genesis source and no beacon signals.
-            // For an external vector that source is
+            // The resolve driver needs a genesis source and, past genesis, a
+            // captured chain fixture to feed the beacon signals from.
+            //
+            // For an external vector the genesis source is
             // `resolve/input.json.resolutionOptions.sidecar.genesisDocument`;
             // reading `other.json.genesisDocument` instead would hand the
             // resolver a document the vector intends to be fetched from CAS,
             // asserting resolve logic while bypassing the delivery mechanism
             // and leaving no row marking the gap.
+            //
+            // The captured fixture is NOT a drivability condition. Every
+            // anchored past-genesis vector on disk has one, and an absent
+            // capture for a row this says is drivable is a bug that
+            // `read_chain_fixture` raises by name — not a reason to quietly
+            // drop the row.
             AssertionKind::Resolve => {
-                self.expected_version_id == 1
-                    && (self.id_type != VectorIdType::External || self.has_sidecar_genesis_document)
+                self.id_type != VectorIdType::External || self.has_sidecar_genesis_document
             }
             AssertionKind::UpdateCrypto | AssertionKind::EndState => {
                 self.update_layout != UpdateLayout::None
@@ -1002,7 +1253,6 @@ impl Vector {
     ) -> BTreeSet<SkipReason> {
         let mut reasons = if kind == AssertionKind::Resolve {
             derived_resolve_skip_reasons(
-                self.expected_version_id,
                 self.has_pending,
                 self.delivery_genesis.as_deref(),
                 self.delivery_announcement.as_deref(),
@@ -1286,6 +1536,158 @@ pub(crate) fn render_summary_with(vectors: &[Vector], overrides: &[SkipOverride]
         ));
     }
     out
+}
+
+/// A scenario this project minted onto a chain of its own, driven from an
+/// in-repo fixture rather than from the vendor conformance suite.
+pub(crate) struct MintedScenario {
+    /// Fixture id under `fixtures/chain/`.
+    pub(crate) fixture: &'static str,
+    /// The test that drives it.
+    pub(crate) test: &'static str,
+    /// What it covers that no upstream vector can.
+    pub(crate) covers: &'static [&'static str],
+}
+
+/// The minted scenarios, written down for the same reason
+/// [`ALL_CHAIN_FIXTURES`] is: a scenario that stopped being driven would
+/// otherwise just stop appearing.
+pub(crate) const MINTED_SCENARIOS: &[MintedScenario] = &[
+    MintedScenario {
+        fixture: "minted/clean-rotating-beacons",
+        test: "minted_chain_sequences_updates_across_rotating_beacons",
+        covers: &[
+            "multi-update sequencing across rotating beacons",
+            "on-chain deactivation short-circuit",
+            "mid-walk version bounds on a four-version chain",
+        ],
+    },
+    MintedScenario {
+        fixture: "minted/late-publishing-fork",
+        test: "minted_fork_raises_late_publishing",
+        covers: &["late publishing detected against a real on-chain fork"],
+    },
+];
+
+/// The minted scenarios' coverage, as a section of its own.
+///
+/// Deliberately NOT folded into [`render_summary_with`]: the vector ledger
+/// answers exactly one question — what of the UPSTREAM conformance suite does
+/// this crate exercise — so fixtures we authored must not inflate that number.
+/// They are still the most interesting coverage in the suite (the only real
+/// multi-update chain, the only on-chain deactivation, the only real
+/// late-publishing fork), so they get a section rather than a footnote.
+///
+/// The recording network is READ from each fixture, so this section says which
+/// chain the data currently comes from without anything here naming one.
+pub(crate) fn render_minted_summary() -> String {
+    let mut out = format!(
+        "minted-scenario coverage: {} scenario(s) driven from in-repo fixtures \
+         (NOT counted in the upstream ledger above)\n",
+        MINTED_SCENARIOS.len()
+    );
+    for scenario in MINTED_SCENARIOS {
+        let fixture = read_chain_fixture(scenario.fixture);
+        out.push_str(&format!(
+            "  {} (minted on {})\n    driven by {}\n",
+            scenario.fixture, fixture.network, scenario.test
+        ));
+        for covers in scenario.covers {
+            out.push_str(&format!("    covers: {covers}\n"));
+        }
+    }
+    out.push_str(
+        "  this coverage is fixture-driven: no live-network test ships in this crate. A real \
+         chain is contacted by the capture tool's own validation, and the CLI runbook covers \
+         live end-to-end resolve interactively.\n",
+    );
+    out
+}
+
+/// Every listed scenario's fixture is on disk and says what it is for. An entry
+/// whose `covers` was left empty would render a scenario that claims nothing.
+#[test]
+fn minted_scenarios_name_a_present_fixture_and_its_coverage() {
+    assert!(
+        !MINTED_SCENARIOS.is_empty(),
+        "the minted section must describe at least one scenario"
+    );
+    for scenario in MINTED_SCENARIOS {
+        let path = chain_fixture_path(scenario.fixture);
+        assert!(
+            path.is_file(),
+            "{}: the minted scenario's fixture must be present at {}",
+            scenario.fixture,
+            path.display()
+        );
+        assert!(
+            !scenario.covers.is_empty(),
+            "{}: a minted scenario must say what it covers that no upstream vector can",
+            scenario.fixture
+        );
+        assert!(
+            ALL_CHAIN_FIXTURES.contains(&scenario.fixture),
+            "{}: a minted scenario's fixture must also be listed in ALL_CHAIN_FIXTURES, or a \
+             deletion would only fail in one of the two places",
+            scenario.fixture
+        );
+    }
+}
+
+/// The rendered section names every scenario, the test that drives it, and each
+/// coverage claim — a section that summarized them away would leave the reader
+/// no better off than the count it replaced.
+#[test]
+fn minted_summary_names_every_scenario_its_test_and_its_coverage() {
+    let summary = render_minted_summary();
+    for scenario in MINTED_SCENARIOS {
+        assert!(
+            summary.contains(scenario.fixture),
+            "{} must appear in the minted section:\n{summary}",
+            scenario.fixture
+        );
+        assert!(
+            summary.contains(scenario.test),
+            "{} must appear in the minted section:\n{summary}",
+            scenario.test
+        );
+        for covers in scenario.covers {
+            assert!(
+                summary.contains(covers),
+                "`{covers}` must appear in the minted section:\n{summary}"
+            );
+        }
+        // The chain the fixture records, read from the fixture.
+        let fixture = read_chain_fixture(scenario.fixture);
+        assert!(
+            summary.contains(&fixture.network),
+            "{}: the minted section must name the chain the fixture was minted on:\n{summary}",
+            scenario.fixture
+        );
+    }
+    assert!(
+        summary.contains("no live-network test ships"),
+        "the minted section must say where a real chain IS contacted:\n{summary}"
+    );
+}
+
+/// The upstream ledger and the minted section cannot blur. A fixture this
+/// project authored must never appear in the count that answers "how much of the
+/// VENDOR suite do we exercise".
+#[test]
+fn ledger_summary_never_mentions_a_minted_scenario() {
+    let summary = render_summary_with(&synthetic_ledger(), &[]);
+    assert!(
+        !summary.contains("minted"),
+        "the upstream ledger summary must not mention minted coverage:\n{summary}"
+    );
+    for scenario in MINTED_SCENARIOS {
+        assert!(
+            !summary.contains(scenario.fixture),
+            "{} must not appear in the upstream ledger summary:\n{summary}",
+            scenario.fixture
+        );
+    }
 }
 
 /// `read_fixture_or_skip` must NOT no-op silently when the submodule
@@ -1747,29 +2149,28 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
     }
 }
 
-/// Each of the four derived rules fires on its own input, and they accumulate
+/// Each of the three derived rules fires on its own input, and they accumulate
 /// rather than electing a first-match winner.
 #[test]
-fn derived_reasons_cover_the_four_rules() {
-    // Nothing applies: a genesis-era, anchored, singleton-delivered vector.
+fn derived_reasons_cover_the_three_rules() {
+    // Nothing applies: an anchored, singleton-delivered vector.
     assert_eq!(
-        derived_resolve_skip_reasons(1, false, None, None, &[]),
+        derived_resolve_skip_reasons(false, None, None, &[]),
         BTreeSet::new()
     );
-    // Rule 2 alone.
+    // Rule 1 alone.
     assert_eq!(
-        derived_resolve_skip_reasons(2, false, None, None, &[]),
-        BTreeSet::from([SkipReason::NeedsOnChainSignals])
+        derived_resolve_skip_reasons(true, None, None, &[]),
+        BTreeSet::from([SkipReason::Unanchored])
     );
-    // Rule 4 alone — the `qh66uy2s` shape: genesis-era, but CAS-delivered.
+    // Rule 3 alone — the `qh66uy2s` shape: genesis-era, but CAS-delivered.
     assert_eq!(
-        derived_resolve_skip_reasons(1, false, Some("cas"), None, &[]),
+        derived_resolve_skip_reasons(false, Some("cas"), None, &[]),
         BTreeSet::from([SkipReason::CasDelivery])
     );
-    // Rules 1, 2, 3 and 4 together, with the duplicate CAS signal collapsing.
+    // Rules 1, 2 and 3 together, with the duplicate CAS signal collapsing.
     assert_eq!(
         derived_resolve_skip_reasons(
-            2,
             true,
             Some("cas"),
             Some("cas"),
@@ -1777,24 +2178,26 @@ fn derived_reasons_cover_the_four_rules() {
         ),
         BTreeSet::from([
             SkipReason::Unanchored,
-            SkipReason::NeedsOnChainSignals,
             SkipReason::CasDelivery,
+            SkipReason::UnsupportedBeaconType,
         ])
     );
-    // Rule 3 on the beacon type, with `SingletonBeacon` contributing nothing.
+    // Rule 2 on the beacon type, with `SingletonBeacon` contributing nothing.
+    // An SMT beacon in the genesis document blocks resolve twice over: the
+    // delivery mechanism is unimplemented, AND the resolver will not issue a
+    // request for that beacon type at all.
     assert_eq!(
         derived_resolve_skip_reasons(
-            2,
             false,
             None,
             None,
             &["SingletonBeacon".into(), "SMTBeacon".into()]
         ),
-        BTreeSet::from([SkipReason::NeedsOnChainSignals, SkipReason::SmtDelivery])
+        BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType,])
     );
-    // Rule 4 reads `"smt"` as well as `"cas"`.
+    // Rule 3 reads `"smt"` as well as `"cas"`.
     assert_eq!(
-        derived_resolve_skip_reasons(1, false, Some("smt"), None, &[]),
+        derived_resolve_skip_reasons(false, Some("smt"), None, &[]),
         BTreeSet::from([SkipReason::SmtDelivery])
     );
 }
@@ -1812,11 +2215,7 @@ fn delivery_reasons_scope_to_resolve_only() {
 
     assert_eq!(
         v.skip_reasons_with(AssertionKind::Resolve, &[]),
-        BTreeSet::from([
-            SkipReason::Unanchored,
-            SkipReason::NeedsOnChainSignals,
-            SkipReason::CasDelivery,
-        ])
+        BTreeSet::from([SkipReason::Unanchored, SkipReason::CasDelivery])
     );
     for kind in [
         AssertionKind::Derivation,
@@ -1881,9 +2280,12 @@ fn resolve_drivability_requires_a_genesis_source_for_external_vectors() {
         "a key-based vector derives its genesis document from the identifier"
     );
 
-    // Past genesis, no offline signal source, regardless of id type.
+    // Past genesis is no longer a drivability condition on either id type: the
+    // beacon signals come from a captured chain snapshot.
     key_based.expected_version_id = 2;
-    assert!(!key_based.is_drivable(AssertionKind::Resolve));
+    assert!(key_based.is_drivable(AssertionKind::Resolve));
+    external.expected_version_id = 2;
+    assert!(external.is_drivable(AssertionKind::Resolve));
 }
 
 /// The escape hatch has to actually suppress driving. Drivability stays
@@ -2213,11 +2615,7 @@ fn summary_names_every_assertion_kind() {
         );
     }
     assert!(summary.contains("skipped rows by reason"), "{summary}");
-    for reason in [
-        SkipReason::Unanchored,
-        SkipReason::CasDelivery,
-        SkipReason::NeedsOnChainSignals,
-    ] {
+    for reason in [SkipReason::Unanchored, SkipReason::CasDelivery] {
         assert!(
             summary.contains(&reason.to_string()),
             "{reason} applies to the synthetic ledger and must be broken out:\n{summary}"
@@ -2312,5 +2710,508 @@ fn override_on_a_row_no_rule_covers_is_not_redundant() {
     assert!(
         unclassified_rows_with(ledger, OVERRIDES).is_empty(),
         "a row with a stated reason is classified, not unclassified"
+    );
+}
+
+// --- Captured chain fixtures -------------------------------------------------
+
+/// A confirmed esplora transaction whose LAST output is `OP_RETURN <32-byte
+/// push>`, in the JSON shape a captured fixture stores it in.
+///
+/// The synthetic-envelope tests build their bodies here rather than reading a
+/// fixture off disk: every consistency failure they assert is one no committed
+/// fixture may ever have, so provoking it must not mean editing one.
+fn chain_signal_tx_json(
+    update_hash: &str,
+    txid: &str,
+    block_height: u32,
+    block_time: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "txid": txid,
+        "version": 2,
+        "locktime": 0,
+        "vin": [],
+        "vout": [{ "scriptpubkey": format!("6a20{update_hash}"), "value": 0 }],
+        "size": 0,
+        "weight": 0,
+        "fee": 0,
+        "status": {
+            "confirmed": true,
+            "block_height": block_height,
+            "block_hash": "00".repeat(32),
+            "block_time": block_time,
+        },
+    })
+}
+
+/// A `ChainFixture` in the captured envelope's shape, deserialized the same way
+/// a real one is — so a test perturbing `signals` exercises the very code path
+/// `read_chain_fixture` runs on load.
+fn chain_fixture_envelope(
+    signals: serde_json::Value,
+    addresses: serde_json::Value,
+) -> ChainFixture {
+    serde_json::from_value(serde_json::json!({
+        "captured_at": "2026-07-31T00:00:00Z",
+        "endpoint": "http://localhost:3000",
+        "network": "regtest",
+        "vector": "regtest/k1/synthetic",
+        "tip_height": 758,
+        "signals": signals,
+        "addresses": addresses,
+    }))
+    .expect("the synthetic envelope matches the captured fixture shape")
+}
+
+/// A vector id resolves under the crate's own `fixtures/chain/` tree, not the
+/// `test-suite/` submodule.
+#[test]
+fn chain_fixture_path_lands_under_the_in_crate_tree() {
+    let path = chain_fixture_path("regtest/k1/qgppexmy");
+    assert!(
+        path.ends_with("fixtures/chain/regtest/k1/qgppexmy.json"),
+        "unexpected fixture path: {}",
+        path.display()
+    );
+    assert!(
+        path.starts_with(env!("CARGO_MANIFEST_DIR")),
+        "the path must be absolute against the crate root: {}",
+        path.display()
+    );
+    assert!(
+        !path.starts_with(test_suite_root()),
+        "the chain fixtures are ours, not the submodule's: {}",
+        path.display()
+    );
+}
+
+/// A committed vendor capture reads back with its tip, its endpoint and at
+/// least one signal.
+#[test]
+fn chain_fixture_reads_a_captured_vendor_snapshot() {
+    let fixture = read_chain_fixture("regtest/k1/qgppexmy");
+
+    assert_eq!(fixture.network, "regtest");
+    assert_eq!(fixture.endpoint, "http://localhost:3000");
+    assert_ne!(fixture.tip_height, 0, "a capture always pins a real tip");
+    assert!(
+        !fixture.signals.is_empty(),
+        "this vector announced at least one update on chain"
+    );
+    assert!(
+        fixture
+            .did
+            .as_deref()
+            .is_some_and(|did| did.starts_with("did:btcr2:k1")),
+        "the capture records the DID it resolved: {:?}",
+        fixture.did
+    );
+}
+
+/// An address captured with no transactions is a captured state, not an error:
+/// it must deserialize as an empty vector under a present key.
+#[test]
+fn chain_fixture_addresses_keep_captured_and_empty_keys() {
+    let fixture = read_chain_fixture("regtest/k1/qgppexmy");
+
+    assert!(
+        fixture.addresses.len() > 1,
+        "this vector queried several beacon addresses"
+    );
+    assert!(
+        fixture.addresses.values().any(|txs| txs.is_empty()),
+        "at least one captured address returned no transactions"
+    );
+    assert!(
+        fixture.addresses.values().any(|txs| !txs.is_empty()),
+        "and at least one returned some"
+    );
+}
+
+/// The minted-only fields are absent on a vendor capture and present on a
+/// minted one.
+#[test]
+fn chain_fixture_minted_only_fields_are_absent_on_a_vendor_capture() {
+    let vendor = read_chain_fixture("regtest/k1/qgppexmy");
+    assert!(
+        vendor.sidecar.is_none(),
+        "a vendor capture ships no sidecar"
+    );
+    assert!(
+        vendor.expected.is_none(),
+        "a vendor capture states no expected resolution of its own"
+    );
+
+    let minted = read_chain_fixture("minted/clean-rotating-beacons");
+    assert!(
+        minted.sidecar.is_some(),
+        "a minted scenario ships the sidecar its updates need"
+    );
+    assert!(
+        minted.expected.is_some(),
+        "and the resolution it was minted to produce"
+    );
+}
+
+/// `latest_signal` is the highest-block signal (the one `confirmations` derives
+/// from) and `earliest_block_time` the minimum across all signals — both scan
+/// every entry rather than trusting the capture's order.
+#[test]
+fn chain_fixture_latest_signal_and_earliest_block_time_scan_every_signal() {
+    let fixture = read_chain_fixture("minted/clean-rotating-beacons");
+    assert!(
+        fixture.signals.len() >= 3,
+        "the clean scenario announces three updates"
+    );
+
+    let highest = fixture
+        .signals
+        .iter()
+        .map(|s| s.block_height)
+        .max()
+        .expect("signals is non-empty");
+    let earliest = fixture
+        .signals
+        .iter()
+        .map(|s| s.block_time)
+        .min()
+        .expect("signals is non-empty");
+
+    assert_eq!(
+        fixture.latest_signal().map(|s| s.block_height),
+        Some(highest)
+    );
+    assert_eq!(fixture.earliest_block_time(), Some(earliest));
+
+    // And on an empty signal set both are `None` rather than a panic.
+    let empty = chain_fixture_envelope(serde_json::json!([]), serde_json::json!({}));
+    assert!(empty.latest_signal().is_none());
+    assert!(empty.earliest_block_time().is_none());
+}
+
+/// An absent fixture stops the suite and the message says how to make it exist.
+#[test]
+#[should_panic(expected = "no captured chain fixture")]
+fn chain_fixture_read_panics_on_an_unknown_vector_id() {
+    let _ = read_chain_fixture("regtest/k1/nosuchvector");
+}
+
+/// A `signals` entry naming an address the capture never recorded cannot be
+/// re-derived, so it fails on read.
+#[test]
+#[should_panic(expected = "the capture holds no response for")]
+fn chain_fixture_signals_consistent_rejects_an_unknown_address() {
+    let hash = "7a".repeat(32);
+    let fixture = chain_fixture_envelope(
+        serde_json::json!([{
+            "address": "bcrt1qnever",
+            "txid": "a1".repeat(32),
+            "block_height": 660,
+            "block_time": 1_774_015_945i64,
+            "update_hash": hash,
+        }]),
+        serde_json::json!({ "bcrt1qcaptured": [] }),
+    );
+    assert_signals_consistent(&fixture, "regtest/k1/synthetic");
+}
+
+/// A `signals` entry naming a txid that is not under its own address is a
+/// desynchronized fixture, not a resolvable one.
+#[test]
+#[should_panic(expected = "is not among the")]
+fn chain_fixture_signals_consistent_rejects_an_absent_txid() {
+    let hash = "7a".repeat(32);
+    let fixture = chain_fixture_envelope(
+        serde_json::json!([{
+            "address": "bcrt1qcaptured",
+            "txid": "b2".repeat(32),
+            "block_height": 660,
+            "block_time": 1_774_015_945i64,
+            "update_hash": hash.clone(),
+        }]),
+        serde_json::json!({
+            "bcrt1qcaptured": [
+                chain_signal_tx_json(&hash, &"a1".repeat(32), 660, 1_774_015_945),
+            ],
+        }),
+    );
+    assert_signals_consistent(&fixture, "regtest/k1/synthetic");
+}
+
+/// A `signals` height that disagrees with the transaction's own confirmation
+/// height would make a confirmations assertion compare against a stale copy.
+#[test]
+#[should_panic(expected = "block_height")]
+fn chain_fixture_signals_consistent_rejects_a_block_height_mismatch() {
+    let hash = "7a".repeat(32);
+    let txid = "a1".repeat(32);
+    let fixture = chain_fixture_envelope(
+        serde_json::json!([{
+            "address": "bcrt1qcaptured",
+            "txid": txid,
+            "block_height": 661,
+            "block_time": 1_774_015_945i64,
+            "update_hash": hash.clone(),
+        }]),
+        serde_json::json!({
+            "bcrt1qcaptured": [chain_signal_tx_json(&hash, &txid, 660, 1_774_015_945)],
+        }),
+    );
+    assert_signals_consistent(&fixture, "regtest/k1/synthetic");
+}
+
+/// The recorded `update_hash` must be exactly the LAST output's `6a20` push —
+/// the same rule the resolver reads a signal by.
+#[test]
+#[should_panic(expected = "update_hash")]
+fn chain_fixture_signals_consistent_rejects_a_wrong_update_hash() {
+    let hash = "7a".repeat(32);
+    let txid = "a1".repeat(32);
+    let fixture = chain_fixture_envelope(
+        serde_json::json!([{
+            "address": "bcrt1qcaptured",
+            "txid": txid,
+            "block_height": 660,
+            "block_time": 1_774_015_945i64,
+            "update_hash": "cc".repeat(32),
+        }]),
+        serde_json::json!({
+            "bcrt1qcaptured": [chain_signal_tx_json(&hash, &txid, 660, 1_774_015_945)],
+        }),
+    );
+    assert_signals_consistent(&fixture, "regtest/k1/synthetic");
+}
+
+/// The consistency check passes on a well-formed synthetic envelope, so the
+/// three rejection tests above are pinning the perturbation and not a check
+/// that rejects everything.
+#[test]
+fn chain_fixture_signals_consistent_accepts_a_matching_envelope() {
+    let hash = "7a".repeat(32);
+    let txid = "a1".repeat(32);
+    let fixture = chain_fixture_envelope(
+        serde_json::json!([{
+            "address": "bcrt1qcaptured",
+            "txid": txid,
+            "block_height": 660,
+            "block_time": 1_774_015_945i64,
+            "update_hash": hash.clone(),
+        }]),
+        serde_json::json!({
+            "bcrt1qcaptured": [chain_signal_tx_json(&hash, &txid, 660, 1_774_015_945)],
+            "bcrt1qempty": [],
+        }),
+    );
+    assert_signals_consistent(&fixture, "regtest/k1/synthetic");
+    assert_eq!(fixture.latest_signal().map(|s| s.block_height), Some(660));
+}
+
+/// Every committed chain fixture re-derives its own `signals` from its own
+/// `addresses`. A hand edit or a partial re-capture fails here rather than in
+/// whichever assertion happened to read the stale field.
+#[test]
+fn chain_fixture_every_committed_capture_is_self_consistent() {
+    for id in ALL_CHAIN_FIXTURES {
+        // `read_chain_fixture` runs `assert_signals_consistent` itself; a
+        // fixture that no longer re-derives fails here, named.
+        let fixture = read_chain_fixture(id);
+        assert_ne!(fixture.tip_height, 0, "{id}: every capture pins a real tip");
+    }
+}
+
+/// A CAS or SMT beacon in the genesis document is TWO distinct blockers: how
+/// the document or announcement is delivered, and whether the resolver will
+/// issue a request for that beacon type at all. Both are recorded, because each
+/// is fixed in different code.
+#[test]
+fn unsupported_beacon_type_is_recorded_alongside_the_delivery_reason() {
+    assert_eq!(
+        derived_resolve_skip_reasons(
+            false,
+            None,
+            None,
+            &["SingletonBeacon".into(), "SMTBeacon".into()]
+        ),
+        BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType])
+    );
+    assert_eq!(
+        derived_resolve_skip_reasons(false, None, None, &["CASBeacon".into()]),
+        BTreeSet::from([SkipReason::CasDelivery, SkipReason::UnsupportedBeaconType])
+    );
+}
+
+/// A drivable beacon and a service that is not a beacon at all say nothing
+/// about whether the resolver can query a beacon, so neither contributes a
+/// reason.
+#[test]
+fn unsupported_beacon_type_ignores_singleton_and_non_beacon_services() {
+    assert_eq!(
+        derived_resolve_skip_reasons(
+            false,
+            None,
+            None,
+            &[
+                "SingletonBeacon".into(),
+                "DIDCommMessaging".into(),
+                "DecentralizedWebNode".into(),
+            ]
+        ),
+        BTreeSet::new()
+    );
+}
+
+/// The DELIVERY rule is about a mechanism, not about a beacon the document
+/// declares: a CAS-delivered genesis document with no CAS beacon service leaves
+/// the resolver perfectly able to query the beacons it does declare.
+#[test]
+fn unsupported_beacon_type_does_not_follow_from_a_delivery_declaration() {
+    assert_eq!(
+        derived_resolve_skip_reasons(false, Some("cas"), Some("smt"), &[]),
+        BTreeSet::from([SkipReason::CasDelivery, SkipReason::SmtDelivery])
+    );
+}
+
+/// The reason fires on exactly the discovered vectors whose genesis document
+/// declares a CAS or SMT beacon, and on no others. Pinned as an exact id set so
+/// an upstream vector gaining or losing such a beacon fails by name rather than
+/// quietly moving the aggregation milestone's target set.
+#[test]
+fn live_vectors_name_the_beacon_types_the_resolver_cannot_query() {
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover();
+    assert!(!vectors.is_empty());
+
+    let observed: BTreeSet<String> = vectors
+        .iter()
+        .filter(|v| {
+            v.skip_reasons_with(AssertionKind::Resolve, &[])
+                .contains(&SkipReason::UnsupportedBeaconType)
+        })
+        .map(|v| v.id.clone())
+        .collect();
+
+    let expected: BTreeSet<String> = [
+        "mutinynet/x1/q425c5wf",
+        "mutinynet/x1/q4lqu6gr",
+        "mutinynet/x1/q4rnhfhv",
+        "mutinynet/x1/q4x4pxl2",
+        "mutinynet/x1/q550pp4e",
+        "mutinynet/x1/q59jnwfs",
+        "mutinynet/x1/q5cfewep",
+        "mutinynet/x1/qkrrp544",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(
+        observed, expected,
+        "the vectors whose genesis document declares a CAS or SMT beacon"
+    );
+
+    // And the reason scopes to Resolve, like every other derived reason.
+    for v in &vectors {
+        for kind in [
+            AssertionKind::Derivation,
+            AssertionKind::GenesisKey,
+            AssertionKind::UpdateCrypto,
+            AssertionKind::EndState,
+        ] {
+            assert!(
+                !v.skip_reasons_with(kind, &[])
+                    .contains(&SkipReason::UnsupportedBeaconType),
+                "{}: {kind} must not inherit a resolve-scoped reason",
+                v.id
+            );
+        }
+    }
+}
+
+/// The rows the resolve driver is expected to drive, pinned BY ID.
+///
+/// [`DRIVEN_FLOOR`] alone would say only that the number moved. This says WHICH
+/// row moved: the four genesis-era rows that were driven before this phase, plus
+/// the seven past-genesis rows fed from `fixtures/chain/`. A vector losing its
+/// sidecar genesis document, gaining a `pending.json`, or an upstream vector
+/// arriving with a shape the rules classify differently fails here naming the
+/// difference, instead of being absorbed by a `>=` ratchet.
+#[test]
+fn resolve_driven_set_is_the_expected_eleven_ids() {
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover();
+    assert!(!vectors.is_empty());
+
+    let observed = expected_driven_with(AssertionKind::Resolve, &vectors, &[]);
+
+    let expected: BTreeSet<String> = [
+        // Genesis-era, driven since the offline harness landed.
+        "mutinynet/k1/q5puld7y",
+        "mutinynet/x1/q5g3smvu",
+        "regtest/k1/qgpakaw4",
+        "regtest/x1/q2fz9mz6",
+        // Past genesis, driven from a captured chain snapshot.
+        "mutinynet/k1/q5p6w9su",
+        "mutinynet/k1/q5pgeu9z",
+        "mutinynet/x1/q5ugrf3w",
+        "regtest/k1/qgppexmy",
+        "regtest/k1/qgpy0hmm",
+        "regtest/x1/q26jeds9",
+        "regtest/x1/qfl7se8f",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let missing: Vec<&String> = expected.difference(&observed).collect();
+    let extra: Vec<&String> = observed.difference(&expected).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "the resolve driven set moved.\n  \
+         expected but not driven ({}): {missing:?}\n  \
+         driven but not expected ({}): {extra:?}\n  \
+         Update this list together with DRIVEN_FLOOR, or restore the row.",
+        missing.len(),
+        extra.len(),
+    );
+    assert_eq!(observed.len(), 11, "the floor and this list must agree");
+}
+
+/// `Override` stays LAST in the derived ordering: `PartialOrd`/`Ord` are derived
+/// and the summary keys a `BTreeMap` on this enum, so variant order is report
+/// order and a hand-written skip belongs at the bottom of the table.
+#[test]
+fn override_still_sorts_after_every_derived_reason() {
+    let ordered: Vec<SkipReason> = BTreeSet::from([
+        SkipReason::Override("a one-off"),
+        SkipReason::UnsupportedBeaconType,
+        SkipReason::SmtDelivery,
+        SkipReason::CasDelivery,
+        SkipReason::Unanchored,
+    ])
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        ordered,
+        vec![
+            SkipReason::Unanchored,
+            SkipReason::CasDelivery,
+            SkipReason::SmtDelivery,
+            SkipReason::UnsupportedBeaconType,
+            SkipReason::Override("a one-off"),
+        ]
     );
 }

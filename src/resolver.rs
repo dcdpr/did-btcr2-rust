@@ -624,12 +624,12 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_vectors::{
-        AssertionKind, DRIVEN_FLOOR, NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES, SkipOverride,
-        Vector, VectorIdType, discover, expected_driven_with, field_bool, field_hex,
+        AssertionKind, ChainFixture, DRIVEN_FLOOR, NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES,
+        SkipOverride, Vector, VectorIdType, discover, expected_driven_with, field_bool, field_hex,
         field_nonzero_version_id, field_str, field_u64, field_version_id,
-        network_dirs_with_vectors, read_fixture_or_skip, read_vector_fixture,
-        reconcile_driven_with, redundant_overrides, render_summary_with, stale_overrides,
-        test_suite_checked_out, unclassified_rows_with,
+        network_dirs_with_vectors, read_chain_fixture, read_fixture_or_skip, read_vector_fixture,
+        reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
+        stale_overrides, test_suite_checked_out, unclassified_rows_with,
     };
     use std::collections::BTreeSet;
 
@@ -851,8 +851,16 @@ mod tests {
     /// RESOLVE driver: for EVERY vector discovered under `test-suite/` at
     /// runtime, validate the `resolve/output.json` metadata whitelist, and for
     /// the rows the ledger expects driven, drive the FSM to its terminal state
-    /// with empty beacon responses and assert the resolved `didDocument` equals
+    /// and assert the resolved `didDocument` equals
     /// `resolve/output.json.didDocument`.
+    ///
+    /// A genesis-era row is driven with empty beacon responses. A PAST-GENESIS
+    /// row is driven from this repository's captured chain snapshot for that
+    /// vector (`fixtures/chain/`), served round by round through
+    /// [`drive_to_resolved_from_capture`]. Both are the same assertion kind and
+    /// the same claim — "this vector resolves to its expected output"; where the
+    /// beacon transactions came from is a driver detail, not a second kind of
+    /// coverage.
     ///
     /// TWO SCOPES, deliberately different. WELL-FORMEDNESS checks run for every
     /// discovered vector, driven or not — a schema drift anywhere in the suite
@@ -870,35 +878,44 @@ mod tests {
     /// `observed` is filled after the drive, and `reconcile_driven` compares it
     /// with the ledger's expectation for `AssertionKind::Resolve`. The rows that
     /// are NOT driven are enumerated by the vector ledger as
-    /// skipped-with-reason (`NeedsOnChainSignals`, `Unanchored`, `CasDelivery`,
-    /// `SmtDelivery`); its summary table is the place to read the coverage
-    /// story, not a narrative in this comment.
+    /// skipped-with-reason (`Unanchored`, `CasDelivery`, `SmtDelivery`,
+    /// `UnsupportedBeaconType`); its summary table is the place to read the
+    /// coverage story, not a narrative in this comment.
     ///
     /// Observation-dependent metadata is whitelisted: `deactivated` is asserted
-    /// BY VALUE against the vector's stated flag on a driven row; `confirmations`,
-    /// `updated` and `created` are environment-derived and drift, so they are
-    /// asserted only by presence/type when present, NEVER by literal value.
-    /// mutinynet vectors omit `confirmations` entirely and carry `created: null`;
-    /// indexing a missing key yields `Value::Null`, which the `is_null` guards
-    /// already tolerate. `versionId` carries three separate checks: it is READ
-    /// through `version_id_u64`, which accepts the regtest string encoding and
-    /// the mutinynet number encoding and panics on anything else; its ENCODING is
+    /// BY VALUE against the vector's stated flag on a driven row; `updated` and
+    /// `created` are environment-derived and drift, so they are asserted only by
+    /// presence/type when present, NEVER by literal value. `confirmations` stays
+    /// type-only in the whitelist that runs for EVERY discovered vector, and is
+    /// additionally asserted on a driven ON-CHAIN row — by VALUE against the
+    /// vector's stated number on the frozen regtest chain, and by PROVENANCE
+    /// (derived from the most-recently-applied update's captured block height)
+    /// on the still-mining mutinynet chain, which states none. It is a fixed
+    /// input there rather than a drifting observation because the captured tip
+    /// is pinned into the resolution options. mutinynet vectors omit
+    /// `confirmations` entirely and carry `created: null`; indexing a missing key
+    /// yields `Value::Null`, which the `is_null` guards already tolerate.
+    /// `versionId` carries three separate checks: it is READ through
+    /// `version_id_u64`, which accepts the regtest string encoding and the
+    /// mutinynet number encoding and panics on anything else; its ENCODING is
     /// pinned to `NUMBER_ENCODED_VERSION_ID`, the explicit set of known-bad
     /// fixtures, in both directions; and on a driven row the resolved value is
-    /// COMPARED against the vector's stated one. That last comparison is not yet
-    /// a cross-check with independent operands — `is_drivable(Resolve)` requires
-    /// `expected_version_id == 1`, so on every driven row the stated value is 1
-    /// and the assertion pins the resolver's genesis-era `versionId` to 1. It
-    /// becomes a genuine cross-check once past-genesis rows are drivable. The
+    /// COMPARED against the vector's stated one. That comparison IS a
+    /// cross-check with independent operands on the seven rows fed from captured
+    /// chain fixtures: their stated version is 2, and the resolver only reaches
+    /// it by applying an update announced by a captured beacon transaction. The
     /// crate's own emit-a-string / reject-a-number contract is pinned by the
     /// fixture-independent `DocumentMetadata` round-trip test in `document.rs`.
     ///
-    /// EXTERNAL (x1) genesis comes from
-    /// `resolve/input.json.resolutionOptions.sidecar.genesisDocument` and stays
-    /// there on purpose. `other.json.genesisDocument` exists for every external
-    /// vector and is byte-identical where both are present, but reading it would
-    /// hand the resolver a genesis document the vector intends to be fetched
-    /// from content-addressed storage — asserting resolve logic while silently
+    /// RESOLUTION OPTIONS ARE ASSEMBLED IN ONE PLACE, from the vector's
+    /// `resolutionOptions.sidecar` object verbatim, matching the capture tool's
+    /// `resolution_options_for`. EXTERNAL (x1) genesis therefore comes from
+    /// `resolve/input.json.resolutionOptions.sidecar.genesisDocument`, which
+    /// `resolve_external` bridges into the initial document itself.
+    /// `other.json.genesisDocument` exists for every external vector and is
+    /// byte-identical where both are present, but reading it would hand the
+    /// resolver a genesis document the vector intends to be fetched from
+    /// content-addressed storage — asserting resolve logic while silently
     /// bypassing the delivery mechanism and leaving no row to mark the gap.
     /// Every row that remains driven has a sidecar genesis document; a missing
     /// one on a driven row is a loud failure, not a fallback. KEY (k1)
@@ -912,10 +929,49 @@ mod tests {
         drive_resolve(&vectors, SKIP_OVERRIDES);
     }
 
+    /// A resolved document as comparable JSON.
+    ///
+    /// One function so the terminal document, the genesis reference and the
+    /// versionTime probe are all compared on the same footing — two of those
+    /// comparisons are between documents this suite produced, and a difference
+    /// in how they were rendered would read as a difference in what was
+    /// resolved.
+    fn resolved_document_json(document: &Document, id: &str) -> serde_json::Value {
+        serde_json::from_str(
+            &serde_json::to_string(document.as_ref())
+                .unwrap_or_else(|e| panic!("{id}: the resolved document must serialize: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("{id}: the resolved document must round-trip: {e}"))
+    }
+
     /// The RESOLVE driver body, over an explicit override table so the same code
     /// path can be exercised with a hand-written skip in place.
+    ///
+    /// WHAT THE PROBES ON AN ON-CHAIN ROW BUY. The terminal assertion says the
+    /// resolver ended up at the vector's expected document; on its own it cannot
+    /// distinguish a resolver that WALKED v1 -> v2 from one that landed on the
+    /// answer without reading the chain. Two probes close that:
+    ///
+    /// 1. The genesis reference — the same DID, the same options, resolved with
+    ///    no signals fed — must DIFFER from the terminal document. A replay in
+    ///    which nothing was applied fails here.
+    /// 2. A `versionTime` one second before the earliest captured signal's block
+    ///    time must return version 1 and that same genesis document, having
+    ///    issued at least one request against the same capture. This is the
+    ///    versionTime path's first coverage against REAL block times — the
+    ///    `resolve_08` / `resolve_10` unit tests use timestamps we chose — and
+    ///    it is the only stop-where-asked bound observable on these rows.
+    ///
+    /// THERE IS DELIBERATELY NO `versionId = 1` PROBE, and one must not be
+    /// "restored". At `Init` the FSM returns `Resolved` when a `VersionId`
+    /// target equals `current_version_id`, which starts at 1 — so `VersionId(1)`
+    /// issues zero requests, never touches the capture, and cannot distinguish a
+    /// real walk from a short-circuit. It would restate the genesis reference
+    /// that probe 1 already builds independently. These rows have no other
+    /// non-trivial `version_id` bound either: their expected version is 2, which
+    /// is the terminal state. A mid-walk `version_id` bound is real coverage
+    /// only on a chain with more than two versions.
     fn drive_resolve(vectors: &[Vector], overrides: &[SkipOverride]) {
-        use crate::document::IntermediateDocument;
         use crate::identifier::Did;
 
         let mut observed = BTreeSet::new();
@@ -1009,36 +1065,82 @@ mod tests {
                 panic!("{id}: resolve/input.json.did must parse as a DID: {e}")
             });
 
-            let resolution_options = if vector.id_type == VectorIdType::External {
-                let genesis = &input["resolutionOptions"]["sidecar"]["genesisDocument"];
-                let intermediate =
-                    IntermediateDocument::from_json_value(genesis.clone(), vector.network)
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "{id}: resolve/input.json sidecar genesisDocument must parse as \
-                                 an intermediate document: {e}"
-                            )
-                        });
-                let initial_doc = intermediate.into_initial(&did).unwrap_or_else(|e| {
-                    panic!("{id}: the sidecar genesis document must bind to the vector's DID: {e}")
-                });
-                ResolutionOptions {
-                    sidecar_data: Some(SidecarData {
-                        initial_document: Some(initial_doc),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }
+            // Past genesis means the walk has to be fed real beacon signals, and
+            // they come from this repository's captured chain snapshot for the
+            // row. An absent capture panics by name rather than degrading into a
+            // no-signal resolve that would then fail the versionId assertion for
+            // an unrelated-looking reason.
+            let on_chain = vector.expected_version_id > 1;
+            let fixture = on_chain.then(|| read_chain_fixture(id));
+
+            // ONE assembly for every vector shape, matching
+            // `chain_capture::capture::resolution_options_for` line for line.
+            // `SidecarData::from_json_value` always builds `update_lookup_table`
+            // and sets `genesis_document` from the wire `genesisDocument` field;
+            // `resolve_external` bridges that into the initial document itself
+            // (`document.rs`'s `resolve_external_bridges_genesis_document_from_serde_path`
+            // proves it, and `SidecarData::initial_document` is documented there
+            // as the legacy in-memory shortcut). The capture tool assembles
+            // options exactly this way, and capture and replay MUST match —
+            // otherwise the refuse-to-write gate can bless a fixture this suite
+            // then fails on.
+            //
+            // Do NOT reintroduce an `IntermediateDocument` branch for `x1`
+            // vectors.
+            //
+            // Six vectors omit `resolutionOptions.sidecar` entirely (of the
+            // driven rows, `mutinynet/k1/q5puld7y`): a resolve with nothing
+            // supplied out of band. Indexing yields `Value::Null`, which is not
+            // a JSON object and does not deserialize, so an absent sidecar is
+            // normalized to `{}` — which yields the same empty `SidecarData` the
+            // old default arm produced. That is a normalization of the INPUT
+            // VALUE, not a second assembly: there is still exactly one
+            // `SidecarData::from_json_value` call. The capture tool refuses an
+            // absent sidecar instead, because a capture validated against zero
+            // updates would pass vacuously; a genesis-era replay has nothing to
+            // be vacuous about, since its whole expected document is asserted.
+            let sidecar_json = input["resolutionOptions"]["sidecar"].clone();
+            assert!(
+                !on_chain || sidecar_json.is_object(),
+                "{id}: a past-genesis vector must carry a \
+                 resolve/input.json resolutionOptions.sidecar object — its beacon \
+                 signals announce update hashes that are delivered out of band"
+            );
+            let sidecar_json = if sidecar_json.is_null() {
+                serde_json::json!({})
             } else {
+                sidecar_json
+            };
+            //
+            // Wrapped in a factory because `Document::resolve` CONSUMES its
+            // options and this row runs three resolutions — the terminal drive
+            // and the two probes below. They must differ ONLY in the target
+            // condition, or a probe would be testing a different resolution;
+            // and a second hand-built assembly here would be exactly the
+            // divergence the single assembly exists to prevent.
+            //
+            // Pinning the captured tip is also what makes `confirmations` a
+            // fixed input rather than a moving observation.
+            let make_options = |version_time: Option<DateTime<Utc>>| {
+                let sidecar =
+                    SidecarData::from_json_value(sidecar_json.clone()).unwrap_or_else(|e| {
+                        panic!("{id}: resolve/input.json resolutionOptions.sidecar must parse: {e}")
+                    });
                 ResolutionOptions {
-                    sidecar_data: Some(SidecarData::default()),
+                    sidecar_data: Some(sidecar),
+                    chain_tip_height: fixture.as_ref().map(|f| f.tip_height),
+                    version_time,
                     ..Default::default()
                 }
             };
 
-            let resolver = Document::resolve(&did, resolution_options)
+            let resolver = Document::resolve(&did, make_options(None))
                 .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}"));
-            let result = resolve_with_no_signals(resolver);
+            let result = match &fixture {
+                Some(f) => drive_to_resolved_from_capture(resolver, f, id)
+                    .unwrap_or_else(|e| panic!("{id}: the captured chain must resolve: {e}")),
+                None => resolve_with_no_signals(resolver),
+            };
 
             // The resolved document and the spec test vector agree on EVERY
             // content field — id, the top-level `@context`, verificationMethod
@@ -1049,11 +1151,7 @@ mod tests {
             // (`www.w3.org/ns/did/v1.1` / `btcr2.dev/context/v1`) and no
             // top-level `controller`, so the full content matches with no
             // field masking.
-            let got: serde_json::Value = serde_json::from_str(
-                &serde_json::to_string(result.document.as_ref())
-                    .unwrap_or_else(|e| panic!("{id}: the resolved document must serialize: {e}")),
-            )
-            .unwrap_or_else(|e| panic!("{id}: the resolved document must round-trip: {e}"));
+            let got = resolved_document_json(&result.document, id);
             let want: serde_json::Value = output["didDocument"].clone();
             assert_eq!(
                 got, want,
@@ -1073,6 +1171,98 @@ mod tests {
                 "{id}: resolved deactivated must equal \
                  resolve/output.json.didDocumentMetadata.deactivated"
             );
+
+            if let Some(f) = &fixture {
+                let signal = f.latest_signal().unwrap_or_else(|| {
+                    panic!("{id}: the captured fixture must carry at least one beacon signal")
+                });
+                let derived = f
+                    .tip_height
+                    .saturating_sub(signal.block_height)
+                    .saturating_add(1);
+                match output["didDocumentMetadata"]["confirmations"].as_u64() {
+                    // Frozen chain: the vector states a number, and the captured
+                    // tip must reproduce it. Four vectors check one tip from four
+                    // directions, so a bad tip or bad arithmetic cannot pass.
+                    Some(expected) => assert_eq!(
+                        result.document_metadata.confirmations,
+                        Some(expected as u32),
+                        "{id}: resolved confirmations must equal \
+                         resolve/output.json.didDocumentMetadata.confirmations against the \
+                         captured tip {}",
+                        f.tip_height
+                    ),
+                    // Still-mining chain: the vector states no number, so assert
+                    // PROVENANCE — confirmations must derive from the
+                    // MOST-RECENTLY-APPLIED update's block.
+                    //
+                    // Honest about its strength: on a single-signal row this is a
+                    // consistency check (the resolver used the captured signal's
+                    // height rather than the tip, zero, or None), because there is
+                    // only one height it could have used. It becomes a real "did
+                    // it pick the LATEST?" test on a multi-signal chain, which is
+                    // what a minted scenario supplies.
+                    None => assert_eq!(
+                        result.document_metadata.confirmations,
+                        Some(derived),
+                        "{id}: resolved confirmations must derive from the \
+                         most-recently-applied update's block ({} at tip {})",
+                        signal.block_height,
+                        f.tip_height
+                    ),
+                }
+
+                // The walk changed the document. The genesis reference is an
+                // independent producer of the pre-walk state: same DID, same
+                // options, no signals fed, so the resolver applies nothing.
+                let genesis = resolve_with_no_signals(
+                    Document::resolve(&did, make_options(None)).unwrap_or_else(|e| {
+                        panic!("{id}: the resolver must accept the vector: {e}")
+                    }),
+                );
+                let genesis_json = resolved_document_json(&genesis.document, id);
+                assert_eq!(
+                    genesis.document_metadata.version_id.get(),
+                    1,
+                    "{id}: a resolve with no signals fed is the genesis state"
+                );
+                assert_ne!(
+                    genesis_json, got,
+                    "{id}: the chain-driven walk must change the document; if genesis equals \
+                     the terminal state the replay proved nothing"
+                );
+
+                // And it stops where asked. One second before the earliest
+                // captured signal's block time is inside the walk's reach but
+                // before its first update, so the bound — which the FSM cannot
+                // short-circuit — must hold the answer at genesis.
+                let earliest = f.earliest_block_time().unwrap_or_else(|| {
+                    panic!("{id}: the captured fixture must carry at least one beacon signal")
+                });
+                let probe_resolver = Document::resolve(&did, make_options(Some(ts(earliest - 1))))
+                    .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}"));
+                let (probe, rounds) = drive_capture_rounds(probe_resolver, f, id);
+                let probe = probe.unwrap_or_else(|e| {
+                    panic!("{id}: the versionTime probe must resolve off the capture: {e}")
+                });
+                assert!(
+                    !rounds.is_empty(),
+                    "{id}: the versionTime probe must READ the chain — a bound that resolved \
+                     without issuing a request proves nothing about stopping"
+                );
+                assert_eq!(
+                    probe.document_metadata.version_id.get(),
+                    1,
+                    "{id}: a versionTime one second before the earliest captured signal \
+                     (block_time {earliest}) must resolve to version 1"
+                );
+                assert_eq!(
+                    resolved_document_json(&probe.document, id),
+                    genesis_json,
+                    "{id}: a versionTime before the first update must resolve the genesis \
+                     document"
+                );
+            }
 
             observed.insert(id.clone());
         }
@@ -1423,22 +1613,27 @@ mod tests {
     /// says out loud what it actually checked.
     #[test]
     fn op_vectors_every_row_is_driven_or_skipped_with_reason() {
-        let Some(vectors) = discovered_vectors_or_skip() else {
-            return;
-        };
+        // The minted section is emitted from this test's tail, OUTSIDE the
+        // absent-submodule skip: the minted scenarios are driven from fixtures
+        // in this repository, so their coverage is exactly what still holds when
+        // the submodule is gone — which is when a reader most needs to be told
+        // what a green run still checked.
+        if let Some(vectors) = discovered_vectors_or_skip() {
+            for network_dir in network_dirs_with_vectors() {
+                assert!(
+                    vectors.iter().any(|v| v.network_dir == network_dir),
+                    "network directory `{network_dir}` was probed as holding vectors but \
+                     contributed none"
+                );
+            }
 
-        for network_dir in network_dirs_with_vectors() {
-            assert!(
-                vectors.iter().any(|v| v.network_dir == network_dir),
-                "network directory `{network_dir}` was probed as holding vectors but \
-                 contributed none"
-            );
+            check_driven_floor(&vectors);
+            check_ledger_invariants(&vectors, SKIP_OVERRIDES);
+
+            eprintln!("{}", render_summary_with(&vectors, SKIP_OVERRIDES));
         }
 
-        check_driven_floor(&vectors);
-        check_ledger_invariants(&vectors, SKIP_OVERRIDES);
-
-        eprintln!("{}", render_summary_with(&vectors, SKIP_OVERRIDES));
+        eprintln!("{}", render_minted_summary());
     }
 
     /// The coverage ratchet: each assertion kind still drives at least
@@ -2083,19 +2278,10 @@ mod tests {
         .expect("benign patch is a valid RFC 6902 op array")
     }
 
-    /// Build a key-based initial document deterministically from
-    /// `CHAIN_SECRET_KEY_BYTES`, then two chained signed updates: update1 (v2)
-    /// against the initial doc and update2 (v3) against the post-update-1 doc.
-    ///
-    /// The chain is self-consistent BY CONSTRUCTION — `update1.source_hash ==
-    /// initial.hash()` and `update2.source_hash == (initial + update1).hash()` —
-    /// because both updates are derived from the locally-built document each run,
-    /// not from committed bytes that could silently drift if
-    /// `deterministically_generate`'s output ever changed. This is what makes the
-    /// apply loop actually APPLY (rather than reject at the sourceHash check),
-    /// and it needs no on-disk fixture and no test-suite submodule.
-    fn chained_two_updates() -> (InitialDocument, Update, Update) {
-        use crate::document::Document;
+    /// The key-based DID derived from `CHAIN_SECRET_KEY_BYTES` and the initial
+    /// document it deterministically generates — three Singleton beacons
+    /// (P2PKH, P2WPKH, P2TR) over a mutinynet identifier.
+    fn chain_initial_document() -> (crate::identifier::Did, InitialDocument) {
         use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network};
         use secp256k1::Secp256k1;
 
@@ -2109,6 +2295,25 @@ mod tests {
 
         let initial = InitialDocument::from_did(&did, &ResolutionOptions::default())
             .expect("key-based DID deterministically generates its initial document");
+
+        (did, initial)
+    }
+
+    /// Build a key-based initial document deterministically from
+    /// `CHAIN_SECRET_KEY_BYTES`, then two chained signed updates: update1 (v2)
+    /// against the initial doc and update2 (v3) against the post-update-1 doc.
+    ///
+    /// The chain is self-consistent BY CONSTRUCTION — `update1.source_hash ==
+    /// initial.hash()` and `update2.source_hash == (initial + update1).hash()` —
+    /// because both updates are derived from the locally-built document each run,
+    /// not from committed bytes that could silently drift if
+    /// `deterministically_generate`'s output ever changed. This is what makes the
+    /// apply loop actually APPLY (rather than reject at the sourceHash check),
+    /// and it needs no on-disk fixture and no test-suite submodule.
+    fn chained_two_updates() -> (InitialDocument, Update, Update) {
+        use crate::document::Document;
+
+        let (did, initial) = chain_initial_document();
         let document = Document::from(initial.clone());
         let vm_id = format!("{}#initialKey", did.encode());
 
@@ -2166,6 +2371,140 @@ mod tests {
     /// A `DateTime<Utc>` from a unix timestamp (seconds).
     fn ts(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(secs, 0).expect("in-range unix timestamp")
+    }
+
+    /// Extract the beacon address from a `/address/{a}/txs` request path.
+    ///
+    /// The ADDRESS is the routing key, not the URI: the full URI embeds
+    /// `rpc_host`, which differs between the capture endpoint and whatever the
+    /// resolver was built with, so a URI match would miss on every fixture.
+    /// Mirrors `chain_capture::record::address_from_txs_path` — including
+    /// splitting any query string off first — so capture and replay key on the
+    /// same string.
+    fn address_from_txs_uri(uri: &esploda::http::Uri) -> &str {
+        // `path_and_query` rather than `path`, so the query split below is the
+        // live thing the recorder does rather than a re-statement of what
+        // `Uri::path` already guarantees.
+        let raw = uri
+            .path_and_query()
+            .map_or_else(|| uri.path(), |pq| pq.as_str());
+        let path = raw.split('?').next().unwrap_or(raw);
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let n = segments.len();
+        if n >= 3 && segments[n - 1] == "txs" && segments[n - 3] == "address" {
+            segments[n - 2]
+        } else {
+            panic!(
+                "the resolver requested `{raw}`, which is not an `/address/{{address}}/txs` \
+                 endpoint. The capture harness routes on the address in that path, so a new \
+                 request shape needs a new route here — and a new capture to serve it."
+            )
+        }
+    }
+
+    /// How many request rounds a captured replay may take before it is treated
+    /// as non-terminating. Three is already more than any committed scenario
+    /// needs (a genesis round plus one per beacon rotation); eight leaves room
+    /// without letting a resolver that never converges hang the test run.
+    const CAPTURE_ROUND_BOUND: usize = 8;
+
+    /// Drive the FSM to a terminal state, serving every request from `fixture`,
+    /// and return the address set requested in EACH round, in round order.
+    ///
+    /// Mirrors `did_btcr2_client::Client::resolve` exactly: read the requests
+    /// out of `ResolverState::Requests`, serve each one, merge the results into
+    /// the `BeaconType` entry, feed them back. The ONE difference is where the
+    /// bytes come from.
+    ///
+    /// The round log is built here rather than bolted on later because it is how
+    /// the deactivation short-circuit becomes OBSERVABLE: "process no further
+    /// beacon signals" is a claim about a request that must NOT be made, and
+    /// only a record of what WAS requested can check it. Returning it costs
+    /// nothing for callers that ignore it.
+    fn drive_capture_rounds(
+        resolver: Resolver,
+        fixture: &ChainFixture,
+        id: &str,
+    ) -> (Result<ResolutionResult, Error>, Vec<Vec<String>>) {
+        drive_capture_within(resolver, fixture, id, CAPTURE_ROUND_BOUND)
+    }
+
+    /// [`drive_capture_rounds`] with the round bound spelled out, so the
+    /// non-termination guard can be exercised without minting eight chained
+    /// beacon rotations to reach the real bound.
+    fn drive_capture_within(
+        resolver: Resolver,
+        fixture: &ChainFixture,
+        id: &str,
+        max_rounds: usize,
+    ) -> (Result<ResolutionResult, Error>, Vec<Vec<String>>) {
+        let mut rounds: Vec<Vec<String>> = Vec::new();
+        let mut state = match resolver.resolve() {
+            Ok(state) => state,
+            Err(e) => return (Err(e), rounds),
+        };
+
+        loop {
+            let (next_state, beacons) = match state {
+                ResolverState::Resolved(result) => return (Ok(result), rounds),
+                ResolverState::Requests(next_state, beacons) => (next_state, beacons),
+            };
+
+            if rounds.len() >= max_rounds {
+                panic!(
+                    "{id}: the resolver was still requesting beacon signals after \
+                     {max_rounds} round(s) and has not converged. Rounds so far: {rounds:?}"
+                );
+            }
+
+            // Logged BEFORE anything is served, so the unrouted-address panic
+            // below can print what this round asked for.
+            let requested: Vec<String> = beacons
+                .values()
+                .flatten()
+                .map(|req| address_from_txs_uri(req.uri()).to_string())
+                .collect();
+            rounds.push(requested);
+
+            let mut responses: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+            for (beacon_type, requests) in beacons {
+                for req in requests {
+                    let address = address_from_txs_uri(req.uri());
+                    let txs = fixture.addresses.get(address).unwrap_or_else(|| {
+                        panic!(
+                            "{id}: no captured response for address {address}; re-run capture \
+                             or add the address — `cargo run -p chain-capture -- capture \
+                             --network {} --vector {id}`. Rounds so far: {rounds:?}",
+                            fixture.network
+                        )
+                    });
+                    // A key present with an empty list IS a captured state and
+                    // is served as zero transactions; only an ABSENT key is a
+                    // failure, which is why the lookup above does not default.
+                    responses
+                        .entry(beacon_type)
+                        .or_default()
+                        .extend(txs.iter().cloned());
+                }
+            }
+
+            state = match next_state.process_responses(responses).resolve() {
+                Ok(state) => state,
+                Err(e) => return (Err(e), rounds),
+            };
+        }
+    }
+
+    /// Drive to a terminal state, discarding the round log.
+    ///
+    /// Thin wrapper over [`drive_capture_rounds`] for the callers that only need
+    /// the result.
+    fn drive_to_resolved_from_capture(
+        resolver: Resolver,
+        fixture: &ChainFixture,
+        id: &str,
+    ) -> Result<ResolutionResult, Error> {
+        drive_capture_rounds(resolver, fixture, id).0
     }
 
     /// Drive a resolver FSM to its terminal state over a single batch of
@@ -2375,6 +2714,441 @@ mod tests {
         );
     }
 
+    /// The minted multi-update chain, replayed from the snapshot taken of the
+    /// chain it was published on.
+    ///
+    /// WHAT THIS COVERS THAT NO UPSTREAM VECTOR CAN. Every vendor vector whose
+    /// resolution is past genesis carries exactly one update announced from one
+    /// beacon address, so four properties have nowhere else to be observed:
+    ///
+    /// 1. **Multi-update sequencing across rotating beacons.** Three updates
+    ///    (v2, v3, v4) were announced from three DIFFERENT beacon addresses in
+    ///    three different blocks. Applying them in the wrong order fails at the
+    ///    `sourceHash` chain check, so reaching version 4 is evidence the walk
+    ///    ordered them by version and height rather than by arrival.
+    /// 2. **The on-chain deactivation short-circuit.** The v4 update sets
+    ///    `deactivated`, and this is the only chain where a resolver could go on
+    ///    to request more signals afterwards — see the round-log assertion below.
+    /// 3. **`confirmations` provenance with something to choose between.** Three
+    ///    signals at three heights means the assertion "the resolver used the
+    ///    MOST RECENT applied update's block" can fail; on a single-signal vendor
+    ///    row there is only one height it could have used.
+    /// 4. **Mid-walk version bounds.** On a two-version chain `versionId = 1`
+    ///    short-circuits at `Init` and `versionId = 2` is the terminal state, so
+    ///    no bound stops the walk in the MIDDLE. This chain has four versions,
+    ///    which makes 2 and 3 real bounds.
+    ///
+    /// Everything asserted against — the DID, the network, the heights, the
+    /// block times, the tip, the sidecar and the expected document — is read out
+    /// of the fixture. Re-minting the scenario onto a different chain therefore
+    /// regenerates the data without touching this test.
+    ///
+    /// Unconditional: the fixture lives in this repository, not in the
+    /// `test-suite/` submodule, so there is nothing to skip on.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md — "Process updates Array"
+    /// steps 1, 3, 7 and step 13.
+    #[test]
+    fn minted_chain_sequences_updates_across_rotating_beacons() {
+        use crate::identifier::Did;
+
+        let id = "minted/clean-rotating-beacons";
+        let f = read_chain_fixture(id);
+        let did: Did = f
+            .did
+            .as_deref()
+            .unwrap_or_else(|| panic!("{id}: a minted fixture records the DID it published"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{id}: the fixture's DID must parse: {e}"));
+        let expected = f
+            .expected
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id}: a minted fixture records its expected resolution"));
+        let sidecar_json = f.sidecar.clone().unwrap_or_else(|| {
+            panic!("{id}: a minted fixture carries the sidecar it was minted with")
+        });
+
+        // ONE options assembly, exactly as `drive_resolve` does it: the sidecar
+        // object verbatim plus the captured tip. Every drive below differs ONLY
+        // in its target condition, so a bound cannot silently be testing a
+        // different resolution.
+        let make_options = |version_id: Option<NonZeroU64>, version_time: Option<DateTime<Utc>>| {
+            let sidecar = SidecarData::from_json_value(sidecar_json.clone())
+                .unwrap_or_else(|e| panic!("{id}: the fixture's sidecar must parse: {e}"));
+            ResolutionOptions {
+                sidecar_data: Some(sidecar),
+                chain_tip_height: Some(f.tip_height),
+                version_id,
+                version_time,
+                ..Default::default()
+            }
+        };
+        let resolver_for = |version_id, version_time| {
+            Document::resolve(&did, make_options(version_id, version_time))
+                .unwrap_or_else(|e| panic!("{id}: the resolver must accept the minted DID: {e}"))
+        };
+
+        // --- The chain is still the chain this test was written for ----------
+        //
+        // Read off the fixture rather than written down, so a re-mint that lost
+        // the rotation (or collapsed the three announcements into one block)
+        // fails HERE, by name, instead of silently weakening every assertion
+        // below into a restatement of a single-signal row.
+        let heights: BTreeSet<u32> = f.signals.iter().map(|s| s.block_height).collect();
+        let addresses: BTreeSet<&str> = f.signals.iter().map(|s| s.address.as_str()).collect();
+        assert_eq!(
+            f.signals.len(),
+            3,
+            "{id}: this scenario is three announced updates; the capture holds {} signal(s)",
+            f.signals.len()
+        );
+        assert_eq!(
+            heights.len(),
+            3,
+            "{id}: the three announcements must sit in three DISTINCT blocks, or sequencing \
+             by block height is not being exercised — heights: {heights:?}"
+        );
+        assert_eq!(
+            addresses.len(),
+            3,
+            "{id}: the three announcements must come from three DISTINCT beacon addresses, or \
+             beacon rotation is not being exercised — addresses: {addresses:?}"
+        );
+
+        // --- The terminal state ---------------------------------------------
+        let (result, rounds) = drive_capture_rounds(resolver_for(None, None), &f, id);
+        let result =
+            result.unwrap_or_else(|e| panic!("{id}: the minted clean chain must resolve: {e}"));
+        let terminal_json = resolved_document_json(&result.document, id);
+
+        assert_eq!(
+            terminal_json, expected["didDocument"],
+            "{id}: the resolved didDocument must equal the fixture's expected didDocument"
+        );
+        assert_eq!(
+            result.document_metadata.version_id.get(),
+            4,
+            "{id}: three applied updates walk genesis (1) to version 4"
+        );
+        assert!(
+            result.document_metadata.deactivated,
+            "{id}: the terminal update sets `deactivated`, so the resolved metadata must say so"
+        );
+        // Cross-check the fixture's own expected metadata block. `versionId` is
+        // an ASCII STRING per the specification; asserting the ENCODING here
+        // keeps a minted fixture from drifting into the number encoding the
+        // upstream mutinynet vectors carry.
+        assert_eq!(
+            expected["didDocumentMetadata"]["versionId"].as_str(),
+            Some("4"),
+            "{id}: the fixture's expected versionId must be the ASCII string \"4\", not a \
+             JSON number"
+        );
+        assert_eq!(
+            expected["didDocumentMetadata"]["deactivated"].as_bool(),
+            Some(true),
+            "{id}: the fixture's expected metadata must record the deactivation"
+        );
+
+        // --- confirmations, by provenance, with a real choice ----------------
+        let latest = f
+            .latest_signal()
+            .unwrap_or_else(|| panic!("{id}: the capture must carry at least one beacon signal"));
+        assert_eq!(
+            latest.block_height,
+            heights.iter().copied().max().expect("three heights"),
+            "{id}: `latest_signal` must be the highest-block announcement"
+        );
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(
+                f.tip_height
+                    .saturating_sub(latest.block_height)
+                    .saturating_add(1)
+            ),
+            "{id}: confirmations must derive from the MOST-RECENTLY-APPLIED update's block \
+             ({} at tip {}), not the first applied update's block and not the tip",
+            latest.block_height,
+            f.tip_height
+        );
+
+        // --- The deactivation short-circuit, observed by what was NOT asked --
+        //
+        // Safe to assert as a round COUNT rather than fragile, because of what
+        // the chain was minted to contain: the v2 update adds a FOURTH beacon
+        // service, and that fourth address was never funded, never announced,
+        // and is deliberately absent from the capture. A resolver that did not
+        // stop at `deactivated` would issue a second round naming it and panic
+        // inside the pump ("no captured response for address …") before reaching
+        // this line. The assertion is the readable statement of the property;
+        // the pump's panic is the enforcement.
+        assert_eq!(
+            rounds.len(),
+            1,
+            "{id}: applying the deactivating update must resolve immediately and process no \
+             further beacon signals — rounds: {rounds:?}"
+        );
+        let mut requested = rounds[0].clone();
+        requested.sort();
+        let announced: Vec<String> = addresses.iter().map(|a| (*a).to_string()).collect();
+        assert_eq!(
+            requested, announced,
+            "{id}: the single round must request exactly the genesis beacon addresses the \
+             three updates were announced from"
+        );
+
+        // --- The genesis reference ------------------------------------------
+        //
+        // An independent producer of the pre-walk state: same DID, same options,
+        // no signals fed, so the resolver applies nothing.
+        let genesis = resolve_with_no_signals(resolver_for(None, None));
+        let genesis_json = resolved_document_json(&genesis.document, id);
+        assert_eq!(
+            genesis.document_metadata.version_id.get(),
+            1,
+            "{id}: a resolve with no signals fed is the genesis state"
+        );
+
+        // --- versionId = 1: the documented Init-time short-circuit -----------
+        //
+        // NOT a walk probe. At `Init` the FSM returns `Resolved` when a
+        // `VersionId` target equals `current_version_id`, which starts at 1, so
+        // this bound issues ZERO requests and never touches the capture. That is
+        // exactly why `drive_resolve` does not use it on the vendor rows. It is
+        // pinned HERE as the documented behaviour it is: an empty round log.
+        let (v1, v1_rounds) =
+            drive_capture_rounds(resolver_for(Some(NonZeroU64::MIN), None), &f, id);
+        let v1 = v1.unwrap_or_else(|e| panic!("{id}: the versionId = 1 bound must resolve: {e}"));
+        assert!(
+            v1_rounds.is_empty(),
+            "{id}: a versionId bound equal to the starting version short-circuits at Init and \
+             must issue NO beacon requests — rounds: {v1_rounds:?}"
+        );
+        assert_eq!(
+            v1.document_metadata.version_id.get(),
+            1,
+            "{id}: the versionId = 1 bound resolves version 1"
+        );
+        assert_eq!(
+            resolved_document_json(&v1.document, id),
+            genesis_json,
+            "{id}: the versionId = 1 short-circuit must restate the genesis document"
+        );
+
+        // --- versionId = 2 and 3: the walk stops in the MIDDLE ----------------
+        let (v2, v2_rounds) = drive_capture_rounds(
+            resolver_for(Some(NonZeroU64::new(2).expect("2 is non-zero")), None),
+            &f,
+            id,
+        );
+        let v2 = v2.unwrap_or_else(|e| panic!("{id}: the versionId = 2 bound must resolve: {e}"));
+        let v2_json = resolved_document_json(&v2.document, id);
+        assert!(
+            !v2_rounds.is_empty(),
+            "{id}: a mid-walk versionId bound must READ the chain — a bound that resolved \
+             without issuing a request proves nothing about stopping"
+        );
+        assert_eq!(
+            v2.document_metadata.version_id.get(),
+            2,
+            "{id}: the versionId = 2 bound must stop after the first applied update"
+        );
+
+        let (v3, _v3_rounds) = drive_capture_rounds(
+            resolver_for(Some(NonZeroU64::new(3).expect("3 is non-zero")), None),
+            &f,
+            id,
+        );
+        let v3 = v3.unwrap_or_else(|e| panic!("{id}: the versionId = 3 bound must resolve: {e}"));
+        let v3_json = resolved_document_json(&v3.document, id);
+        assert_eq!(
+            v3.document_metadata.version_id.get(),
+            3,
+            "{id}: the versionId = 3 bound must stop after the second applied update"
+        );
+
+        // Four stages of one chain, pairwise distinct. Two equal stages would
+        // mean an update did not apply — and the versionId assertions above
+        // cannot see that, because they read a counter rather than the document.
+        let stages = [
+            ("genesis", &genesis_json),
+            ("version 2", &v2_json),
+            ("version 3", &v3_json),
+            ("the terminal version 4", &terminal_json),
+        ];
+        for (i, (left_name, left)) in stages.iter().enumerate() {
+            for (right_name, right) in &stages[i + 1..] {
+                assert_ne!(
+                    left, right,
+                    "{id}: the four stages of this chain must be pairwise distinct; {left_name} \
+                     equals {right_name}, which means an update did not apply"
+                );
+            }
+        }
+
+        // --- The time bound, against a real captured block time ---------------
+        let earliest = f
+            .earliest_block_time()
+            .unwrap_or_else(|| panic!("{id}: the capture must carry at least one beacon signal"));
+        let (before, before_rounds) =
+            drive_capture_rounds(resolver_for(None, Some(ts(earliest - 1))), &f, id);
+        let before =
+            before.unwrap_or_else(|e| panic!("{id}: the versionTime bound must resolve: {e}"));
+        assert!(
+            !before_rounds.is_empty(),
+            "{id}: the versionTime bound must READ the chain"
+        );
+        assert_eq!(
+            before.document_metadata.version_id.get(),
+            1,
+            "{id}: a versionTime one second before the earliest captured announcement \
+             (block_time {earliest}) must resolve to version 1"
+        );
+        assert_eq!(
+            resolved_document_json(&before.document, id),
+            genesis_json,
+            "{id}: a versionTime before the first update must resolve the genesis document"
+        );
+    }
+
+    /// The minted late-publishing fork, replayed from the snapshot taken of the
+    /// chain it was published on.
+    ///
+    /// THE FORK IS A HISTORICAL FACT, NOT A REPLAY-TIME ARRANGEMENT. Two
+    /// conflicting updates, both claiming version 2, were signed and announced
+    /// from the SAME beacon address in two different blocks. Both transactions
+    /// are on the chain; the capture holds them; the sidecar holds both payloads.
+    /// The resolver is therefore rejecting a history that actually exists,
+    /// rather than a hand-assembled pair of in-memory structs — which is what
+    /// the unit-level `confirm_duplicate` tests in `update.rs` do, and what no
+    /// upstream vector demonstrates at all.
+    ///
+    /// The chain is read from the fixture, so this test covers whichever chain
+    /// the scenario was last minted on.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md:169 (`LATE_PUBLISHING` MUST).
+    #[test]
+    fn minted_fork_raises_late_publishing() {
+        use crate::error::ProblemDetails as _;
+        use crate::identifier::Did;
+
+        let id = "minted/late-publishing-fork";
+        let f = read_chain_fixture(id);
+        let did: Did = f
+            .did
+            .as_deref()
+            .unwrap_or_else(|| panic!("{id}: a minted fixture records the DID it published"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{id}: the fixture's DID must parse: {e}"));
+        let expected = f
+            .expected
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id}: a minted fixture records its expected resolution"));
+        let sidecar_json = f.sidecar.clone().unwrap_or_else(|| {
+            panic!("{id}: a minted fixture carries the sidecar it was minted with")
+        });
+
+        // --- The fork is still there ----------------------------------------
+        //
+        // Asserted BEFORE driving, so a re-mint that lost the anomaly fails here
+        // by name instead of surfacing as a confusing resolver failure — or,
+        // worse, as a green run of a test that no longer has a fork to reject.
+        let addresses: BTreeSet<&str> = f.signals.iter().map(|s| s.address.as_str()).collect();
+        let heights: BTreeSet<u32> = f.signals.iter().map(|s| s.block_height).collect();
+        assert_eq!(
+            f.signals.len(),
+            2,
+            "{id}: the fork is two announcements; the capture holds {} signal(s)",
+            f.signals.len()
+        );
+        assert_eq!(
+            addresses.len(),
+            1,
+            "{id}: both conflicting announcements must come from ONE beacon address — \
+             addresses: {addresses:?}"
+        );
+        assert_eq!(
+            heights.len(),
+            2,
+            "{id}: the two announcements must sit in two DISTINCT blocks, or the later one is \
+             not late — heights: {heights:?}"
+        );
+
+        let updates = sidecar_json["updates"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: the fixture's sidecar must carry an updates array"));
+        assert_eq!(
+            updates.len(),
+            2,
+            "{id}: the fork's sidecar must carry BOTH conflicting update payloads; it carries {}",
+            updates.len()
+        );
+        for (i, update) in updates.iter().enumerate() {
+            assert_eq!(
+                update["targetVersionId"].as_u64(),
+                Some(2),
+                "{id}: sidecar update {i} must claim version 2 — a fork is two updates at the \
+                 SAME version"
+            );
+        }
+        assert_ne!(
+            updates[0], updates[1],
+            "{id}: the two version-2 updates must DIFFER; two identical announcements are a \
+             benign duplicate, not a fork"
+        );
+
+        // --- The resolver rejects the history --------------------------------
+        let sidecar = SidecarData::from_json_value(sidecar_json.clone())
+            .unwrap_or_else(|e| panic!("{id}: the fixture's sidecar must parse: {e}"));
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: Some(f.tip_height),
+            ..Default::default()
+        };
+        let resolver = Document::resolve(&did, options)
+            .unwrap_or_else(|e| panic!("{id}: the resolver must accept the minted DID: {e}"));
+        let (result, rounds) = drive_capture_rounds(resolver, &f, id);
+
+        assert!(
+            !rounds.is_empty(),
+            "{id}: the rejection must come from READING the chain, not from refusing the DID"
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(resolved) => panic!(
+                "{id}: resolving a forked history must fail, but it resolved to version {} — \
+                 the resolver walked past a conflicting same-version announcement",
+                resolved.document_metadata.version_id.get()
+            ),
+        };
+        // Matched on the VARIANT, not on a formatted string: the outer error's
+        // Display is a fixed sentence, so a message comparison would pass for
+        // any FSM error at all. The lower-height branch applies (signals are
+        // sorted ascending by (targetVersionId, block_height)) and the
+        // higher-height one reaches `confirm_duplicate`, whose hash mismatch
+        // raises this.
+        let Error::Btcr2Error(btcr2_error @ Btcr2Error::LatePublishingError(_)) = &error else {
+            panic!("{id}: a forked history must raise a late-publishing error, got {error:?}");
+        };
+
+        // The fixture's recorded expectation IS the crate's problem-details code
+        // for the variant just matched — the two are tied here rather than both
+        // being spelled out as a literal in two places.
+        let details = btcr2_error
+            .details()
+            .unwrap_or_else(|| panic!("{id}: the late-publishing error must carry a details body"));
+        let code = details["type"]
+            .as_str()
+            .and_then(|ty| ty.rsplit('#').next())
+            .unwrap_or_else(|| panic!("{id}: the details body must carry a `type` URL"));
+        assert_eq!(
+            expected["error"].as_str(),
+            Some(code),
+            "{id}: the fixture's expected error must be the problem-details code this variant \
+             reports"
+        );
+    }
+
     /// `DocumentMetadata.deactivated` is sourced from
     /// `contemporary_doc.fields.deactivated`. An initial document carries
     /// `false`; flipping the field surfaces `true` in the metadata.
@@ -2547,5 +3321,319 @@ mod tests {
             matches!(err, Error::Btcr2Error(Btcr2Error::Unsupported(_))),
             "expected Unsupported, got {err:?}"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Captured-chain replay: serving the resolver's OWN request URIs from the
+    // bodies a capture recorded, keyed on the beacon address.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// A mutinynet address none of the three deterministically generated
+    /// beacons uses, so a rotation onto it is observable as a NEW request in a
+    /// SECOND round. Lifted from a committed mutinynet capture, so it is a real
+    /// address of the right network rather than a hand-assembled string.
+    const ROTATED_BEACON_ADDRESS: &str = "tb1q7mss0haz2pjzh6kry4ythrat3mpk4rj5hhgy4l";
+
+    fn test_uri(uri: &str) -> esploda::http::Uri {
+        uri.parse().expect("a valid test URI")
+    }
+
+    /// The beacon addresses a document declares, in document order — which is
+    /// the order the FSM emits its requests in.
+    fn chain_beacon_addresses(initial: &InitialDocument) -> Vec<String> {
+        let mut addresses = Vec::new();
+        for beacon in &initial.fields.service {
+            addresses.push(beacon.address().to_string());
+        }
+        addresses
+    }
+
+    /// A [`ChainFixture`] holding exactly the given captured address responses.
+    ///
+    /// Built directly rather than read off disk: these tests pin the pump's
+    /// ROUTING, and their bodies come from `confirmed_signal_tx`, whose
+    /// `Transaction` values a JSON envelope would have to round-trip through a
+    /// serializer the type does not provide. `signals` stays empty because the
+    /// pump never reads it — `read_chain_fixture` is what re-derives it.
+    fn capture_fixture(addresses: Vec<(&str, Vec<Transaction>)>) -> ChainFixture {
+        ChainFixture {
+            endpoint: "http://localhost:3000".to_string(),
+            network: "mutinynet".to_string(),
+            tip_height: 900,
+            signals: Vec::new(),
+            addresses: addresses
+                .into_iter()
+                .map(|(address, txs)| (address.to_string(), txs))
+                .collect(),
+            did: None,
+            sidecar: None,
+            expected: None,
+        }
+    }
+
+    /// The initial document plus a signed v2 update that APPENDS a Singleton
+    /// beacon at [`ROTATED_BEACON_ADDRESS`] — the beacon-set change that forces
+    /// the resolver into a second request round.
+    fn chained_beacon_rotation() -> (InitialDocument, Update) {
+        use crate::document::Document;
+
+        let (did, initial) = chain_initial_document();
+        let document = Document::from(initial.clone());
+        let vm_id = format!("{}#initialKey", did.encode());
+        let patch: json_patch::Patch = serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/service/-", "value": {
+                "id": format!("{}#rotatedBeacon", did.encode()),
+                "type": "SingletonBeacon",
+                "serviceEndpoint": format!("bitcoin:{ROTATED_BEACON_ADDRESS}"),
+            }}
+        ]))
+        .expect("the rotation patch is a valid RFC 6902 op array");
+
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(patch, v2, &vm_id, chain_secret_key())
+            .expect("the rotation update constructs against the initial document");
+
+        (initial, update)
+    }
+
+    /// The routing key is the address in the path.
+    #[test]
+    fn routing_by_address_from_txs_uri_reads_the_address() {
+        let uri = test_uri(
+            "http://localhost:3000/address/bcrt1ql8r8ql90we9d4k70z5wsufurnu3c5pxyk3ku8n/txs",
+        );
+        assert_eq!(
+            address_from_txs_uri(&uri),
+            "bcrt1ql8r8ql90we9d4k70z5wsufurnu3c5pxyk3ku8n"
+        );
+    }
+
+    /// The host is irrelevant: a capture is taken against a local endpoint and
+    /// replayed against whatever `rpc_host` the resolver was built with, so a
+    /// full-URI match would miss on every fixture.
+    #[test]
+    fn routing_by_address_from_txs_uri_ignores_the_host() {
+        let uri = test_uri(&format!(
+            "{DEFAULT_RPC_BASE_URL}/address/{ROTATED_BEACON_ADDRESS}/txs"
+        ));
+        assert_eq!(address_from_txs_uri(&uri), ROTATED_BEACON_ADDRESS);
+    }
+
+    /// A query string is not part of the key, exactly as in the recorder.
+    #[test]
+    fn routing_by_address_from_txs_uri_ignores_a_query_string() {
+        let uri = test_uri(&format!(
+            "http://localhost:3000/address/{ROTATED_BEACON_ADDRESS}/txs?after_txid=deadbeef"
+        ));
+        assert_eq!(address_from_txs_uri(&uri), ROTATED_BEACON_ADDRESS);
+    }
+
+    /// A request shape the harness cannot route names the shape it received, so
+    /// a future FSM change says what it produced rather than only that it was
+    /// wrong.
+    #[test]
+    #[should_panic(expected = "/address/tb1qexample/utxo")]
+    fn routing_by_address_from_txs_uri_panics_on_another_endpoint_shape() {
+        let uri = test_uri("http://localhost:3000/address/tb1qexample/utxo");
+        let _ = address_from_txs_uri(&uri);
+    }
+
+    /// The first round asks for every beacon the genesis document declares, and
+    /// an address captured with no transactions is served as zero transactions
+    /// rather than treated as a routing failure.
+    #[test]
+    fn capture_pump_logs_every_address_the_first_round_requested() {
+        let (_did, initial) = chain_initial_document();
+        let addresses = chain_beacon_addresses(&initial);
+        let fixture = capture_fixture(
+            addresses
+                .iter()
+                .map(|address| (address.as_str(), Vec::new()))
+                .collect(),
+        );
+
+        let resolver = Resolver::new(initial, ResolutionOptions::default());
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/all-empty");
+
+        let result = result.expect("a capture with no signals resolves to the genesis document");
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            1,
+            "no signals were announced, so the document stays at version 1"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses],
+            "one round, asking for every declared beacon address"
+        );
+    }
+
+    /// Several addresses' transactions merge into ONE `BeaconType::Singleton`
+    /// entry, exactly as the production loop merges them — two updates
+    /// announced from two different beacons both apply.
+    #[test]
+    fn capture_pump_merges_several_addresses_into_one_singleton_entry() {
+        let (initial, update1, update2) = chained_two_updates();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xf1);
+        let tx_v3 = confirmed_signal_tx(update2.hash(), 200, 1_700_000_100, 0xf2);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), vec![tx_v3]),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let result = drive_to_resolved_from_capture(resolver, &fixture, "test/two-beacons")
+            .expect("both announcements apply");
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            3,
+            "an update announced from a second beacon address must still apply"
+        );
+    }
+
+    /// An applied update that adds a beacon forces a SECOND round, and the pump
+    /// serves that round from the capture too. A harness that fed one batch and
+    /// then empty responses would resolve identically while never asking.
+    #[test]
+    fn capture_pump_serves_a_second_round_when_an_update_rotates_the_beacon_set() {
+        let (initial, update) = chained_beacon_rotation();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx = confirmed_signal_tx(update.hash(), 700, 1_700_000_000, 0xd1);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, Vec::new()),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/rotation");
+
+        let result = result.expect("the rotation resolves");
+        assert_eq!(u64::from(result.document_metadata.version_id), 2);
+        assert_eq!(
+            rounds.len(),
+            2,
+            "the added beacon is a second round: {rounds:?}"
+        );
+        assert_eq!(rounds[0], addresses, "round 1 asks for the genesis beacons");
+        assert_eq!(
+            rounds[1],
+            vec![ROTATED_BEACON_ADDRESS.to_string()],
+            "round 2 asks only for the beacon the update introduced"
+        );
+    }
+
+    /// A request the capture has no key for is a bug in the fixture or in the
+    /// addresses the resolver derived. Serving an empty array instead — the
+    /// permissive default the client crate's fake transport uses — would let a
+    /// resolver that derived the WRONG addresses pass.
+    #[test]
+    #[should_panic(expected = "no captured response for")]
+    fn capture_pump_panics_on_an_address_the_fixture_never_captured() {
+        let (initial, update) = chained_beacon_rotation();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx = confirmed_signal_tx(update.hash(), 700, 1_700_000_000, 0xd2);
+        // The rotated beacon is deliberately absent.
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let _ = drive_capture_rounds(resolver, &fixture, "minted/late-publishing-fork");
+    }
+
+    /// The FSM's own error is RETURNED, not raised as a panic, so a scenario
+    /// minted to fail can assert the error it must produce.
+    #[test]
+    fn capture_pump_returns_an_fsm_error_instead_of_panicking() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx = confirmed_signal_tx(update1.hash(), 700, 1_700_000_000, 0xe1);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+        ]);
+
+        // No sidecar: the announced update hash resolves to no update data.
+        let resolver = Resolver::new(initial, ResolutionOptions::default());
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/missing-update");
+
+        let err = result.expect_err("an announcement with no update data must error");
+        assert!(
+            matches!(err, Error::Btcr2Error(Btcr2Error::MissingUpdateData { .. })),
+            "expected MissingUpdateData, got {err:?}"
+        );
+        assert_eq!(
+            rounds.len(),
+            1,
+            "the round that produced the error is still logged"
+        );
+    }
+
+    /// A resolve that keeps asking for beacon signals fails visibly rather than
+    /// hanging CI. Driven through the bounded form with a bound of one, because
+    /// provoking the real bound would take eight chained beacon rotations to
+    /// say the same thing.
+    #[test]
+    #[should_panic(expected = "still requesting beacon signals after 1 round")]
+    fn capture_pump_panics_when_the_resolve_does_not_converge() {
+        let (initial, update) = chained_beacon_rotation();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx = confirmed_signal_tx(update.hash(), 700, 1_700_000_000, 0xd3);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, Vec::new()),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let _ = drive_capture_within(resolver, &fixture, "test/rotation", 1);
+    }
+
+    /// The discarding wrapper is the same pump: same result, log dropped.
+    #[test]
+    fn capture_pump_wrapper_drops_the_round_log() {
+        let (_did, initial) = chain_initial_document();
+        let addresses = chain_beacon_addresses(&initial);
+        let fixture = capture_fixture(
+            addresses
+                .iter()
+                .map(|address| (address.as_str(), Vec::new()))
+                .collect(),
+        );
+
+        let resolver = Resolver::new(initial, ResolutionOptions::default());
+        let result = drive_to_resolved_from_capture(resolver, &fixture, "test/all-empty")
+            .expect("a capture with no signals resolves");
+        assert_eq!(u64::from(result.document_metadata.version_id), 1);
     }
 }
