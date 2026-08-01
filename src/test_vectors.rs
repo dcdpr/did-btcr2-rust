@@ -95,11 +95,52 @@ pub(crate) struct CapturedSignal {
 }
 
 impl ChainFixture {
-    /// The signal in the highest block — the most-recently-applied update's
-    /// block, which is what `confirmations` is computed from
-    /// (`resolver.rs`, the `applied_block_height` overwrite).
+    /// The signal carrying the most-recently-applied update — the one
+    /// `confirmations` is computed from (`resolver.rs`, the
+    /// `applied_block_height` overwrite).
+    ///
+    /// Derived the way the RESOLVER derives it: the signal announcing the update
+    /// with the highest `targetVersionId`, and — where that update was announced
+    /// more than once — the lowest block among them, because the resolver folds a
+    /// duplicate announcement to the earliest height. The capture-time gate picks
+    /// the same signal the same way.
+    ///
+    /// A fixture that carries no sidecar of its own (every vendor row: the
+    /// sidecar lives in the test-suite tree) falls back to the highest block.
+    /// [`assert_signals_consistent`] requires the two rules to agree on every
+    /// fixture that can be checked, so the fallback is never a different answer —
+    /// and a fixture where they diverged would fail as a fixture problem rather
+    /// than as a resolver one.
     pub(crate) fn latest_signal(&self) -> Option<&CapturedSignal> {
-        self.signals.iter().max_by_key(|signal| signal.block_height)
+        match self.applied_update_hash() {
+            Some(hash) => self
+                .signals
+                .iter()
+                .filter(|signal| signal.update_hash == hash)
+                .min_by_key(|signal| signal.block_height),
+            None => self.signals.iter().max_by_key(|signal| signal.block_height),
+        }
+    }
+
+    /// The announcement hash of the sidecar update with the highest
+    /// `targetVersionId`, when this fixture carries its own sidecar.
+    ///
+    /// The hash is recomputed here — JCS then SHA-256 over the full signed
+    /// update, through the core's own `Update` — rather than read from
+    /// `signals`, so the pairing of "which update is last" with "which signal
+    /// announced it" is derived from the update itself.
+    fn applied_update_hash(&self) -> Option<String> {
+        use crate::canonical_hash::CanonicalHash as _;
+
+        let updates = self.sidecar.as_ref()?.get("updates")?.as_array()?;
+        let last = updates.iter().max_by_key(|update| {
+            update
+                .get("targetVersionId")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        })?;
+        let parsed = crate::Update::from_json_value(last.clone()).ok()?;
+        Some(hex::encode(parsed.hash().as_bytes()))
     }
 
     /// The minimum `block_time` across the signals — the anchor for a
@@ -200,6 +241,52 @@ fn assert_signals_consistent(fixture: &ChainFixture, vector_id: &str) {
             signal.update_hash
         );
     }
+
+    assert_version_and_height_agree(fixture, vector_id, &rerun);
+}
+
+/// Require the fixture's signals to be ordered the same way by version and by
+/// height.
+///
+/// The resolver applies updates in `(targetVersionId, block height)` order and
+/// measures `confirmations` from the last one it applied, so the signal in the
+/// highest block and the signal announcing the highest version are the same
+/// signal on any chain that was minted step by step. They are not the same RULE,
+/// though, and a chain where they diverged — a reorg, a mempool race on a public
+/// chain, a hand-edited fixture — would make a replay assert against a block the
+/// resolver never measured from, producing a failure that pointed at the
+/// resolver.
+///
+/// Checked here so it fails as what it is: a problem with the fixture.
+fn assert_version_and_height_agree(fixture: &ChainFixture, vector_id: &str, rerun: &str) {
+    let Some(applied) = fixture.applied_update_hash() else {
+        return;
+    };
+    let Some(by_version) = fixture
+        .signals
+        .iter()
+        .filter(|signal| signal.update_hash == applied)
+        .min_by_key(|signal| signal.block_height)
+    else {
+        panic!(
+            "{vector_id}: the sidecar's highest-version update {applied} is announced by no \
+             captured signal — re-run `{rerun}` rather than editing the fixture"
+        );
+    };
+    let highest = fixture
+        .signals
+        .iter()
+        .map(|signal| signal.block_height)
+        .max()
+        .unwrap_or_default();
+    assert_eq!(
+        by_version.block_height, highest,
+        "{vector_id}: the last update ({applied}) is announced in block {}, but the highest \
+         captured signal is in block {highest} — the announcements are not ordered by \
+         version and height alike, so `confirmations` would be asserted against a block \
+         the resolver never measured from. Re-run `{rerun}` rather than editing the fixture",
+        by_version.block_height
+    );
 }
 
 /// Read a captured chain fixture. **Panics** when it is not there, or when its
@@ -2854,9 +2941,9 @@ fn chain_fixture_minted_only_fields_are_absent_on_a_vendor_capture() {
     );
 }
 
-/// `latest_signal` is the highest-block signal (the one `confirmations` derives
-/// from) and `earliest_block_time` the minimum across all signals — both scan
-/// every entry rather than trusting the capture's order.
+/// `latest_signal` announces the highest-`targetVersionId` update — the one
+/// `confirmations` derives from — and `earliest_block_time` is the minimum across
+/// all signals. Both scan every entry rather than trusting the capture's order.
 #[test]
 fn chain_fixture_latest_signal_and_earliest_block_time_scan_every_signal() {
     let fixture = read_chain_fixture("minted/clean-rotating-beacons");
@@ -2865,29 +2952,74 @@ fn chain_fixture_latest_signal_and_earliest_block_time_scan_every_signal() {
         "the clean scenario announces three updates"
     );
 
-    let highest = fixture
-        .signals
-        .iter()
-        .map(|s| s.block_height)
-        .max()
-        .expect("signals is non-empty");
+    // The capture is not in height order, so a `latest_signal` that trusted the
+    // recorded order would pick the wrong one.
+    let heights: Vec<u32> = fixture.signals.iter().map(|s| s.block_height).collect();
+    let mut sorted = heights.clone();
+    sorted.sort_unstable();
+    assert_ne!(
+        heights, sorted,
+        "this fixture's signals are deliberately not in height order, which is what \
+         makes the scan load-bearing: {heights:?}"
+    );
+
+    let applied = fixture
+        .applied_update_hash()
+        .expect("a minted fixture carries its own sidecar");
+    let signal = fixture
+        .latest_signal()
+        .expect("the clean scenario announces every update it minted");
+    assert_eq!(
+        signal.update_hash, applied,
+        "the signal is chosen by which update it announces — the resolver's rule — \
+         not by which block it sits in"
+    );
+
+    // On this fixture the two rules agree, which `assert_signals_consistent`
+    // requires of every fixture; asserted here too so the agreement is stated
+    // where the accessor is tested.
+    let highest = heights.iter().copied().max().expect("signals is non-empty");
+    assert_eq!(signal.block_height, highest);
+
     let earliest = fixture
         .signals
         .iter()
         .map(|s| s.block_time)
         .min()
         .expect("signals is non-empty");
-
-    assert_eq!(
-        fixture.latest_signal().map(|s| s.block_height),
-        Some(highest)
-    );
     assert_eq!(fixture.earliest_block_time(), Some(earliest));
 
     // And on an empty signal set both are `None` rather than a panic.
     let empty = chain_fixture_envelope(serde_json::json!([]), serde_json::json!({}));
     assert!(empty.latest_signal().is_none());
     assert!(empty.earliest_block_time().is_none());
+}
+
+/// A capture in which a later version confirmed in an EARLIER block fails as a
+/// fixture problem, naming the two blocks, rather than surfacing later as a
+/// confirmations mismatch that points at the resolver.
+#[test]
+#[should_panic(expected = "not ordered by version and height alike")]
+fn chain_fixture_rejects_signals_whose_version_and_height_order_disagree() {
+    let mut fixture = read_chain_fixture("minted/clean-rotating-beacons");
+    let applied = fixture
+        .applied_update_hash()
+        .expect("a minted fixture carries its own sidecar");
+    let lowest = fixture
+        .signals
+        .iter()
+        .map(|signal| signal.block_height)
+        .min()
+        .expect("signals is non-empty");
+
+    // Move the last update's announcement below every earlier one, the way a
+    // reorg or a mempool race on a public chain would.
+    for signal in &mut fixture.signals {
+        if signal.update_hash == applied {
+            signal.block_height = lowest - 1;
+        }
+    }
+    assert_version_and_height_agree(&fixture, "minted/clean-rotating-beacons", "<rerun>");
 }
 
 /// An absent fixture stops the suite and the message says how to make it exist.

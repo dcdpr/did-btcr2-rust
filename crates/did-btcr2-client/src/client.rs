@@ -296,10 +296,13 @@ impl<T: BtcTransport> Client<T> {
     /// broadcast bytes are identical).
     pub fn broadcast(&self, tx: &SignedBeaconTx) -> Result<Txid, Error> {
         let raw = esploda::bitcoin::consensus::encode::serialize(tx.as_tx());
-        let hex = hex_encode(&raw);
+        // The txid is computed from the bytes about to go on the wire, not read
+        // back off the answer, so the cross-check below has something the
+        // endpoint did not supply to compare against.
+        let local = tx.as_tx().txid();
 
         let req = http::Request::post(format!("{}/tx", self.base_url))
-            .body(hex.into_bytes())
+            .body(hex_encode(&raw).into_bytes())
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
 
         let resp = self.transport.execute(req)?;
@@ -314,7 +317,6 @@ impl<T: BtcTransport> Client<T> {
         // page, or a *different* txid cannot masquerade as a successful broadcast
         // (a false success would tell the caller the DID update landed when it did
         // not). A mismatch or unparseable body is a typed BroadcastRejected.
-        let local = tx.as_tx().txid();
         let body = String::from_utf8_lossy(resp.body());
         let returned: Txid = body.trim().parse().map_err(|_| Error::BroadcastRejected {
             body: body.clone().into_owned(),
@@ -1009,6 +1011,58 @@ mod tests {
             client.transport.post_tx_count(),
             1,
             "the broadcast was attempted before rejection"
+        );
+    }
+
+    #[test]
+    fn a_reconstituted_announcement_relays_under_its_own_txid() {
+        // A caller that must survive a crash between "the transaction reached
+        // the network" and "the caller was told so" persists the announcement
+        // BEFORE it relays it, and then holds only the bytes. Reading those bytes
+        // back through `SignedBeaconTx` yields the SAME transaction — same txid —
+        // so re-relaying it is not a second announcement.
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://fake".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let signed = doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
+            .expect("a signed update constructs against the genesis document");
+        let tx = client
+            .build_update_tx(
+                &doc,
+                signed,
+                1,
+                Fee::Absolute(1_000),
+                None,
+                test_secret_key(),
+            )
+            .expect("the announcement builds");
+        let expected = tx.as_tx().txid();
+        let raw = esploda::bitcoin::consensus::encode::serialize(tx.as_tx());
+
+        let first = client.broadcast(&tx).expect("the first relay is accepted");
+
+        let read_back: esploda::bitcoin::Transaction =
+            esploda::bitcoin::consensus::encode::deserialize(&raw)
+                .expect("the retained bytes decode to a transaction");
+        let reconstituted =
+            SignedBeaconTx::try_from(read_back).expect("and back to a beacon announcement");
+        let again = client
+            .broadcast(&reconstituted)
+            .expect("re-relaying the same bytes is accepted");
+
+        assert_eq!(first, expected);
+        assert_eq!(
+            again, expected,
+            "a re-relay announces the SAME transaction, so a resume cannot fork the \
+             DID it is completing"
+        );
+        assert_eq!(
+            client.transport.post_tx_count(),
+            2,
+            "both relays went out; the node decides what to do with the second"
         );
     }
 

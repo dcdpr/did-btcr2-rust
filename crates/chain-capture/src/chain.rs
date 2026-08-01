@@ -20,9 +20,10 @@
 // `warn_if_frozen_tip_moved`, which belong together as a session-start notice
 // (read the live tip, say so if the vendor captures were measured against a
 // different one) and need a tip reader on the operations trait to be callable
-// from behind it. Remove this attribute with that notice; a binary crate reports
-// an item with no non-test caller as dead.
-#![allow(dead_code)]
+// from behind it. Each carries its own `allow(dead_code)` and drops it with that
+// notice — deliberately NOT one attribute at module scope, which would suppress
+// the lint for every item in this file to accommodate those two, and let the next
+// unwired helper land in the crate's largest module unremarked.
 
 use base64::Engine as _;
 use did_btcr2_client::{
@@ -36,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::fixture::{self, ChainFixture};
+use crate::secret::Secret;
 use crate::targets;
 
 /// Blocks that must be mined before a coinbase output is spendable. Bitcoin
@@ -125,7 +127,7 @@ pub enum ChainError {
     /// A block was about to be produced while a vendor regtest capture is
     /// missing. See [`guard_vendor_captures_complete`].
     #[error(
-        "refusing to mine on regtest: the vendor confirmations expectations (93 / 78 / 65 / 53) all derive from one frozen tip, and these captures are not written yet: {missing}. Capture them first:\n  cargo run -p chain-capture -- capture --network regtest --esplora-url <url>\nSee crates/chain-capture/RUNBOOK.md Part 1."
+        "refusing to mine on regtest: every vendor regtest vector's stated confirmations derives from one frozen tip, and these captures are not written yet: {missing}. Capture them first:\n  cargo run -p chain-capture -- capture --network regtest --esplora-url <url>\nSee crates/chain-capture/RUNBOOK.md Part 1."
     )]
     VendorCaptureOutstanding {
         /// The outstanding vector ids, comma-separated.
@@ -216,9 +218,18 @@ pub trait ChainOps {
 pub struct BitcoindRpc<T: BtcTransport> {
     transport: T,
     url: String,
-    /// `"Basic <base64(user:pass)>"`. NEVER logged: the manual `Debug` impl below
-    /// renders it redacted, and no error variant carries it.
-    auth: String,
+    /// `"Basic <base64(user:pass)>"`. NEVER logged: [`Secret`]'s own `Debug`
+    /// renders it redacted, the manual `Debug` impl below does too, and no error
+    /// variant carries it.
+    ///
+    /// The header has to live for the whole session — every RPC call re-sends
+    /// it — so it is held rather than rebuilt, and held in the type that
+    /// overwrites its bytes when the client is dropped. What that does NOT reach
+    /// is the base64 `String` the encoder returns on the way in: overwriting a
+    /// `String`'s buffer needs `unsafe`, which this crate forbids, so that one
+    /// heap copy is freed intact. Stated rather than left for a reader to
+    /// discover.
+    auth: Secret,
     /// Where the vendor captures this client refuses to mine over are expected to
     /// be. Carried on the client so the guard is exercised against a scratch tree
     /// in tests without reaching for process-wide state.
@@ -240,14 +251,14 @@ impl<T: BtcTransport> std::fmt::Debug for BitcoindRpc<T> {
 
 impl<T: BtcTransport> BitcoindRpc<T> {
     /// Build a client for `url`, authenticating with `user_pass` (`user:password`).
-    pub fn new(transport: T, url: String, user_pass: &str) -> Self {
+    pub fn new(transport: T, url: String, user_pass: &Secret) -> Self {
         Self {
             transport,
             url,
-            auth: format!(
+            auth: Secret::from_exposed(&format!(
                 "Basic {}",
-                base64::engine::general_purpose::STANDARD.encode(user_pass)
-            ),
+                base64::engine::general_purpose::STANDARD.encode(user_pass.expose())
+            )),
             fixture_root: fixture::fixture_root(),
         }
     }
@@ -274,7 +285,7 @@ impl<T: BtcTransport> BitcoindRpc<T> {
             "params": params,
         }))?;
         let request = http::Request::post(self.url.as_str())
-            .header(http::header::AUTHORIZATION, self.auth.as_str())
+            .header(http::header::AUTHORIZATION, self.auth.expose())
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(body)
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
@@ -320,6 +331,7 @@ impl<T: BtcTransport> BitcoindRpc<T> {
     }
 
     /// Current chain height.
+    #[allow(dead_code)] // Unwired: feeds the session-start notice, which is not built yet.
     pub fn get_block_count(&self) -> Result<u32, ChainError> {
         let result = self.call("getblockcount", json!([]))?;
         result
@@ -404,13 +416,16 @@ fn vendor_regtest_vectors() -> impl Iterator<Item = &'static str> {
 
 /// Refuse to produce a block while any vendor regtest capture is outstanding.
 ///
-/// A correctness constraint rather than a preference: the four vendor regtest
-/// vectors state `confirmations` 93 / 78 / 65 / 53, all measured against ONE
-/// frozen tip, and the shipped regtest chain is exported with `autoMineMode: 0`
-/// so it does not drift. Mining raises the tip and silently invalidates all four
-/// expectations at once, and they cannot be re-derived. The upstream regtest
-/// README even offers "mine six blocks" as a troubleshooting step — this guard is
-/// what makes that advice unable to destroy the phase's inputs.
+/// A correctness constraint rather than a preference: every vendor regtest
+/// vector states a `confirmations` count measured against ONE frozen tip, and
+/// the shipped regtest chain is exported with `autoMineMode: 0` so it does not
+/// drift. Mining raises the tip and silently invalidates all of those
+/// expectations at once, and they cannot be re-derived. The counts themselves
+/// are read from the vector files at runtime (`targets::load`) and are
+/// deliberately not restated here or in the refusal message: a restated number
+/// goes stale the moment an upstream vector changes, and nothing would fail. The
+/// upstream regtest README even offers "mine six blocks" as a troubleshooting
+/// step — this guard is what makes that advice unable to destroy those inputs.
 ///
 /// The root is a parameter so both branches are testable against a scratch tree,
 /// and so a client can be pointed at the tree it is actually guarding.
@@ -431,14 +446,20 @@ pub fn guard_vendor_captures_complete(fixture_root: &Path) -> Result<(), ChainEr
 
 /// Warn when the live tip no longer matches the tip the vendor fixtures recorded.
 ///
-/// Not an error: once those fixtures are written their expectations are frozen
-/// into them, so a moved tip cannot retroactively break them. It does mean the
-/// chain has already been advanced, which the operator should know before
-/// concluding anything from a later re-capture. Called once at session start, not
-/// per mine — a minting session moves the tip on purpose.
+/// NOT WIRED UP. It is intended as a session-start notice — read the live tip
+/// once, say so if the vendor captures were measured against a different one, and
+/// never per mine, because a minting session moves the tip on purpose. Reaching it
+/// from behind [`ChainOps`] needs a tip reader on that trait, which does not exist
+/// yet (see the module header). Today it is exercised only by its own unit tests.
+///
+/// Not an error when it does ship: once those fixtures are written their
+/// expectations are frozen into them, so a moved tip cannot retroactively break
+/// them. It does mean the chain has already been advanced, which the operator
+/// should know before concluding anything from a later re-capture.
 ///
 /// A fixture that is absent or unreadable is skipped: this is a courtesy warning,
 /// and the refusal that actually protects the captures is the mine guard.
+#[allow(dead_code)] // Unwired: the session-start notice this belongs to is not built yet.
 pub fn warn_if_frozen_tip_moved(fixture_root: &Path, live_tip: u32) -> Option<String> {
     let moved: Vec<String> = vendor_regtest_vectors()
         .filter_map(|id| {
@@ -735,7 +756,7 @@ pub fn ops_for(
     network: &str,
     esplora_base: String,
     bitcoind_url: Option<String>,
-    bitcoind_auth: Option<String>,
+    bitcoind_auth: Option<Secret>,
 ) -> Result<Box<dyn ChainOps>, ChainError> {
     if network == "regtest" {
         let (Some(url), Some(auth)) = (bitcoind_url, bitcoind_auth) else {
@@ -1019,8 +1040,12 @@ mod tests {
     }
 
     fn rpc(fake: FakeChain, root: PathBuf) -> BitcoindRpc<FakeChain> {
-        BitcoindRpc::new(fake, "http://127.0.0.1:18443".to_string(), "user:secret")
-            .with_fixture_root(root)
+        BitcoindRpc::new(
+            fake,
+            "http://127.0.0.1:18443".to_string(),
+            &Secret::from_exposed("user:secret"),
+        )
+        .with_fixture_root(root)
     }
 
     #[test]
@@ -1036,6 +1061,12 @@ mod tests {
         let seen = fake.requests();
         assert_eq!(seen.len(), 1, "one call, one request: {seen:?}");
         assert_eq!(seen[0].method, "POST");
+        assert_eq!(
+            seen[0].path, "/",
+            "the JSON-RPC call posts to the node URL as given, appending no path \
+             of its own — unlike the Esplora half of this transport, which builds \
+             /tx and /address/../utxo onto its base"
+        );
         assert_eq!(
             seen[0].authorization.as_deref(),
             Some("Basic dXNlcjpzZWNyZXQ="),
@@ -1216,6 +1247,47 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn the_mine_refusal_restates_no_number_it_reads_from_the_vectors() {
+        // The vector files carry the confirmations counts and `targets::load`
+        // reads them at runtime, so a count copied into this message would state
+        // something no longer true the moment an upstream vector changed — and
+        // nothing would fail. The refusal is asserted to name the vectors and the
+        // remedy, and NOT any of the numbers.
+        if !targets::test_suite_root()
+            .join("regtest/k1/qgppexmy/resolve/input.json")
+            .exists()
+        {
+            eprintln!("SKIP: test-suite submodule absent");
+            return;
+        }
+        let ids: Vec<&'static str> = vendor_regtest_vectors().collect();
+        let rendered = ChainError::VendorCaptureOutstanding {
+            missing: ids.join(", "),
+        }
+        .to_string();
+
+        for id in &ids {
+            let target = targets::load(id).expect("a drivable vector loads");
+            let Some(confirmations) = target.expected_confirmations else {
+                continue;
+            };
+            assert!(
+                !rendered.contains(&confirmations.to_string()),
+                "the refusal restates `{id}`'s confirmations ({confirmations}), which it \
+                 does not read: {rendered}"
+            );
+            assert!(
+                rendered.contains(id),
+                "the refusal names the outstanding vector: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("frozen tip") && rendered.contains("capture --network regtest"),
+            "the refusal still says why it refuses and what fixes it: {rendered}"
+        );
     }
 
     #[test]
@@ -1533,7 +1605,7 @@ mod tests {
         for (url, auth) in [
             (None, None),
             (Some("http://127.0.0.1:18443".to_string()), None),
-            (None, Some("user:pass".to_string())),
+            (None, Some(Secret::from_exposed("user:pass"))),
         ] {
             let error = ops_for("regtest", "http://localhost:3000".to_string(), url, auth)
                 .err()
@@ -1567,7 +1639,7 @@ mod tests {
             "testnet4",
             "http://localhost:3002".to_string(),
             Some("http://127.0.0.1:18443".to_string()),
-            Some("user:pass".to_string()),
+            Some(Secret::from_exposed("user:pass")),
         )
         .expect("an ignored flag is not a failure");
         assert_eq!(ops.network(), "testnet4");

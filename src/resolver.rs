@@ -2857,7 +2857,10 @@ mod tests {
         assert_eq!(
             latest.block_height,
             heights.iter().copied().max().expect("three heights"),
-            "{id}: `latest_signal` must be the highest-block announcement"
+            "{id}: the announcement carrying the last update must also be the one in \
+             the highest block — the fixture reader requires the two orders to agree, \
+             so a divergence is a fixture problem and not something to assert around \
+             here"
         );
         assert_eq!(
             result.document_metadata.confirmations,

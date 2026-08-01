@@ -372,13 +372,28 @@ and the state files outside both working trees is the primary control; the
 `*.hex` and `*-state.json` entries in both `.gitignore` files are defence in
 depth, for the operator who puts them in the working directory anyway.
 
+Put the node's RPC credential in a file beside it, rather than on the command
+line:
+
+```sh
+printf 'polaruser:polarpass' > ~/.btcr2-mint/bitcoind.auth
+chmod 600 ~/.btcr2-mint/bitcoind.auth
+```
+
+`--bitcoind-auth <user:pass>` still works and is fine for a regtest stack whose
+credential is a published fixture, but the value sits in `/proc/<pid>/cmdline`
+for the life of the process — readable by any user on the machine — lands in
+shell history, and shows up in `ps`. On every chain past this one, use
+`--bitcoind-auth-file`. Naming both is refused rather than silently resolved.
+
 #### 2. Run the scenario
 
 ```sh
 cargo run -q -p chain-capture -- \
   mint --scenario clean --network regtest \
   --esplora-url http://localhost:3000 \
-  --bitcoind-url http://127.0.0.1:18443 --bitcoind-auth polaruser:polarpass \
+  --bitcoind-url http://127.0.0.1:18443 \
+  --bitcoind-auth-file ~/.btcr2-mint/bitcoind.auth \
   --key-file ~/.btcr2-mint/clean.hex \
   --state-file ~/.btcr2-mint/clean-state.json --fee 1000
 ```
@@ -441,7 +456,8 @@ chmod 600 ~/.btcr2-mint/poisoned.hex
 cargo run -q -p chain-capture -- \
   mint --scenario poisoned --network regtest \
   --esplora-url http://localhost:3000 \
-  --bitcoind-url http://127.0.0.1:18443 --bitcoind-auth polaruser:polarpass \
+  --bitcoind-url http://127.0.0.1:18443 \
+  --bitcoind-auth-file ~/.btcr2-mint/bitcoind.auth \
   --key-file ~/.btcr2-mint/poisoned.hex \
   --state-file ~/.btcr2-mint/poisoned-state.json --fee 1000
 ```

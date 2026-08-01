@@ -18,6 +18,10 @@ pub struct ChainFixture {
     pub captured_at: String,
     /// Esplora base URL the bodies came from. The base URL ONLY: no credential
     /// ever belongs in a committed fixture.
+    ///
+    /// Enforced rather than asserted: `targets::endpoint` refuses a userinfo
+    /// component or a query string before a session issues its first request, so
+    /// a credential-bearing endpoint cannot reach this field.
     pub endpoint: String,
     /// `"regtest"` / `"mutinynet"` / `"testnet4"` / `"signet"`. Recorded, never
     /// assumed: the minted scenarios are re-minted on successively more durable
@@ -108,17 +112,13 @@ pub fn fixture_root() -> PathBuf {
 ///
 /// An id that is empty, absolute, or contains a `..` (or `.`) segment is
 /// rejected before anything is joined, so a hostile or fat-fingered
-/// `--vector ../../../etc/x` cannot reach outside the fixture root.
-pub fn fixture_path(vector: &str) -> Result<PathBuf, FixtureError> {
-    fixture_path_in(&fixture_root(), vector)
-}
-
-/// [`fixture_path`] against an explicit root, so a caller that has to ask "is this
-/// capture written yet?" can be exercised against a scratch tree instead of the
-/// repository's own.
+/// `--vector ../../../etc/x` cannot reach outside the root. The check lives
+/// only here, so no caller can join an unchecked id onto any root.
 ///
-/// The id check is identical and lives only here, so no caller can join an
-/// unchecked id onto any root.
+/// Every caller passes a root — the repository's own comes from
+/// [`fixture_root`] — so no destination is ever derived from an ambient
+/// default, and a caller whose write semantics need testing can be pointed at a
+/// scratch tree.
 pub fn fixture_path_in(root: &Path, vector: &str) -> Result<PathBuf, FixtureError> {
     let relative = Path::new(vector);
     let mut segments = 0usize;
@@ -136,11 +136,13 @@ pub fn fixture_path_in(root: &Path, vector: &str) -> Result<PathBuf, FixtureErro
     Ok(root.join(format!("{vector}.json")))
 }
 
-/// Serialize `fixture` and write it to its derived path atomically.
+/// Serialize `fixture` and write it under `root` atomically.
 ///
-/// The destination comes from [`fixture_path`] applied to the fixture's own
-/// `vector` field — the caller passes no path, so the id in the data and the id
-/// in the filename cannot disagree.
+/// The filename comes from the fixture's own `vector` field — the caller passes
+/// a root but never a path, so the id in the data and the id in the filename
+/// cannot disagree. The id check lives in [`fixture_path_in`], so no root
+/// shortens it, and a caller whose write semantics need testing can be pointed
+/// at a scratch tree instead of this repository's fixture directory.
 ///
 /// The full JSON body is built in memory, written to `<path>.tmp`, then renamed
 /// over the target. Rename is atomic on the same filesystem, so an interrupted
@@ -150,14 +152,14 @@ pub fn fixture_path_in(root: &Path, vector: &str) -> Result<PathBuf, FixtureErro
 /// Bodies are stored pretty-printed and parsed — never trimmed. A re-capture
 /// then produces a reviewable line-oriented diff, and whatever the endpoint
 /// returned is what is stored.
-pub fn write_atomic(fixture: &ChainFixture) -> Result<PathBuf, FixtureError> {
-    let path = fixture_path(&fixture.vector)?;
+pub fn write_atomic_in(root: &Path, fixture: &ChainFixture) -> Result<PathBuf, FixtureError> {
+    let path = fixture_path_in(root, &fixture.vector)?;
     write_atomic_to(&path, fixture)?;
     Ok(path)
 }
 
-/// [`write_atomic`]'s body against an explicit destination, so the write
-/// semantics are testable without touching the repository's fixture tree.
+/// [`write_atomic_in`]'s body against a fully resolved destination, so the
+/// rename semantics can be exercised on a path no vector id maps to.
 fn write_atomic_to(path: &Path, fixture: &ChainFixture) -> Result<(), FixtureError> {
     let body = serde_json::to_string_pretty(fixture)?;
     if let Some(parent) = path.parent() {
@@ -281,13 +283,14 @@ mod tests {
 
     #[test]
     fn fixture_path_mirrors_the_test_suite_tree() {
-        let path = fixture_path("regtest/k1/qgppexmy").expect("a plain vector id is accepted");
+        let path = fixture_path_in(&fixture_root(), "regtest/k1/qgppexmy")
+            .expect("a plain vector id is accepted");
         assert_eq!(path, fixture_root().join("regtest/k1/qgppexmy.json"));
     }
 
     #[test]
     fn fixture_path_maps_a_minted_scenario_name() {
-        let path = fixture_path("minted/clean-rotating-beacons")
+        let path = fixture_path_in(&fixture_root(), "minted/clean-rotating-beacons")
             .expect("a minted scenario name is accepted");
         assert_eq!(
             path,
@@ -304,7 +307,7 @@ mod tests {
             "regtest/../../../etc/x",
             "./regtest/k1/qgppexmy",
         ] {
-            let error = fixture_path(bad)
+            let error = fixture_path_in(&fixture_root(), bad)
                 .err()
                 .unwrap_or_else(|| panic!("`{bad}` must be rejected, not joined onto the root"));
             assert!(
@@ -366,22 +369,46 @@ mod tests {
 
     #[test]
     fn write_atomic_derives_its_destination_from_the_fixture() {
+        // Named for `write_atomic_in`, so it calls it: the caller passes a root
+        // and never a path, and the filename has to come from the fixture's own
+        // vector id. Asserting the derivation alone would leave the function the
+        // test is named after unexercised, and the id in the data could drift
+        // from the id in the filename without this failing.
+        let root = scratch_dir("derived-destination");
         let fixture = sample_fixture();
+
+        let written = write_atomic_in(&root, &fixture).expect("the sample fixture is written");
         assert_eq!(
-            fixture_path(&fixture.vector).expect("the sample id is safe"),
-            fixture_root().join("regtest/k1/qgppexmy.json"),
-            "write_atomic must target the path derived from the fixture's own vector id"
+            written,
+            root.join("regtest/k1/qgppexmy.json"),
+            "the write targets the path derived from the fixture's own vector id"
         );
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&written).expect("the fixture is there"))
+                .expect("the fixture is JSON");
+        assert_eq!(
+            body["vector"],
+            json!(fixture.vector),
+            "the id in the filename and the id in the data cannot disagree"
+        );
+
+        std::fs::remove_dir_all(&root).expect("scratch directory is removable");
     }
 
     #[test]
     fn write_atomic_rejects_an_unsafe_vector_id_without_writing() {
+        let root = scratch_dir("unsafe-id");
         let mut fixture = sample_fixture();
         fixture.vector = "../escape".to_string();
-        let error = write_atomic(&fixture).expect_err("an unsafe id must not be written");
+        let error = write_atomic_in(&root, &fixture).expect_err("an unsafe id must not be written");
         assert!(
             matches!(error, FixtureError::UnsafeVectorId(_)),
             "got: {error}"
         );
+        assert!(
+            !root.join("../escape.json").exists(),
+            "the id is refused before anything is joined onto the root"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

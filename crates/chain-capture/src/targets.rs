@@ -141,6 +141,18 @@ pub enum TargetError {
         #[source]
         source: did_btcr2_client::Error,
     },
+
+    /// The Esplora base URL carries something that must not be recorded.
+    ///
+    /// Names the FLAG and the part that is unusable, never the URL: the whole
+    /// point is that the value may be a credential.
+    #[error(
+        "--esplora-url carries {part}, and every capture and minting session records its base URL verbatim into a fixture this repository commits and into the state file beside it — so a credential in the endpoint would be published. Pass the base URL alone (scheme, host, port and path) and supply the credential another way, such as a local proxy that adds it"
+    )]
+    CredentialInEndpoint {
+        /// Which part is unusable: `a userinfo component` or `a query string`.
+        part: &'static str,
+    },
 }
 
 /// Absolute path of the nested `test-suite/` submodule.
@@ -176,11 +188,53 @@ pub fn network_from_dir(name: &str) -> Result<Network, TargetError> {
 /// `--esplora-url`. Neither has a hosted public Esplora this project has
 /// confirmed, so there is deliberately no fallback — a fallback would silently
 /// capture a different chain than the operator named.
+/// The resolved URL is then checked for anything that must not be recorded (see
+/// [`reject_credential_in_endpoint`]).
 pub fn endpoint(network: &str, override_url: Option<String>) -> Result<String, TargetError> {
-    resolve_base_url(Some(network), override_url).map_err(|source| TargetError::Endpoint {
-        network: network.to_string(),
-        source,
-    })
+    let url =
+        resolve_base_url(Some(network), override_url).map_err(|source| TargetError::Endpoint {
+            network: network.to_string(),
+            source,
+        })?;
+    reject_credential_in_endpoint(&url)?;
+    Ok(url)
+}
+
+/// Refuse a base URL that carries a credential.
+///
+/// `resolve_base_url` returns an operator's `--esplora-url` verbatim — only a
+/// trailing slash is trimmed — and both sessions RECORD that value: a capture
+/// writes it into `endpoint` in a fixture this repository commits, and a minting
+/// session writes it there and into the state file. The fixture field's own
+/// documentation says no credential ever belongs in a committed fixture, and
+/// nothing enforced it. An endpoint of the form `https://user:token@host/api` or
+/// `https://host/api?apikey=…` would publish that credential into git.
+///
+/// Refused rather than quietly stripped, so an operator who passed a credential
+/// learns it was in scope instead of watching the endpoint answer 401. Refused
+/// here, before a single request goes out, rather than at the write: a capture
+/// taken against an endpoint whose URL could not be recorded anyway is a session
+/// spent for nothing.
+fn reject_credential_in_endpoint(url: &str) -> Result<(), TargetError> {
+    // Hand-parsed rather than through a URI type: only two components matter,
+    // and the check must not depend on a parser accepting the whole URL — an
+    // endpoint this rejected for being unparseable would be one an operator
+    // could not diagnose from the message, which names no part of the value.
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    if after_scheme[..authority_end].contains('@') {
+        return Err(TargetError::CredentialInEndpoint {
+            part: "a userinfo component",
+        });
+    }
+    if after_scheme[authority_end..].contains('?') {
+        return Err(TargetError::CredentialInEndpoint {
+            part: "a query string",
+        });
+    }
+    Ok(())
 }
 
 /// One vector's capture target: what to resolve, what to resolve it with, and
@@ -847,6 +901,50 @@ mod tests {
                 .expect("an override resolves"),
             "http://localhost:3002"
         );
+    }
+
+    #[test]
+    fn an_endpoint_carrying_a_credential_is_refused_before_any_request() {
+        // Every session records its base URL verbatim into a fixture this
+        // repository commits and into the state file beside it, so an
+        // authenticated endpoint would publish the credential. Nothing enforced
+        // the fixture field's own "no credential ever belongs in a committed
+        // fixture", and both committed endpoints being clean made it latent.
+        for (url, part) in [
+            ("https://user:token@esplora.example/api", "userinfo"),
+            ("https://token@esplora.example/api", "userinfo"),
+            ("https://esplora.example/api?apikey=abc123", "query"),
+            ("http://u:p@localhost:3000", "userinfo"),
+        ] {
+            let error = endpoint("regtest", Some(url.to_string()))
+                .expect_err("an endpoint carrying a credential must not be recorded");
+            assert!(
+                matches!(error, TargetError::CredentialInEndpoint { .. }),
+                "`{url}` must be refused as a credential-bearing endpoint, got {error:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(part) && message.contains("--esplora-url"),
+                "the refusal names the part and the flag: {message}"
+            );
+            assert!(
+                !message.contains("token")
+                    && !message.contains("abc123")
+                    && !message.contains("esplora.example"),
+                "the refusal must not echo the value it is refusing: {message}"
+            );
+        }
+
+        // The shapes this project actually uses stay accepted, including a port,
+        // a path and a trailing slash.
+        for url in [
+            "http://localhost:3000",
+            "https://mutinynet.com/api",
+            "http://127.0.0.1:3002/api/",
+        ] {
+            endpoint("regtest", Some(url.to_string()))
+                .unwrap_or_else(|e| panic!("`{url}` is a plain base URL and must resolve: {e}"));
+        }
     }
 
     #[test]

@@ -28,9 +28,11 @@ mod chain;
 mod fixture;
 mod mint;
 mod record;
+mod secret;
 mod targets;
 mod validate;
 
+use crate::secret::Secret;
 use error_iter::ErrorIter as _;
 use onlyargs::{CliError, OnlyArgs, traits::*};
 use onlyerror::Error;
@@ -65,8 +67,15 @@ enum Command {
         /// bitcoind JSON-RPC endpoint. Required for a chain the tool must mine
         /// on (regtest); unused on a chain that mines itself.
         bitcoind_url: Option<String>,
-        /// `user:password` for that endpoint's HTTP basic auth.
+        /// `user:password` for that endpoint's HTTP basic auth, given inline.
+        ///
+        /// Kept for a disposable local regtest, where the credential is a
+        /// fixture. An argv value is readable by any user's `ps` for the life of
+        /// the process and lands in shell history, so
+        /// `bitcoind_auth_file` is the documented form.
         bitcoind_auth: Option<String>,
+        /// A file holding `user:password` for that endpoint.
+        bitcoind_auth_file: Option<PathBuf>,
         /// Secret key file (raw 32-byte lowercase hex) controlling the minted
         /// DIDs.
         key_file: PathBuf,
@@ -111,51 +120,86 @@ enum CaptureRunError {
 
     /// The minting session failed.
     Mint(#[from] mint::MintError),
+
+    /// The node credential was named twice, inline and in a file.
+    #[error(
+        "--bitcoind-auth and --bitcoind-auth-file both name a credential ({path}) — pass one. Prefer the file: a value passed as an argument is readable in /proc/<pid>/cmdline by any user for the life of the process, lands in shell history, and appears in `ps`"
+    )]
+    AmbiguousBitcoindAuth {
+        /// The credential file that was also named.
+        path: String,
+    },
+
+    /// The credential file could not be read. Names the path, never a byte of
+    /// what it holds.
+    #[error("{path}: --bitcoind-auth-file could not be read")]
+    CredentialFileUnreadable {
+        /// The file that was named.
+        path: String,
+        /// Why it could not be read.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The credential file held nothing usable.
+    #[error("{path}: --bitcoind-auth-file is empty — it must hold `user:password`")]
+    CredentialFileEmpty {
+        /// The file that was named.
+        path: String,
+    },
 }
+
+/// The help text, as a value rather than a side effect, so a test can assert
+/// what it tells an operator about the two ways to supply a node credential.
+const HELP_TEXT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    " v",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "Capture chain fixtures for did:btcr2 replay tests, and mint the\n",
+    "scenarios those fixtures record.\n\n",
+    "Usage:\n  chain-capture [flags] <command> [command args]\n",
+    "\nFlags:\n",
+    "  -h --help     Show this help message.\n",
+    "  -V --version  Show the application version.\n",
+    "\nCommands:\n",
+    "  capture                      Record per-address transaction bodies and the\n",
+    "                               chain tip into fixtures/chain/.\n",
+    "    --network <net>             REQUIRED. regtest | mutinynet | testnet4 |\n",
+    "                                signet. There is no default: every chain\n",
+    "                                produces different txids, heights and block\n",
+    "                                times, so the chain is never implied.\n",
+    "    --esplora-url <url>         Esplora base URL (no trailing slash). Required\n",
+    "                                for a chain with no public endpoint (regtest).\n",
+    "    --vector <id>               Capture one vector (e.g. regtest/k1/qgppexmy)\n",
+    "                                instead of every drivable one.\n",
+    "\n",
+    "  mint                         Publish a scenario onto a chain so there is real\n",
+    "                               chain data to capture.\n",
+    "    --scenario <name>           REQUIRED. clean | poisoned.\n",
+    "    --network <net>             REQUIRED. Same values as capture; no default.\n",
+    "    --esplora-url <url>         Esplora base URL (no trailing slash).\n",
+    "    --bitcoind-url <url>        bitcoind JSON-RPC endpoint. Required on a chain\n",
+    "                                the tool must mine on (regtest).\n",
+    "    --bitcoind-auth-file <file> File holding `user:password` for that endpoint.\n",
+    "                                PREFERRED over --bitcoind-auth.\n",
+    "    --bitcoind-auth <user:pass> HTTP basic auth for that endpoint, inline. The\n",
+    "                                value is readable by any user's `ps` for the\n",
+    "                                life of the process and lands in shell history;\n",
+    "                                use it only on a disposable local chain.\n",
+    "    --key-file <file>           REQUIRED. Secret key controlling the minted\n",
+    "                                DIDs (raw 32-byte lowercase hex).\n",
+    "    --state-file <file>         REQUIRED. Minting progress, so an interrupted\n",
+    "                                session resumes instead of re-announcing.\n",
+    "    --fee <sats>                Absolute fee per announcement (default 1000).\n",
+    "    --yes                       Skip the broadcast confirm prompt.\n",
+);
 
 impl OnlyArgs for Args {
     const VERSION: &'static str = onlyargs::impl_version!();
 
     fn help() -> ! {
-        let help_text = concat!(
-            env!("CARGO_PKG_NAME"),
-            " v",
-            env!("CARGO_PKG_VERSION"),
-            "\n",
-            "Capture chain fixtures for did:btcr2 replay tests, and mint the\n",
-            "scenarios those fixtures record.\n\n",
-            "Usage:\n  chain-capture [flags] <command> [command args]\n",
-            "\nFlags:\n",
-            "  -h --help     Show this help message.\n",
-            "  -V --version  Show the application version.\n",
-            "\nCommands:\n",
-            "  capture                      Record per-address transaction bodies and the\n",
-            "                               chain tip into fixtures/chain/.\n",
-            "    --network <net>             REQUIRED. regtest | mutinynet | testnet4 |\n",
-            "                                signet. There is no default: every chain\n",
-            "                                produces different txids, heights and block\n",
-            "                                times, so the chain is never implied.\n",
-            "    --esplora-url <url>         Esplora base URL (no trailing slash). Required\n",
-            "                                for a chain with no public endpoint (regtest).\n",
-            "    --vector <id>               Capture one vector (e.g. regtest/k1/qgppexmy)\n",
-            "                                instead of every drivable one.\n",
-            "\n",
-            "  mint                         Publish a scenario onto a chain so there is real\n",
-            "                               chain data to capture.\n",
-            "    --scenario <name>           REQUIRED. clean | poisoned.\n",
-            "    --network <net>             REQUIRED. Same values as capture; no default.\n",
-            "    --esplora-url <url>         Esplora base URL (no trailing slash).\n",
-            "    --bitcoind-url <url>        bitcoind JSON-RPC endpoint. Required on a chain\n",
-            "                                the tool must mine on (regtest).\n",
-            "    --bitcoind-auth <user:pass> HTTP basic auth for that endpoint.\n",
-            "    --key-file <file>           REQUIRED. Secret key controlling the minted\n",
-            "                                DIDs (raw 32-byte lowercase hex).\n",
-            "    --state-file <file>         REQUIRED. Minting progress, so an interrupted\n",
-            "                                session resumes instead of re-announcing.\n",
-            "    --fee <sats>                Absolute fee per announcement (default 1000).\n",
-            "    --yes                       Skip the broadcast confirm prompt.\n",
-        );
-        println!("{help_text}");
+        println!("{HELP_TEXT}");
         std::process::exit(0);
     }
 
@@ -252,6 +296,7 @@ fn parse_mint(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command, C
     let mut esplora_url: Option<String> = None;
     let mut bitcoind_url: Option<String> = None;
     let mut bitcoind_auth: Option<String> = None;
+    let mut bitcoind_auth_file: Option<PathBuf> = None;
     let mut key_file: Option<PathBuf> = None;
     let mut state_file: Option<PathBuf> = None;
     let mut fee = DEFAULT_FEE_SATS;
@@ -263,6 +308,9 @@ fn parse_mint(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command, C
             Some(p @ "--esplora-url") => esplora_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--bitcoind-url") => bitcoind_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--bitcoind-auth") => bitcoind_auth = Some(sub_args.next().parse_str(p)?),
+            Some(p @ "--bitcoind-auth-file") => {
+                bitcoind_auth_file = Some(sub_args.next().parse_path(p)?);
+            }
             Some(p @ "--key-file") => key_file = Some(sub_args.next().parse_path(p)?),
             Some(p @ "--state-file") => state_file = Some(sub_args.next().parse_path(p)?),
             Some(p @ "--fee") => fee = sub_args.next().parse_int::<u64, _>(p)?,
@@ -279,6 +327,7 @@ fn parse_mint(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command, C
         esplora_url,
         bitcoind_url,
         bitcoind_auth,
+        bitcoind_auth_file,
         key_file: key_file
             .ok_or_else(|| CliError::MissingRequired(String::from("--key-file <path>")))?,
         state_file: state_file
@@ -311,25 +360,75 @@ fn describe(command: &Command) -> String {
             esplora_url,
             bitcoind_url,
             bitcoind_auth,
+            bitcoind_auth_file,
             key_file,
             state_file,
             fee,
             yes,
         } => format!(
             "mint (scenario={scenario}, network={network}, esplora-url={}, \
-             bitcoind-url={}, bitcoind-auth={}, key-file={}, state-file={}, \
-             fee={fee}, yes={yes})",
+             bitcoind-url={}, bitcoind-auth={}, bitcoind-auth-file={}, key-file={}, \
+             state-file={}, fee={fee}, yes={yes})",
             esplora_url.as_deref().unwrap_or("<default>"),
             bitcoind_url.as_deref().unwrap_or("<unset>"),
-            if bitcoind_auth.is_some() {
-                "<set>"
-            } else {
-                "<unset>"
+            // Presence only, from EITHER source, and never the value. A path is
+            // not a credential, so the file is named; what is in it is not.
+            match (bitcoind_auth.is_some(), bitcoind_auth_file.is_some()) {
+                (true, _) => "<set on the command line>",
+                (false, true) => "<set from file>",
+                (false, false) => "<unset>",
             },
+            bitcoind_auth_file
+                .as_ref()
+                .map_or_else(|| "<unset>".to_string(), |path| path.display().to_string()),
             key_file.display(),
             state_file.display(),
         ),
     }
+}
+
+/// Resolve the node credential from whichever source named it.
+///
+/// The file form is preferred and documented as such: a value passed as
+/// `--bitcoind-auth` sits in `/proc/<pid>/cmdline` — world-readable — for the
+/// life of the process, lands in shell history, and appears in any `ps` an
+/// unrelated user runs. Everything downstream of this point already takes care:
+/// the RPC client's `Debug` is redacted by hand, no error variant carries the
+/// header, and the session summary reports presence rather than the value. The
+/// argument was the weakest link in that chain.
+///
+/// Naming both is refused rather than silently resolved one way: an operator who
+/// passed two credentials should be told which one would have been used.
+///
+/// Both sources come back as a [`Secret`], which holds the value as bytes it
+/// overwrites when it is dropped. The file is read as BYTES for the same reason:
+/// `read_to_string` would put the whole credential file into a `String` that is
+/// freed intact, which is precisely the leak the minting key's loader goes out of
+/// its way to avoid one file over. Two secrets in one crate, one rule.
+fn resolve_bitcoind_auth(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Option<Secret>, CaptureRunError> {
+    let Some(path) = file else {
+        return Ok(inline.as_deref().map(Secret::from_exposed));
+    };
+    if inline.is_some() {
+        return Err(CaptureRunError::AmbiguousBitcoindAuth {
+            path: path.display().to_string(),
+        });
+    }
+    // The path is reported on failure; not one byte of the contents is.
+    let secret =
+        Secret::from_file(&path).map_err(|source| CaptureRunError::CredentialFileUnreadable {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if secret.is_empty() {
+        return Err(CaptureRunError::CredentialFileEmpty {
+            path: path.display().to_string(),
+        });
+    }
+    Ok(Some(secret))
 }
 
 fn run() -> Result<(), CaptureRunError> {
@@ -351,6 +450,7 @@ fn run() -> Result<(), CaptureRunError> {
             esplora_url,
             bitcoind_url,
             bitcoind_auth,
+            bitcoind_auth_file,
             key_file,
             state_file,
             fee,
@@ -360,7 +460,7 @@ fn run() -> Result<(), CaptureRunError> {
             &network,
             esplora_url,
             bitcoind_url,
-            bitcoind_auth,
+            resolve_bitcoind_auth(bitcoind_auth, bitcoind_auth_file)?,
             &key_file,
             &state_file,
             fee,
@@ -472,6 +572,7 @@ mod tests {
             esplora_url,
             bitcoind_url,
             bitcoind_auth,
+            bitcoind_auth_file,
             key_file,
             state_file,
             fee,
@@ -485,6 +586,7 @@ mod tests {
         assert_eq!(esplora_url, None);
         assert_eq!(bitcoind_url, Some("http://127.0.0.1:18443".to_string()));
         assert_eq!(bitcoind_auth, Some("polaruser:polarpass".to_string()));
+        assert_eq!(bitcoind_auth_file, None);
         assert_eq!(key_file, PathBuf::from("k.hex"));
         assert_eq!(state_file, PathBuf::from("s.json"));
         assert_eq!(fee, 1000);
@@ -577,8 +679,157 @@ mod tests {
             "the bitcoind credential must never be echoed: {described}"
         );
         assert!(
-            described.contains("bitcoind-auth=<set>"),
-            "presence of the credential is still reported: {described}"
+            described.contains("bitcoind-auth=<set on the command line>"),
+            "presence of the credential is still reported, and so is the source that \
+             put it in argv: {described}"
+        );
+    }
+
+    /// A scratch directory unique to one test, removed by the test itself.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "chain-capture-main-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch directory is creatable");
+        dir
+    }
+
+    /// A credential that would be conspicuous in any output that leaked it.
+    const CREDENTIAL: &str = "rpcuser:s3cr3t-node-password";
+
+    #[test]
+    fn a_credential_file_is_read_trimmed_and_preferred_to_an_argv_value() {
+        let dir = scratch_dir("auth-file");
+        let path = dir.join("rpc.auth");
+        std::fs::write(&path, format!("  {CREDENTIAL}\n")).expect("the file is writable");
+
+        let parsed = Args::parse(args_from_strings(&[
+            "mint",
+            "--scenario",
+            "clean",
+            "--network",
+            "regtest",
+            "--key-file",
+            "k.hex",
+            "--state-file",
+            "s.json",
+            "--bitcoind-auth-file",
+            &path.display().to_string(),
+        ]))
+        .expect("a mint with a credential file parses");
+        let Command::Mint {
+            bitcoind_auth,
+            bitcoind_auth_file,
+            ..
+        } = &parsed.command
+        else {
+            panic!("expected Mint");
+        };
+        assert_eq!(*bitcoind_auth, None, "no credential is in argv");
+        assert_eq!(bitcoind_auth_file.as_deref(), Some(path.as_path()));
+
+        let resolved = resolve_bitcoind_auth(bitcoind_auth.clone(), bitcoind_auth_file.clone())
+            .expect("the credential file resolves");
+        assert_eq!(
+            resolved.as_ref().map(Secret::expose),
+            Some(CREDENTIAL),
+            "surrounding whitespace is not part of the credential"
+        );
+        assert_eq!(
+            format!("{resolved:?}"),
+            "Some(<redacted>)",
+            "the resolved credential renders redacted, so it cannot reach a log \
+             through a Debug on anything holding it"
+        );
+
+        // The session summary still reports presence and never the value, and it
+        // says which source supplied it.
+        let described = describe(&parsed.command);
+        assert!(
+            !described.contains("s3cr3t-node-password") && !described.contains("rpcuser"),
+            "the credential must never be echoed: {described}"
+        );
+        assert!(
+            described.contains("bitcoind-auth=<set from file>"),
+            "the summary says the credential came from a file: {described}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn naming_the_credential_twice_is_refused_rather_than_resolved_silently() {
+        let dir = scratch_dir("auth-both");
+        let path = dir.join("rpc.auth");
+        std::fs::write(&path, CREDENTIAL).expect("the file is writable");
+
+        let error = resolve_bitcoind_auth(Some(CREDENTIAL.to_string()), Some(path.clone()))
+            .expect_err("two credentials is an ambiguity, not a preference");
+        match &error {
+            CaptureRunError::AmbiguousBitcoindAuth { path: named } => {
+                assert!(named.ends_with("rpc.auth"), "{named}");
+            }
+            other => panic!("expected AmbiguousBitcoindAuth, got {other:?}"),
+        }
+        assert!(
+            !error.to_string().contains(CREDENTIAL),
+            "not even the ambiguity report echoes it: {error}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn an_unusable_credential_file_names_the_path_and_never_its_contents() {
+        let dir = scratch_dir("auth-bad");
+        let empty = dir.join("empty.auth");
+        std::fs::write(&empty, "   \n").expect("the file is writable");
+
+        let error = resolve_bitcoind_auth(None, Some(empty.clone()))
+            .expect_err("an empty credential file is not a credential");
+        assert!(
+            matches!(error, CaptureRunError::CredentialFileEmpty { .. }),
+            "got {error:?}"
+        );
+        assert!(error.to_string().contains("empty.auth"), "{error}");
+
+        let absent = dir.join("absent.auth");
+        let error = resolve_bitcoind_auth(None, Some(absent.clone()))
+            .expect_err("a missing credential file is a failure, not an absent credential");
+        assert!(
+            matches!(error, CaptureRunError::CredentialFileUnreadable { .. }),
+            "got {error:?}"
+        );
+        assert!(error.to_string().contains("absent.auth"), "{error}");
+
+        // With neither source, there is no credential and no failure: a chain
+        // that mines itself needs none.
+        assert!(
+            resolve_bitcoind_auth(None, None)
+                .expect("no credential is not an error")
+                .is_none()
+        );
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn the_help_text_prefers_the_credential_file_and_names_the_argv_exposure() {
+        // The flag stays for a disposable local chain, so the documentation is
+        // what steers an operator on any other one.
+        let help = HELP_TEXT;
+        assert!(help.contains("--bitcoind-auth-file"), "{help}");
+        assert!(
+            help.contains("PREFERRED"),
+            "the file form is marked as preferred: {help}"
+        );
+        assert!(
+            help.contains("shell history") && help.contains("`ps`"),
+            "the inline form's exposure is stated where an operator reads it: {help}"
         );
     }
 

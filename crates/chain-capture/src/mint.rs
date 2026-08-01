@@ -24,13 +24,22 @@
 //! lives only in memory, and never reaches the state file, stdout, stderr, or an
 //! error message — `mint_errors_never_echo_key_bytes` is what proves that rather
 //! than a reviewer reading print statements.
+//!
+//! What that does NOT claim: the seed is held for the session's lifetime as a
+//! `secp256k1::SecretKey`, which is `Copy` and has no scrubbing `Drop`, and it is
+//! passed by value into each announcement build. Every buffer this module owns on
+//! the way there — the bytes read from the key file and the decoded array — is
+//! overwritten before it is dropped, and each update-signing key is a
+//! scrubbing-on-drop [`did_btcr2::key::SecretKey`] built one signature at a time.
+//! Scrubbing the seed itself would need the core's newtype to be usable at the
+//! announcement-signing boundary, which it is not yet.
 
 use chrono::Utc;
-use did_btcr2::Update;
 use did_btcr2::document::{Document, ResolutionOptions, ResolutionResult, SidecarData};
 use did_btcr2::error::Btcr2Error;
 use did_btcr2::identifier::{Did, Network};
 use did_btcr2::key::PublicKey;
+use did_btcr2::{AnnounceError, SignedBeaconTx, Update};
 use did_btcr2_client::{BtcTransport, Client, Fee, Patch, UreqTransport};
 use esploda::bitcoin::Address;
 use onlyerror::Error;
@@ -46,6 +55,7 @@ use std::str::FromStr as _;
 use crate::chain::{self, ChainError, ChainOps};
 use crate::fixture::{self, ChainFixture};
 use crate::record::RecordingTransport;
+use crate::secret::scrub;
 use crate::targets;
 use crate::validate;
 
@@ -121,7 +131,10 @@ pub enum MintError {
     },
 
     /// The operator declined at the confirmation prompt.
-    #[error("declined at the confirmation prompt — nothing was broadcast")]
+    ///
+    /// The prompt is asked before the step touches the chain at all, so this
+    /// really does mean nothing happened — not "nothing after the funding".
+    #[error("declined at the confirmation prompt — nothing was funded, mined or broadcast")]
     Declined,
 
     /// The created document carries no readable identifier.
@@ -159,6 +172,15 @@ pub enum MintError {
         reason: String,
     },
 
+    /// A confirmation arrived for a step the state file does not record.
+    #[error(
+        "{name}: no step by that name is recorded in the state file, so its confirmation has nowhere to be written — the announcement and the confirmation are wired to different names"
+    )]
+    UnknownStep {
+        /// The name that matched no recorded step.
+        name: String,
+    },
+
     /// A step announces from a beacon index the document does not have.
     #[error(
         "{name}: the document declares no beacon at index {index}, so the step has nothing to announce from"
@@ -170,14 +192,15 @@ pub enum MintError {
         index: usize,
     },
 
-    /// A step's announcement did not take effect on chain.
+    /// The chain does not report the history the state file records as
+    /// confirmed.
     #[error(
-        "{name}: the DID resolves to version {got}, not {expected} — the step did not land, so the session stops here rather than signing the next update against a state the chain does not have"
+        "{name}: the DID resolves to version {got}, but the confirmed announcements reach version {expected} — the chain does not carry the history this session recorded, so it stops here rather than signing the next update against a state the chain does not have"
     )]
     StepDidNotLand {
-        /// The step that did not land.
+        /// The step being processed when the disagreement was found.
         name: String,
-        /// The version the step targets.
+        /// The version the confirmed announcements reach.
         expected: u64,
         /// The version the chain actually reports.
         got: u64,
@@ -207,13 +230,62 @@ pub enum MintError {
         height: u32,
     },
 
-    /// The finished fork did not raise the late-publishing error.
+    /// The second conflicting announcement confirmed BEFORE the first.
+    ///
+    /// A different fault from [`MintError::SameBlock`] with a different
+    /// diagnosis, so it carries both heights rather than restating one of them as
+    /// a block the two share — which would be a false statement.
     #[error(
-        "the late-publishing-fork scenario finished, but resolving the DID with both announcements did not raise the late-publishing error: {got}. A fork that resolves is worse than no fork at all, because a replay test built on it would assert nothing"
+        "{name_a} confirmed in block {height_a} but {name_b} confirmed earlier, in block {height_b}, so the two version 2 announcements are not in the order the session published them and the resolver's (targetVersionId, block height) ordering does not describe this fork. Either the confirmation wait reported the wrong transaction's block, or the state file was edited.\n\nThe second announcement is ALREADY on chain — re-running this scenario would add a THIRD version 2 announcement rather than recover. To recover: delete the state file, generate a fresh key, and restart this scenario from genesis."
+    )]
+    OutOfOrderBranches {
+        /// The branch published first.
+        name_a: String,
+        /// The block it confirmed in.
+        height_a: u32,
+        /// The branch published second.
+        name_b: String,
+        /// The earlier block it confirmed in.
+        height_b: u32,
+    },
+
+    /// The height comparison could not run because a branch is not recorded.
+    #[error(
+        "{name} is not recorded in the state file, so the two version 2 announcements cannot be ordered by height. The ordering the fork's whole anomaly rests on is unverified, and a truncated or hand-edited state file must not pass this check silently"
+    )]
+    MissingBranch {
+        /// The branch the state file does not carry.
+        name: String,
+    },
+
+    /// The finished fork failed to resolve for some reason OTHER than the
+    /// late-publishing error.
+    ///
+    /// The client's failure is carried as a `#[source]`, not rendered into a
+    /// field. A `#[from]` variant of `did_btcr2_client::Error` displays as its
+    /// doc sentence with the substance one level down, so flattening it with
+    /// `to_string()` would leave `main`'s cause-chain walk nothing to walk — and
+    /// this message is the operator's only diagnostic, because the session has
+    /// already refused to write the fixture.
+    #[error(
+        "the late-publishing-fork scenario finished, but resolving the DID with both announcements failed for a reason that is not the late-publishing error. A fork that fails for an unrelated reason proves nothing, and a replay test built on it would assert nothing"
     )]
     AnomalyNotReached {
-        /// What resolving produced instead.
-        got: String,
+        /// The client's own failure, cause chain intact.
+        #[source]
+        source: did_btcr2_client::Error,
+    },
+
+    /// The finished fork resolved cleanly instead of aborting.
+    ///
+    /// Separate from [`MintError::AnomalyNotReached`] because a successful
+    /// resolve has no error to carry: the fault is the version it reported.
+    #[error(
+        "the late-publishing-fork scenario finished, but the DID resolved cleanly to version {version} instead of raising the late-publishing error. A fork that resolves is worse than no fork at all, because a replay test built on it would assert nothing"
+    )]
+    AnomalyResolvedCleanly {
+        /// The version the resolve reported.
+        version: u64,
     },
 
     /// The fork scenario was aimed at a DID another session is minting a clean
@@ -308,8 +380,23 @@ pub struct MintStep {
     pub beacon_index: usize,
     /// The version this update produces.
     pub target_version_id: u64,
-    /// The announcement transaction.
+    /// The announcement transaction. Computed locally from the transaction's
+    /// own bytes, so it is known before the relay rather than reported by it.
     pub txid: String,
+    /// The announcement transaction, consensus-encoded as lowercase hex.
+    ///
+    /// Retained because the step is recorded BEFORE it is relayed: a resume then
+    /// re-relays these exact bytes, which is a no-op for a node that already has
+    /// them and the only way to place a transaction that never arrived. Rebuilding
+    /// the announcement instead would spend whatever output is unspent at resume
+    /// time and produce a DIFFERENT transaction announcing the same version —
+    /// the fork the state file exists to prevent.
+    ///
+    /// `default`ed on read so a state file written before this field existed
+    /// still parses; such a step has no bytes to re-relay and is waited for as it
+    /// always was.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw_tx: String,
     /// [`UNCONFIRMED_HEIGHT`] until the step's confirmation lands. Written BEFORE
     /// the wait, so an interrupted session resumes rather than re-broadcasting.
     pub block_height: u32,
@@ -320,12 +407,14 @@ pub struct MintStep {
 }
 
 impl MintStep {
-    /// A step that has been broadcast but not yet confirmed.
+    /// A step that has been built and recorded, but whose relay has not been
+    /// answered for.
     pub fn broadcast(
         name: String,
         beacon_index: usize,
         target_version_id: u64,
         txid: String,
+        raw_tx: String,
         update: Value,
     ) -> Self {
         Self {
@@ -333,6 +422,7 @@ impl MintStep {
             beacon_index,
             target_version_id,
             txid,
+            raw_tx,
             block_height: UNCONFIRMED_HEIGHT,
             block_time: 0,
             update,
@@ -354,24 +444,37 @@ impl MintStep {
 ///
 /// A malformed file is rejected with the path and one of three fixed reasons —
 /// never the file's contents, and never a parse library's echo of the input.
+///
+/// Every buffer this function owns is overwritten before it is dropped: the
+/// file's bytes hold the key in hex and the decoded array holds it outright, and
+/// a heap allocation freed without being scrubbed leaves that copy behind.
 pub fn keys(key_file: &Path) -> Result<(secp256k1::SecretKey, PublicKey), MintError> {
-    let text = std::fs::read_to_string(key_file)?;
-    let text = text.trim();
     let bad = |reason: &'static str| MintError::KeyFile {
         path: key_file.display().to_string(),
         reason,
     };
 
-    if text.len() != 64 {
-        return Err(bad(REASON_LENGTH));
-    }
-    // Decode into a fixed array rather than through a `Vec<u8>`: an owned heap
-    // buffer of secret bytes is dropped without being scrubbed, leaving a copy of
-    // the key in freed memory.
+    // Read BYTES, not a `String`. `read_to_string` puts the hex-encoded secret
+    // into an owned heap buffer that is dropped unscrubbed — which is the exact
+    // leak the fixed-size decode below exists to avoid, reintroduced one line
+    // above it. The node credential is read the same way, through
+    // `secret::Secret`; the rule and the `scrub` that enforces it are shared.
+    let mut raw = std::fs::read(key_file)?;
     let mut bytes = [0u8; 32];
-    hex::decode_to_slice(text, &mut bytes).map_err(|_| bad(REASON_HEX))?;
+    let decoded = {
+        let text = raw.trim_ascii();
+        if text.len() != 64 {
+            Err(bad(REASON_LENGTH))
+        } else {
+            hex::decode_to_slice(text, &mut bytes).map_err(|_| bad(REASON_HEX))
+        }
+    };
+    scrub(&mut raw);
+    decoded?;
 
-    let secret = secp256k1::SecretKey::from_slice(&bytes).map_err(|_| bad(REASON_SCALAR))?;
+    let secret = secp256k1::SecretKey::from_slice(&bytes).map_err(|_| bad(REASON_SCALAR));
+    scrub(&mut bytes);
+    let secret = secret?;
     let public_key = secret.public_key(&secp256k1::Secp256k1::new());
     Ok((secret, public_key))
 }
@@ -399,6 +502,43 @@ pub fn vm_id(did: &str) -> String {
     format!("{did}#initialKey")
 }
 
+/// The DID a generated document names.
+fn did_of(document: &Document) -> Result<String, MintError> {
+    Ok(document.as_ref()["id"]
+        .as_str()
+        .ok_or(MintError::NoDid)?
+        .to_string())
+}
+
+/// Everything a session must settle before it is allowed to leave a trace:
+/// generate the document the DID comes from, and refuse a fork on a DID a clean
+/// session is already minting.
+///
+/// Split out of [`run`] so the guard runs BEFORE [`load_or_init_state`], which
+/// creates and writes the state file on a fresh session. Refusing afterwards
+/// left the tool's own `poisoned-state.json` on disk recording the CLEAN DID, so
+/// the corrected re-run — right key file, same `--state-file` — was refused a
+/// second time, now for a DID mismatch against a file this tool had just written
+/// for a run it went on to refuse. A guard that leaves debris blocking its own
+/// remedy costs an operator a diagnosis.
+///
+/// Generating the document is pure composition and reaches no network, so
+/// nothing is contacted before the refusal either.
+fn prepare_session<T: BtcTransport>(
+    scenario: &str,
+    network: &str,
+    state_file: &Path,
+    client: &Client<T>,
+    public_key: &PublicKey,
+) -> Result<(Document, String), MintError> {
+    let genesis = client.create(public_key, targets::network_from_dir(network)?)?;
+    let did = did_of(&genesis)?;
+    if scenario == FORK_SCENARIO {
+        refuse_shared_did(&did, state_file)?;
+    }
+    Ok((genesis, did))
+}
+
 /// Load a minting session's state, or start one.
 ///
 /// The document is generated on both paths because generating it makes no
@@ -420,10 +560,7 @@ pub fn load_or_init_state<T: BtcTransport>(
     public_key: &PublicKey,
 ) -> Result<MintState, MintError> {
     let document = client.create(public_key, targets::network_from_dir(network)?)?;
-    let did = document.as_ref()["id"]
-        .as_str()
-        .ok_or(MintError::NoDid)?
-        .to_string();
+    let did = did_of(&document)?;
     let beacons: Vec<String> = document
         .beacons()
         .map(|beacon| beacon.address().to_string())
@@ -431,9 +568,19 @@ pub fn load_or_init_state<T: BtcTransport>(
 
     if path.exists() {
         let state: MintState = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        // The endpoint is guarded for the same reason as the chain, not as a
+        // convenience: the fixture emission builds its own client from the value
+        // ON DISK, which is written once at init and never revised. A resume
+        // pointed at a second node therefore mints against the endpoint on the
+        // command line and then captures the fixture's bodies — and records the
+        // URL — from the one in the file, silently splitting a session across two
+        // chains' answers. It is also the value `targets::endpoint` screens for
+        // embedded credentials, and nothing re-screens what the file already
+        // holds.
         for (field, in_file, requested) in [
             ("scenario", &state.scenario, scenario),
             ("network", &state.network, network),
+            ("endpoint", &state.endpoint, endpoint),
             ("did", &state.did, did.as_str()),
         ] {
             if in_file != requested {
@@ -715,11 +862,21 @@ fn source_document_for<'a>(
 pub enum StepAction {
     /// Already confirmed on chain: do nothing.
     Done,
-    /// Broadcast but not confirmed. Wait for THIS txid rather than
-    /// re-broadcasting: a second announcement of the same version from a
-    /// different output would fork the DID being minted.
-    AwaitConfirmation(String),
-    /// Not on chain at all.
+    /// Recorded but not confirmed. Re-relay THESE bytes and wait for THIS txid.
+    ///
+    /// Never a fresh announcement: a second transaction announcing the same
+    /// version from a different output would fork the DID being minted. The
+    /// retained bytes have the recorded txid, so re-relaying them is a no-op for
+    /// a node that already has the transaction and places it if it never
+    /// arrived — a step is recorded BEFORE it is relayed, so both are possible.
+    AwaitConfirmation {
+        /// The recorded announcement transaction.
+        txid: String,
+        /// Its consensus-encoded hex, empty for a step recorded before this was
+        /// retained.
+        raw_tx: String,
+    },
+    /// Not recorded at all.
     Announce,
 }
 
@@ -727,7 +884,10 @@ pub enum StepAction {
 pub fn resume_action(state: &MintState, name: &str) -> StepAction {
     match state.steps.iter().find(|step| step.name == name) {
         Some(step) if step.is_confirmed() => StepAction::Done,
-        Some(step) => StepAction::AwaitConfirmation(step.txid.clone()),
+        Some(step) => StepAction::AwaitConfirmation {
+            txid: step.txid.clone(),
+            raw_tx: step.raw_tx.clone(),
+        },
         None => StepAction::Announce,
     }
 }
@@ -736,6 +896,12 @@ pub fn resume_action(state: &MintState, name: &str) -> StepAction {
 ///
 /// Separate from [`ensure_step_recorded`] on purpose: the txid is persisted
 /// before the wait, and this is the second write that closes it out.
+///
+/// A name no recorded step carries is an error, not a silent no-op. Writing the
+/// state unchanged and returning `Ok` would leave the step at
+/// [`UNCONFIRMED_HEIGHT`] on disk while the caller printed "confirmed in block
+/// N" — a wrong state file plus a truthful-looking log line, which is harder to
+/// diagnose than the wiring mistake that caused it.
 fn confirm_step(
     state: &mut MintState,
     path: &Path,
@@ -743,10 +909,15 @@ fn confirm_step(
     height: u32,
     time: i64,
 ) -> Result<(), MintError> {
-    if let Some(step) = state.steps.iter_mut().find(|step| step.name == name) {
-        step.block_height = height;
-        step.block_time = time;
-    }
+    let step = state
+        .steps
+        .iter_mut()
+        .find(|step| step.name == name)
+        .ok_or_else(|| MintError::UnknownStep {
+            name: name.to_string(),
+        })?;
+    step.block_height = height;
+    step.block_time = time;
     write_state_atomic(path, state)
 }
 
@@ -769,6 +940,108 @@ fn recorded_updates(state: &MintState) -> Vec<Value> {
     state.steps.iter().map(|step| step.update.clone()).collect()
 }
 
+/// The highest version any CONFIRMED step targets — the floor the chain must
+/// already have reached.
+///
+/// On a fresh run after step N this IS step N's target: the state file holds
+/// exactly the steps taken so far, and each one is confirmed before the next is
+/// built. On a resume it is the version the chain has already reached, which is
+/// what stops an early step from being measured against a version the session
+/// moved past hours ago.
+///
+/// Steps that are recorded but NOT confirmed are excluded, and that exclusion is
+/// the whole point. A step is written to the state file before it is relayed and
+/// confirmed by a second write, so an interrupt during the confirmation wait
+/// leaves a recorded step whose block has not landed. Counting its target here
+/// would measure the EARLIER, already-landed steps against an announcement still
+/// in the mempool, and the session would abort on a step that did land — before
+/// reaching the arm that waits for the pending one.
+fn confirmed_version_id(state: &MintState) -> Option<u64> {
+    state
+        .steps
+        .iter()
+        .filter(|step| step.is_confirmed())
+        .map(|step| step.target_version_id)
+        .max()
+}
+
+/// Why a retained announcement could not be read back off the state file.
+///
+/// Diagnostic only — never propagated. A retained value that will not parse says
+/// nothing about whether the txid recorded beside it reached the chain, so the
+/// session reports the fault and still waits for that txid's block.
+#[derive(Debug)]
+enum RetainedFault {
+    /// Not hex, or an odd number of characters.
+    NotHex,
+    /// Hex, but not a consensus-encoded transaction.
+    Undecodable(esploda::bitcoin::consensus::encode::Error),
+    /// A transaction, but not a singleton beacon announcement.
+    NotAnAnnouncement(AnnounceError),
+}
+
+impl std::fmt::Display for RetainedFault {
+    /// Names the fault and never the value, so a corrupt state file cannot put
+    /// its contents on an operator's terminal.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotHex => write!(f, "it is not an even-length run of hex characters"),
+            Self::Undecodable(e) => {
+                write!(f, "it is not a consensus-encoded transaction: {e}")
+            }
+            Self::NotAnAnnouncement(e) => write!(f, "it is not a beacon announcement: {e}"),
+        }
+    }
+}
+
+/// Read a retained announcement back into the type that asserts its shape.
+///
+/// The round trip through [`SignedBeaconTx`] is the point: it re-checks that the
+/// last output is exactly `OP_RETURN <32-byte push>` — the invariant the
+/// resolver's signal extraction matches on — so bytes that have been to disk and
+/// back are validated before they can be relayed a second time.
+fn retained_announcement(raw_tx: &str) -> Result<SignedBeaconTx, RetainedFault> {
+    let raw = hex::decode(raw_tx.trim()).map_err(|_| RetainedFault::NotHex)?;
+    let tx: esploda::bitcoin::Transaction = esploda::bitcoin::consensus::encode::deserialize(&raw)
+        .map_err(RetainedFault::Undecodable)?;
+    SignedBeaconTx::try_from(tx).map_err(RetainedFault::NotAnAnnouncement)
+}
+
+/// The gate a step passes through before the chain is touched: shown the plan,
+/// it either agrees or returns [`MintError::Declined`].
+///
+/// A value on the session rather than a `--yes` flag read inside the step, so
+/// the ORDER of the prompt against the funding it guards is a property a test
+/// can assert — a declining gate needs no terminal.
+pub type BroadcastGate<'a> = &'a dyn Fn(&str) -> Result<(), MintError>;
+
+/// What the operator is agreeing to when a step's gate is shown: the funding,
+/// the block production that funding may require, and the announcement.
+///
+/// Everything it names happens AFTER the gate, so the gate has to name all of
+/// it. A prompt mentioning only the broadcast would understate what agreeing to
+/// it does on a chain this tool mines.
+fn announce_plan(
+    ops: &dyn ChainOps,
+    step: &ScenarioStep,
+    address: &Address,
+    needed_sats: u64,
+) -> String {
+    let funding = if ops.mines_on_demand() {
+        format!(
+            "fund it with {needed_sats} sats from the node wallet — mining to coinbase \
+             maturity first if the wallet has no spendable balance, and one block to \
+             confirm the transfer — then"
+        )
+    } else {
+        format!("wait for it to hold {needed_sats} confirmed sats, then")
+    };
+    format!(
+        "{}: beacon {} ({address}) — {funding} broadcast the announcement",
+        step.name, step.beacon_index
+    )
+}
+
 /// Everything a scenario step needs that does not change between steps.
 pub struct MintSession<'a, T: BtcTransport> {
     /// The four-operation facade, pointed at this chain's Esplora endpoint.
@@ -781,8 +1054,8 @@ pub struct MintSession<'a, T: BtcTransport> {
     pub beacon_sk: secp256k1::SecretKey,
     /// Absolute fee per announcement, in satoshis.
     pub fee: u64,
-    /// Whether the broadcast prompt is skipped.
-    pub yes: bool,
+    /// What a step asks before it touches the chain.
+    pub confirm: BroadcastGate<'a>,
 }
 
 impl<T: BtcTransport> MintSession<'_, T> {
@@ -814,23 +1087,23 @@ impl<T: BtcTransport> MintSession<'_, T> {
         // a wallet transfer plus a block; on a public chain it is a faucet visit
         // and a poll. The scenario does not branch on which.
         let needed_sats = self.fee + FUNDING_HEADROOM_SATS;
+
+        // Asked BEFORE anything is touched. `ensure_funded` on a chain this tool
+        // mines can load a wallet, produce a hundred blocks to reach coinbase
+        // maturity, send a transfer and mine again — so a prompt asked after it
+        // would leave a DECLINED step having already moved the tip that the
+        // frozen vendor captures are measured against.
+        (self.confirm)(&broadcast_prompt(
+            self.ops.network(),
+            &announce_plan(self.ops, step, &address, needed_sats),
+        ))?;
+
         self.ops.ensure_funded(&address, needed_sats)?;
 
         // The signed update's wire JSON IS the sidecar element, and the typed
         // value is about to be consumed by the announcement build. Retain it
         // first or it is gone.
         let retained = update.as_ref().clone();
-
-        require_confirmation(
-            &broadcast_prompt(
-                self.ops.network(),
-                &format!(
-                    "{} from beacon {} ({address})",
-                    step.name, step.beacon_index
-                ),
-            ),
-            self.yes,
-        )?;
 
         let tx = self.client.build_update_tx(
             doc,
@@ -840,7 +1113,19 @@ impl<T: BtcTransport> MintSession<'_, T> {
             None,
             self.beacon_sk,
         )?;
-        let txid = self.client.broadcast(&tx)?.to_string();
+        // Both known BEFORE the relay: the txid is a function of the bytes, and
+        // `broadcast` computes the same one to cross-check the endpoint's answer
+        // against.
+        let raw_tx = hex::encode(esploda::bitcoin::consensus::encode::serialize(tx.as_tx()));
+        let txid = tx.as_tx().txid().to_string();
+
+        // Recorded BEFORE the relay, because a relay can reach the network and
+        // still fail to report it: a non-2xx after the node accepted it, a 200
+        // whose body is a proxy page, a read timeout after the POST was written,
+        // or the process being killed in between. Every one of those leaves the
+        // announcement on the network, and if it were not recorded the next run
+        // would announce the SAME version from a different output and fork the
+        // DID being minted — the one thing this state file exists to prevent.
         ensure_step_recorded(
             state,
             self.state_path,
@@ -849,15 +1134,18 @@ impl<T: BtcTransport> MintSession<'_, T> {
                 step.beacon_index,
                 step.target_version_id,
                 txid.clone(),
+                raw_tx.clone(),
                 retained,
             ),
         )?;
+
+        self.client.broadcast(&tx)?;
         eprintln!("  {}: broadcast {txid}, waiting for its block", step.name);
 
         self.await_step(state, step.name, &txid)
     }
 
-    /// Wait for a broadcast step's confirmation and write it into the state file.
+    /// Wait for a recorded step's confirmation and write it into the state file.
     fn await_step(&self, state: &mut MintState, name: &str, txid: &str) -> Result<(), MintError> {
         let (height, time) = self.ops.await_confirmation(txid)?;
         confirm_step(state, self.state_path, name, height, time)?;
@@ -865,27 +1153,106 @@ impl<T: BtcTransport> MintSession<'_, T> {
         Ok(())
     }
 
-    /// Re-resolve the DID with every update recorded so far, and require it to
-    /// report the version the step targets.
+    /// Re-relay a step a previous run recorded, then wait for its block.
+    ///
+    /// The re-relay is what makes recording before relaying safe. A recorded
+    /// step may have reached the network or may not — the same write ordering
+    /// that closes the fork window opens that ambiguity — and re-relaying the
+    /// RETAINED bytes settles it either way: a node that already has the
+    /// transaction answers with the same txid, and a node that never saw it
+    /// receives it now. This is not a second announcement, because it is not a
+    /// second transaction.
+    ///
+    /// The bytes go back through [`SignedBeaconTx`] rather than straight onto
+    /// the wire, so the same `OP_RETURN <32>` shape the resolver matches on is
+    /// re-asserted on a value that has been to disk and back. A state file that
+    /// has been corrupted or hand-edited is caught here rather than relayed.
+    ///
+    /// Neither a refusal nor an unreadable retained value is fatal. "Already in
+    /// the mempool", "already in a block" and "inputs already spent" are all
+    /// reported as rejections by some endpoints, and every one of them means the
+    /// transaction is on the network; and a retained value that will not parse
+    /// says nothing about whether the txid beside it confirmed. The confirmation
+    /// wait is the arbiter, and it is bounded.
+    fn resume_step(
+        &self,
+        state: &mut MintState,
+        name: &str,
+        txid: &str,
+        raw_tx: &str,
+    ) -> Result<(), MintError> {
+        if raw_tx.is_empty() {
+            eprintln!("  {name}: already recorded as {txid} with no retained transaction, waiting");
+        } else {
+            match retained_announcement(raw_tx) {
+                Ok(tx) => {
+                    eprintln!("  {name}: already recorded as {txid}, re-relaying it and waiting");
+                    if let Err(error) = self.client.broadcast(&tx) {
+                        eprintln!(
+                            "  {name}: re-relaying {txid} was refused ({error}); waiting for its \
+                             block anyway, since a node that already has it says exactly this"
+                        );
+                    }
+                }
+                Err(fault) => eprintln!(
+                    "  {name}: the transaction retained for {txid} cannot be read back \
+                     ({fault}), so it is not re-relayed; waiting for its block anyway, since \
+                     the announcement that txid names may already be on chain"
+                ),
+            }
+        }
+        self.await_step(state, name, txid)
+    }
+
+    /// Re-resolve the DID and require the chain to report the highest version
+    /// the state file records.
     ///
     /// There is no public way to step a document forward locally, so this is the
     /// only way to advance the contemporary document between steps — and that is
-    /// a feature here: it proves each step actually landed on chain before the
-    /// next is built on it.
+    /// a feature here: it proves what was announced actually landed on chain
+    /// before the next update is built on it.
+    ///
+    /// What it is measured against is the STATE FILE's highest CONFIRMED
+    /// version, not the step being processed. The two are the same thing on a
+    /// fresh run, where after step N the state file holds exactly N steps, all
+    /// confirmed. They are not on a resume: every confirmed step is already on
+    /// chain, so measuring the first one against its own target would report
+    /// that a step which landed did not.
+    ///
+    /// It is a FLOOR, not an equality. The chain is allowed to be ahead of the
+    /// confirmed set, because a step can be on chain without the state file
+    /// saying so: the confirmation is written after the block is seen, and an
+    /// interrupt in between leaves a recorded-unconfirmed step whose
+    /// announcement the next resolve will already count. Requiring equality
+    /// there would abort a resume for the sole reason that it has MORE history
+    /// than it recorded. It cannot be ahead of the recorded set either way — an
+    /// announcement the state file holds no update for makes the resolve itself
+    /// fail — so the floor is the only bound that has to be stated.
+    ///
+    /// Nothing is given up by that: on a fresh run the floor IS this step's
+    /// target and the chain cannot exceed it, so the did-it-land check still
+    /// fails exactly when a step did not land.
+    ///
+    /// Truncating the sidecar to the step instead would not work — the resolver
+    /// reads every announcement the beacons carry, not only the ones a caller
+    /// supplies, and fails on one it holds no update for. And bounding the
+    /// RESOLUTION to a version would make the assertion vacuous: it would be
+    /// checking the answer it asked for.
     fn advance(
         &self,
         state: &MintState,
         did: &Did,
         step: &ScenarioStep,
     ) -> Result<ResolutionResult, MintError> {
+        let expected = confirmed_version_id(state).unwrap_or(step.target_version_id);
         let result = self
             .client
             .resolve(did, options_for(&recorded_updates(state))?)?;
         let got = result.document_metadata.version_id.get();
-        if got != step.target_version_id {
+        if got < expected {
             return Err(MintError::StepDidNotLand {
                 name: step.name.to_string(),
-                expected: step.target_version_id,
+                expected,
                 got,
             });
         }
@@ -979,9 +1346,8 @@ pub fn mint_clean<T: BtcTransport>(
             .expect("every scenario step targets a version above zero");
         match resume_action(state, step.name) {
             StepAction::Done => eprintln!("  {}: already confirmed, skipping", step.name),
-            StepAction::AwaitConfirmation(txid) => {
-                eprintln!("  {}: already broadcast as {txid}, waiting", step.name);
-                session.await_step(state, step.name, &txid)?;
+            StepAction::AwaitConfirmation { txid, raw_tx } => {
+                session.resume_step(state, step.name, &txid, &raw_tx)?;
             }
             StepAction::Announce => {
                 let source = source_document_for(step.name, genesis, &contemporary);
@@ -1024,8 +1390,38 @@ pub fn mint_clean<T: BtcTransport>(
         state.did,
         result.document_metadata.version_id.get(),
     );
-    emit_minted(state)?;
     Ok(())
+}
+
+/// The directory a state file sits in, for the shared-DID scan.
+///
+/// `Path::new("poisoned.json").parent()` is `Some("")`, which is not a directory
+/// anything can be read from — but the file is in the CURRENT directory, so that
+/// is what the scan must open. Treating the empty parent as "nowhere to look"
+/// disabled the guard for every operator who runs from the state directory, and
+/// said nothing about it.
+fn state_dir(own_state_path: &Path) -> PathBuf {
+    match own_state_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Whether a scanned entry is this session's own state file.
+///
+/// Compared by resolved location rather than by text: a bare `--state-file
+/// poisoned.json` makes the scan read `.`, whose entries are spelled
+/// `./poisoned.json`, and a textual comparison would not recognize the session's
+/// own file among them. A path that cannot be resolved falls back to the textual
+/// comparison rather than failing the guard.
+fn is_own_state_file(candidate: &Path, own_state_path: &Path) -> bool {
+    match (
+        std::fs::canonicalize(candidate),
+        std::fs::canonicalize(own_state_path),
+    ) {
+        (Ok(candidate), Ok(own)) => candidate == own,
+        _ => candidate == own_state_path,
+    }
 }
 
 /// Refuse the fork scenario on a DID another session is minting a clean history
@@ -1035,16 +1431,16 @@ pub fn mint_clean<T: BtcTransport>(
 /// multi-update history and the anomaly. The two scenarios therefore take
 /// separate key files, and this reads the state files sitting beside this
 /// session's own to catch the case where they were handed the same one.
+///
+/// Nothing about it is best-effort: a directory that cannot be read is reported
+/// rather than treated as "no evidence", because a guard that silently does not
+/// run is worse than one that fails.
 fn refuse_shared_did(did: &str, own_state_path: &Path) -> Result<(), MintError> {
-    let dir = own_state_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty());
-    let Some(entries) = dir.and_then(|dir| std::fs::read_dir(dir).ok()) else {
-        return Ok(());
-    };
+    // An unreadable directory is a real failure, not an absence of evidence.
+    let entries = std::fs::read_dir(state_dir(own_state_path))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path == own_state_path {
+        if is_own_state_file(&path, own_state_path) {
             continue;
         }
         // A file that is not a minting state file is not evidence either way;
@@ -1072,6 +1468,12 @@ fn refuse_shared_did(did: &str, own_state_path: &Path) -> Result<(), MintError> 
 /// they demonstrate becomes a coin flip. On a chain this tool mines this cannot
 /// fail by construction — branch A's confirmation produces a block before branch
 /// B is even funded — so this is a defensive assertion, not a race handler.
+///
+/// Three outcomes, each with its own diagnosis: a shared block, a second branch
+/// that confirmed EARLIER than the first, and a state file that does not record
+/// both branches at all. The last is a failure rather than a pass — a truncated
+/// state file means the ordering was never checked, which is not the same as its
+/// having held.
 fn require_distinct_heights(state: &MintState) -> Result<(), MintError> {
     let height_of = |name: &str| {
         state
@@ -1079,19 +1481,27 @@ fn require_distinct_heights(state: &MintState) -> Result<(), MintError> {
             .iter()
             .find(|step| step.name == name)
             .map(|step| step.block_height)
+            .ok_or_else(|| MintError::MissingBranch {
+                name: name.to_string(),
+            })
     };
-    let (Some(height_a), Some(height_b)) =
-        (height_of(FORK_STEPS[0].name), height_of(FORK_STEPS[1].name))
-    else {
-        return Ok(());
-    };
+    let height_a = height_of(FORK_STEPS[0].name)?;
+    let height_b = height_of(FORK_STEPS[1].name)?;
     if height_b > height_a {
         return Ok(());
     }
-    Err(MintError::SameBlock {
+    if height_b == height_a {
+        return Err(MintError::SameBlock {
+            name_a: FORK_STEPS[0].name.to_string(),
+            name_b: FORK_STEPS[1].name.to_string(),
+            height: height_b,
+        });
+    }
+    Err(MintError::OutOfOrderBranches {
         name_a: FORK_STEPS[0].name.to_string(),
+        height_a,
         name_b: FORK_STEPS[1].name.to_string(),
-        height: height_b,
+        height_b,
     })
 }
 
@@ -1120,19 +1530,14 @@ fn prove_late_publishing<T: BtcTransport>(
     state: &MintState,
 ) -> Result<(), MintError> {
     match client.resolve(did, options_for(&recorded_updates(state))?) {
-        Ok(result) => Err(MintError::AnomalyNotReached {
-            got: format!(
-                "the DID resolved cleanly to version {}",
-                result.document_metadata.version_id.get()
-            ),
+        Ok(result) => Err(MintError::AnomalyResolvedCleanly {
+            version: result.document_metadata.version_id.get(),
         }),
         Err(error) if is_late_publishing(&error) => {
             eprintln!("  the fork is on chain: resolving it raises {error}");
             Ok(())
         }
-        Err(error) => Err(MintError::AnomalyNotReached {
-            got: error.to_string(),
-        }),
+        Err(source) => Err(MintError::AnomalyNotReached { source }),
     }
 }
 
@@ -1166,9 +1571,8 @@ pub fn mint_fork<T: BtcTransport>(
             .expect("every scenario step targets a version above zero");
         match resume_action(state, step.name) {
             StepAction::Done => eprintln!("  {}: already confirmed, skipping", step.name),
-            StepAction::AwaitConfirmation(txid) => {
-                eprintln!("  {}: already broadcast as {txid}, waiting", step.name);
-                session.await_step(state, step.name, &txid)?;
+            StepAction::AwaitConfirmation { txid, raw_tx } => {
+                session.resume_step(state, step.name, &txid, &raw_tx)?;
             }
             StepAction::Announce => {
                 let source = source_document_for(step.name, genesis, &contemporary);
@@ -1189,7 +1593,6 @@ pub fn mint_fork<T: BtcTransport>(
         "{FORK_SCENARIO} complete: {} carries two conflicting version 2 announcements and no longer resolves",
         state.did,
     );
-    emit_minted(state)?;
     Ok(())
 }
 
@@ -1247,14 +1650,18 @@ fn fork_expected() -> Value {
 ///
 /// Printed when its fixture is written, because the reason a scenario exists is
 /// the thing an operator most needs to see confirmed at the end of a session.
+/// Exhaustive over the two scenarios this tool mints rather than open-ended: an
+/// `else` arm would print a coverage claim for a third scenario at the moment its
+/// fixture was written, and the claim would be about a scenario nobody had
+/// checked. A name this function does not know contributes nothing.
 fn minted_contributions(scenario: &str) -> &'static [&'static str] {
-    if scenario == CLEAN_SCENARIO {
-        &[
+    match scenario {
+        CLEAN_SCENARIO => &[
             "multi-update sequencing across rotating beacons",
             "on-chain deactivation short-circuit",
-        ]
-    } else {
-        &["late publishing detected against a real on-chain fork"]
+        ],
+        FORK_SCENARIO => &["late publishing detected against a real on-chain fork"],
+        _ => &[],
     }
 }
 
@@ -1276,6 +1683,12 @@ fn build_minted_fixture(
     expected: Value,
 ) -> Result<ChainFixture, MintError> {
     let vector = minted_vector(state);
+    // Before anything scans for announcements: a body the endpoint returned that
+    // is not an Esplora transaction list contributes no signals, and would
+    // otherwise surface below as "the capture announces nothing for this update"
+    // — blaming the chain for what is an endpoint or a serde fault. The vendor
+    // capture path runs the same gate for the same reason.
+    validate::assert_bodies_parse(&vector, addresses)?;
     let sidecar = minted_sidecar(state);
     let hashes = validate::update_hashes(&vector, &sidecar)?;
     let signals = validate::scan_signals(addresses, &hashes);
@@ -1315,25 +1728,26 @@ fn build_minted_fixture(
 /// A scenario that does not reach its expectation writes nothing: a fixture whose
 /// `expected` was produced by a resolve that did something else would make a
 /// replay assert whatever happened rather than what the scenario exists to prove.
+///
+/// The two scenarios are matched by name and a third is refused. An open `else`
+/// would drive any unrecognized state file down the clean-scenario expectation
+/// path, so a hand-edited or future scenario would have its fixture written
+/// against an expectation that is not its own.
 fn expectation_of<T: BtcTransport>(
     client: &Client<T>,
     did: &Did,
     state: &MintState,
     options: ResolutionOptions,
 ) -> Result<Value, MintError> {
-    if state.scenario == FORK_SCENARIO {
-        return match client.resolve(did, options) {
-            Ok(result) => Err(MintError::AnomalyNotReached {
-                got: format!(
-                    "the DID resolved cleanly to version {}",
-                    result.document_metadata.version_id.get()
-                ),
-            }),
-            Err(error) if is_late_publishing(&error) => Ok(fork_expected()),
-            Err(error) => Err(MintError::AnomalyNotReached {
-                got: error.to_string(),
-            }),
-        };
+    match state.scenario.as_str() {
+        FORK_SCENARIO => return fork_expectation_of(client, did, options),
+        CLEAN_SCENARIO => {}
+        other => {
+            return Err(MintError::UnknownScenario {
+                scenario: other.to_string(),
+                known: format!("{CLEAN_SCENARIO}, {FORK_SCENARIO}"),
+            });
+        }
     }
 
     let result = client.resolve(did, options)?;
@@ -1355,22 +1769,50 @@ fn expectation_of<T: BtcTransport>(
     Ok(clean_expected(result.document.as_ref(), version))
 }
 
-/// Write a minted scenario's fixture.
+/// The fork's half of [`expectation_of`]: the resolve must ABORT with the
+/// late-publishing error, and anything else refuses the fixture.
+fn fork_expectation_of<T: BtcTransport>(
+    client: &Client<T>,
+    did: &Did,
+    options: ResolutionOptions,
+) -> Result<Value, MintError> {
+    match client.resolve(did, options) {
+        Ok(result) => Err(MintError::AnomalyResolvedCleanly {
+            version: result.document_metadata.version_id.get(),
+        }),
+        Err(error) if is_late_publishing(&error) => Ok(fork_expected()),
+        Err(source) => Err(MintError::AnomalyNotReached { source }),
+    }
+}
+
+/// Write a minted scenario's fixture, resolving the finished DID over the
+/// network to capture the bodies it is built from.
 ///
 /// Reads NOTHING but the state file: the DID, the endpoint, the chain and every
 /// signed update are already recorded there, so this runs on a completed session
 /// without re-minting anything — which is what makes a lost or hand-deleted
 /// fixture recoverable without touching the chain again.
-///
-/// The resolve runs through the recording transport, so the captured bodies are
-/// exactly what a production resolve of this DID asked for, and the fixture's
-/// signal provenance is evidence rather than an assumption.
 pub fn emit_minted(state: &MintState) -> Result<PathBuf, MintError> {
+    emit_minted_in(&fixture::fixture_root(), state, UreqTransport::new())
+}
+
+/// [`emit_minted`] against an explicit destination root and transport.
+///
+/// Both are parameters because neither is part of what the emission DOES, and
+/// hardcoding them made the whole function untestable: it reached the real
+/// network for the resolve and this repository's own fixture tree for the write.
+/// A caller can hand it a scripted chain and a scratch directory and get the
+/// same code path a production emission takes.
+fn emit_minted_in<T: BtcTransport>(
+    root: &Path,
+    state: &MintState,
+    transport: T,
+) -> Result<PathBuf, MintError> {
     let did = Did::from_str(&state.did)?;
 
     // Clone the recording handle BEFORE the transport is moved into the client:
     // the client consumes the transport by value and never gives it back.
-    let transport = RecordingTransport::new(UreqTransport::new());
+    let transport = RecordingTransport::new(transport);
     let recording = transport.recording();
     let client = Client::new(state.endpoint.clone(), transport);
 
@@ -1385,7 +1827,7 @@ pub fn emit_minted(state: &MintState) -> Result<PathBuf, MintError> {
         scenario: state.scenario.clone(),
     })?;
     let fixture = build_minted_fixture(state, tip_height, &recorded.addresses, expected)?;
-    let path = fixture::write_atomic(&fixture)?;
+    let path = fixture::write_atomic_in(root, &fixture)?;
     // The derived path runs through the crate manifest directory, so it carries
     // `../..` segments; the file exists by now, so report the resolved one.
     let path = std::fs::canonicalize(&path).unwrap_or(path);
@@ -1417,7 +1859,7 @@ pub fn run(
     network: &str,
     esplora_url: Option<String>,
     bitcoind_url: Option<String>,
-    bitcoind_auth: Option<String>,
+    bitcoind_auth: Option<crate::secret::Secret>,
     key_file: &Path,
     state_file: &Path,
     fee: u64,
@@ -1431,15 +1873,19 @@ pub fn run(
     let client = Client::new(base_url.clone(), UreqTransport::new());
     let ops = chain::ops_for(network, base_url.clone(), bitcoind_url, bitcoind_auth)?;
 
+    // The DID is derived and the fork's shared-DID guard runs first, so a refused
+    // session leaves no state file of this tool's own making behind to block the
+    // corrected re-run.
+    let (genesis, _did) = prepare_session(name, network, state_file, &client, &public_key)?;
     let mut state = load_or_init_state(state_file, name, network, &base_url, &client, &public_key)?;
-    let genesis = client.create(&public_key, targets::network_from_dir(network)?)?;
+    let confirm = move |prompt: &str| require_confirmation(prompt, yes);
     let session = MintSession {
         client: &client,
         ops: ops.as_ref(),
         state_path: state_file,
         beacon_sk,
         fee,
-        yes,
+        confirm: &confirm,
     };
 
     if name == CLEAN_SCENARIO {
@@ -1448,11 +1894,19 @@ pub fn run(
             &mut state,
             &genesis,
             targets::network_from_dir(network)?,
-        )
+        )?;
     } else {
-        refuse_shared_did(&state.did, state_file)?;
-        mint_fork(&session, &mut state, &genesis)
+        mint_fork(&session, &mut state, &genesis)?;
     }
+
+    // The fixture is written here rather than by the driver that finished the
+    // scenario, because it is not part of driving one: it reads only the state
+    // file, and a driver returning `Ok` IS the statement that the file is
+    // complete. Keeping it out here also leaves the drivers free of the network
+    // — `emit_minted` resolves the finished DID through a recording transport —
+    // so a scenario can be driven end to end against an in-memory chain.
+    emit_minted(&state)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1460,6 +1914,9 @@ mod tests {
     use super::*;
     use did_btcr2_client::TransportError;
     use serde_json::json;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A well-formed secret key, deliberately non-repetitive so the
@@ -1500,6 +1957,482 @@ mod tests {
         Client::new("http://localhost:3000".to_string(), NoNetwork)
     }
 
+    /// A [`ChainOps`] that records what a step asked of the chain and answers
+    /// from a script.
+    ///
+    /// The scenario drivers reach the chain only through this trait, so a fake
+    /// implementation is what lets a whole session be driven — and what lets a
+    /// test say "the chain was not touched" as a fact rather than an inference.
+    struct FakeOps {
+        network: String,
+        mines_on_demand: bool,
+        /// Every call, in order.
+        calls: RefCell<Vec<String>>,
+        /// `(height, time)` for the next confirmations, in order. Once it runs
+        /// out, heights continue from `next_height` — one block per step, which
+        /// is what a chain this tool mines produces.
+        scripted: RefCell<VecDeque<(u32, i64)>>,
+        next_height: RefCell<u32>,
+        /// How many confirmation waits succeed before one gives up. `None` means
+        /// every wait succeeds.
+        waits_before_giving_up: RefCell<Option<usize>>,
+    }
+
+    impl FakeOps {
+        /// A chain this tool mines: funding is a wallet transfer and a block.
+        fn on_demand() -> Self {
+            Self {
+                network: "regtest".to_string(),
+                mines_on_demand: true,
+                calls: RefCell::new(Vec::new()),
+                scripted: RefCell::new(VecDeque::new()),
+                next_height: RefCell::new(760),
+                waits_before_giving_up: RefCell::new(None),
+            }
+        }
+
+        /// A chain that mines itself: funding is a faucet visit and a poll.
+        fn self_mining() -> Self {
+            Self {
+                network: "mutinynet".to_string(),
+                mines_on_demand: false,
+                ..Self::on_demand()
+            }
+        }
+
+        /// Let `successes` confirmation waits complete and give up on the next
+        /// one, standing in for a session interrupted mid-wait: a Ctrl-C, a
+        /// closed terminal, or the bounded poll on a chain that mines itself
+        /// running out. The announcement is on the network either way, which is
+        /// what makes the step resumable rather than lost.
+        fn giving_up_after(self, successes: usize) -> Self {
+            *self.waits_before_giving_up.borrow_mut() = Some(successes);
+            self
+        }
+
+        /// Hand the successive confirmation waits these blocks, in order.
+        fn confirming_at(self, blocks: &[u32]) -> Self {
+            *self.scripted.borrow_mut() = blocks
+                .iter()
+                .map(|height| (*height, 1_700_000_000 + i64::from(*height)))
+                .collect();
+            self
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl ChainOps for FakeOps {
+        fn network(&self) -> &str {
+            &self.network
+        }
+
+        fn mines_on_demand(&self) -> bool {
+            self.mines_on_demand
+        }
+
+        fn ensure_funded(&self, address: &Address, needed_sats: u64) -> Result<(), ChainError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("ensure_funded {address} {needed_sats}"));
+            Ok(())
+        }
+
+        fn await_confirmation(&self, txid: &str) -> Result<(u32, i64), ChainError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("await_confirmation {txid}"));
+            if let Some(remaining) = self.waits_before_giving_up.borrow_mut().as_mut() {
+                if *remaining == 0 {
+                    return Err(ChainError::ConfirmationTimeout {
+                        network: self.network.clone(),
+                        txid: txid.to_string(),
+                        waited: "the bound this fake stands in for".to_string(),
+                    });
+                }
+                *remaining -= 1;
+            }
+            if let Some(scripted) = self.scripted.borrow_mut().pop_front() {
+                return Ok(scripted);
+            }
+            let mut height = self.next_height.borrow_mut();
+            let confirmed = (*height, 1_700_000_000 + i64::from(*height));
+            *height += 1;
+            Ok(confirmed)
+        }
+    }
+
+    /// A gate that always agrees, standing in for `--yes`.
+    fn always_yes(_: &str) -> Result<(), MintError> {
+        Ok(())
+    }
+
+    /// A gate that always declines, standing in for an operator who said no —
+    /// without a terminal, so the ordering it guards is testable.
+    fn always_no(_: &str) -> Result<(), MintError> {
+        Err(MintError::Declined)
+    }
+
+    /// One confirmed output the fake handed an address.
+    #[derive(Debug, Clone)]
+    struct FakeUtxo {
+        txid: String,
+        vout: u32,
+        value: u64,
+    }
+
+    /// An in-memory Esplora: the tip, per-address outputs and transaction
+    /// bodies, and a `POST /tx` that files a REAL signed announcement as a
+    /// confirmed transaction the next resolve can find.
+    ///
+    /// The announcement bytes are the ones the session built and signed; this
+    /// only decides what the chain says about them. A resolve driven against it
+    /// therefore walks the same path a production resolve walks, which is what
+    /// makes the scenario drivers testable end to end rather than in pieces.
+    #[derive(Clone, Default)]
+    struct FakeEsplora {
+        inner: Rc<RefCell<FakeChainData>>,
+    }
+
+    #[derive(Default)]
+    struct FakeChainData {
+        tip: u32,
+        /// The height the next relayed announcement confirms at. One block per
+        /// announcement, which is what a chain this tool mines produces.
+        next_height: u32,
+        /// Confirmed transaction bodies, per beacon address.
+        txs: BTreeMap<String, Vec<Value>>,
+        /// Spendable outputs, per beacon address.
+        utxos: BTreeMap<String, Vec<FakeUtxo>>,
+        /// Which beacon an outpoint belongs to, so an announcement is filed
+        /// under the address that made it.
+        outpoints: BTreeMap<String, String>,
+        /// The raw hex of every transaction the transport was asked to relay.
+        posted: Vec<String>,
+        /// What happens to each relay in turn. Once it runs out, `default_fate`
+        /// applies to every further one.
+        scripted_fates: VecDeque<RelayFate>,
+        /// What happens to a relay the script does not cover.
+        default_fate: RelayFate,
+    }
+
+    /// What a fake chain does with a transaction it is asked to relay.
+    ///
+    /// One knob rather than several booleans, because the interesting cases are
+    /// not independent: a resume has to be driven against a chain that took the
+    /// transaction and mined it, took it and did NOT mine it, and mined it while
+    /// failing to say so. Each is one relay's outcome, so each is one value here.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    enum RelayFate {
+        /// Filed in the next block and answered with its txid.
+        #[default]
+        Mined,
+        /// Accepted and answered for, but not filed in any block — the
+        /// transaction is on the network and waiting, which is where an
+        /// interrupt during the confirmation wait finds it.
+        Pending,
+        /// Filed in the next block, but answered with something that is not a
+        /// txid: a proxy page, a truncated body, the shape a read timeout after
+        /// the POST leaves behind.
+        AnswerLost,
+    }
+
+    impl FakeEsplora {
+        /// A chain whose first announcement confirms at `first_height`.
+        fn at_height(first_height: u32) -> Self {
+            let fake = Self::default();
+            {
+                let mut data = fake.inner.borrow_mut();
+                data.tip = first_height - 1;
+                data.next_height = first_height;
+            }
+            fake
+        }
+
+        /// Give `address` a confirmed output to announce from.
+        fn fund(&self, address: &str, value: u64) -> &Self {
+            let txid = format!("{:02x}", self.inner.borrow().outpoints.len() as u8 + 1).repeat(32);
+            self.inner.borrow_mut().add_utxo(address, &txid, 0, value);
+            self
+        }
+
+        /// Answer every relay with its txid and keep none of it, so a step is
+        /// reported as broadcast without reaching a block.
+        fn dropping_relays(&self) -> &Self {
+            self.inner.borrow_mut().default_fate = RelayFate::Pending;
+            self
+        }
+
+        /// Accept and keep the next `count` relays but answer them with
+        /// something that is not a txid. The transaction is on the chain and the
+        /// caller is told it failed.
+        fn withholding_answers(&self, count: usize) -> &Self {
+            self.relaying(&vec![RelayFate::AnswerLost; count])
+        }
+
+        /// Give the successive relays these outcomes, in order; anything past
+        /// the end of the list is mined and answered for as usual.
+        fn relaying(&self, fates: &[RelayFate]) -> &Self {
+            self.inner.borrow_mut().scripted_fates = fates.iter().copied().collect();
+            self
+        }
+
+        /// The announcements the chain carries, as `(address, txid, height)`.
+        fn announcements(&self) -> Vec<(String, String, u32)> {
+            let data = self.inner.borrow();
+            let mut found: Vec<(String, String, u32)> = data
+                .txs
+                .iter()
+                .flat_map(|(address, txs)| {
+                    txs.iter().map(move |tx| {
+                        (
+                            address.clone(),
+                            tx["txid"].as_str().unwrap_or_default().to_string(),
+                            tx["status"]["block_height"].as_u64().unwrap_or_default() as u32,
+                        )
+                    })
+                })
+                .collect();
+            found.sort_by_key(|(_, _, height)| *height);
+            found
+        }
+    }
+
+    impl FakeChainData {
+        fn add_utxo(&mut self, address: &str, txid: &str, vout: u32, value: u64) {
+            self.utxos
+                .entry(address.to_string())
+                .or_default()
+                .push(FakeUtxo {
+                    txid: txid.to_string(),
+                    vout,
+                    value,
+                });
+            self.outpoints
+                .insert(format!("{txid}:{vout}"), address.to_string());
+        }
+
+        /// Relay one announcement and report its txid.
+        fn relay(&mut self, hex: &str) -> (u16, String) {
+            self.posted.push(hex.to_string());
+            let raw = hex::decode(hex.trim()).expect("the facade relays lowercase hex");
+            let tx: esploda::bitcoin::Transaction =
+                esploda::bitcoin::consensus::encode::deserialize(&raw)
+                    .expect("the facade relays a consensus-encoded transaction");
+            let txid = tx.txid().to_string();
+            let fate = self.scripted_fates.pop_front().unwrap_or(self.default_fate);
+            // A node that already has the transaction does not mine it twice: a
+            // re-relay of the retained bytes is answered from what is already
+            // there. That is the whole reason a re-relay is safe.
+            if fate != RelayFate::Pending && !self.carries(&txid) {
+                self.confirm(&tx, &txid);
+            }
+            match fate {
+                RelayFate::AnswerLost => (200, "<html>504 Gateway Time-out</html>".to_string()),
+                RelayFate::Mined | RelayFate::Pending => (200, txid),
+            }
+        }
+
+        /// Whether the chain already carries `txid`.
+        fn carries(&self, txid: &str) -> bool {
+            self.txs
+                .values()
+                .flatten()
+                .any(|tx| tx["txid"].as_str() == Some(txid))
+        }
+
+        /// File a relayed announcement in the block that confirms it.
+        fn confirm(&mut self, tx: &esploda::bitcoin::Transaction, txid: &str) {
+            let height = self.next_height;
+            self.next_height += 1;
+            self.tip = self.tip.max(height);
+
+            let spent: Vec<String> = tx
+                .input
+                .iter()
+                .map(|input| input.previous_output.to_string())
+                .collect();
+            let address = spent
+                .iter()
+                .find_map(|outpoint| self.outpoints.get(outpoint).cloned())
+                .expect("an announcement spends an output this chain handed out");
+            for outpoint in &spent {
+                self.outpoints.remove(outpoint);
+                if let Some(utxos) = self.utxos.get_mut(&address) {
+                    utxos.retain(|utxo| format!("{}:{}", utxo.txid, utxo.vout) != *outpoint);
+                }
+            }
+            // Output order is [change?, OP_RETURN]: everything but the last
+            // output returns to the beacon and funds its NEXT announcement.
+            for (vout, output) in tx.output.iter().enumerate().take(tx.output.len() - 1) {
+                self.add_utxo(&address, txid, vout as u32, output.value);
+            }
+
+            let body = json!({
+                "txid": txid,
+                "version": tx.version,
+                "locktime": tx.lock_time.to_consensus_u32(),
+                "vin": [],
+                "vout": tx.output.iter().map(|output| json!({
+                    "scriptpubkey": hex::encode(output.script_pubkey.as_bytes()),
+                    "value": output.value,
+                })).collect::<Vec<_>>(),
+                "size": 0,
+                "weight": 0,
+                "fee": 0,
+                "status": {
+                    "confirmed": true,
+                    "block_height": height,
+                    "block_hash": "00".repeat(32),
+                    "block_time": 1_700_000_000i64 + i64::from(height),
+                },
+            });
+            self.txs.entry(address).or_default().push(body);
+        }
+    }
+
+    impl BtcTransport for FakeEsplora {
+        fn execute(
+            &self,
+            req: http::Request<Vec<u8>>,
+        ) -> Result<http::Response<Vec<u8>>, TransportError> {
+            let path = req.uri().path().to_string();
+            let mut data = self.inner.borrow_mut();
+
+            let (status, body) = if req.method() == http::Method::POST && path == "/tx" {
+                data.relay(&String::from_utf8_lossy(req.body()))
+            } else if path == "/blocks/tip/height" {
+                (200, data.tip.to_string())
+            } else if let Some(address) = path
+                .strip_prefix("/address/")
+                .and_then(|rest| rest.strip_suffix("/utxo"))
+            {
+                let utxos: Vec<Value> = data
+                    .utxos
+                    .get(address)
+                    .into_iter()
+                    .flatten()
+                    .map(|utxo| {
+                        json!({
+                            "txid": utxo.txid,
+                            "vout": utxo.vout,
+                            "value": utxo.value,
+                            "status": { "confirmed": true, "block_height": 1 },
+                        })
+                    })
+                    .collect();
+                (200, Value::Array(utxos).to_string())
+            } else if let Some(address) = path
+                .strip_prefix("/address/")
+                .and_then(|rest| rest.strip_suffix("/txs"))
+            {
+                let txs = data.txs.get(address).cloned().unwrap_or_default();
+                (200, Value::Array(txs).to_string())
+            } else {
+                (404, format!("this chain serves nothing at `{path}`"))
+            };
+
+            Ok(http::Response::builder()
+                .status(status)
+                .body(body.into_bytes())
+                .expect("a valid status and body build a response"))
+        }
+    }
+
+    /// Everything a driven scenario needs: the chain, the state file, the
+    /// genesis document and the key that signs both halves.
+    struct DrivenSession {
+        dir: PathBuf,
+        state_path: PathBuf,
+        chain: FakeEsplora,
+        client: Client<FakeEsplora>,
+        genesis: Document,
+        secret: secp256k1::SecretKey,
+    }
+
+    impl DrivenSession {
+        /// A session on `scenario`, with every announcing beacon funded.
+        fn new(tag: &str, scenario: &str, steps: &[ScenarioStep]) -> Self {
+            let dir = scratch_dir(tag);
+            let state_path = dir.join("state.json");
+            let (secret, public_key) = sample_keys();
+            let chain = FakeEsplora::at_height(760);
+            let client = Client::new("http://localhost:3000".to_string(), chain.clone());
+            let genesis = client
+                .create(&public_key, Network::Regtest)
+                .expect("a key DID is created offline");
+
+            let did = genesis.as_ref()["id"]
+                .as_str()
+                .expect("the created document names its DID")
+                .to_string();
+            let beacons: Vec<String> = genesis
+                .beacons()
+                .map(|beacon| beacon.address().to_string())
+                .collect();
+            for (_, address) in
+                announcing_beacons(&genesis, steps).expect("every announcing beacon resolves")
+            {
+                chain.fund(&address, 50_000);
+            }
+
+            let state = MintState {
+                scenario: scenario.to_string(),
+                network: "regtest".to_string(),
+                endpoint: "http://localhost:3000".to_string(),
+                did,
+                beacons,
+                steps: Vec::new(),
+            };
+            write_state_atomic(&state_path, &state).expect("the initial state is writable");
+
+            Self {
+                dir,
+                state_path,
+                chain,
+                client,
+                genesis,
+                secret,
+            }
+        }
+
+        /// The session as the scenario drivers take it.
+        fn session<'a>(
+            &'a self,
+            ops: &'a FakeOps,
+            confirm: BroadcastGate<'a>,
+        ) -> MintSession<'a, FakeEsplora> {
+            MintSession {
+                client: &self.client,
+                ops,
+                state_path: &self.state_path,
+                beacon_sk: self.secret,
+                fee: 1_000,
+                confirm,
+            }
+        }
+
+        /// A handle on the session's state for a driver to take mutably, while
+        /// the session itself stays immutably borrowed.
+        fn state_clone(&self) -> MintState {
+            self.persisted()
+        }
+
+        /// The state file as it stands on disk.
+        fn persisted(&self) -> MintState {
+            serde_json::from_str(
+                &std::fs::read_to_string(&self.state_path).expect("the state file is readable"),
+            )
+            .expect("the state file reparses")
+        }
+
+        fn cleanup(self) {
+            std::fs::remove_dir_all(&self.dir).expect("scratch directory is removable");
+        }
+    }
+
     fn key_file(dir: &Path, contents: &str) -> PathBuf {
         let path = dir.join("key.hex");
         std::fs::write(&path, contents).expect("the key file is writable");
@@ -1519,6 +2452,19 @@ mod tests {
         let loaded = keys(&path).expect("the sample key loads");
         std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
         loaded
+    }
+
+    /// A second key's public half, standing in for the separate key file the two
+    /// scenarios are documented to take.
+    fn other_public_key() -> PublicKey {
+        let dir = scratch_dir("other-keys");
+        let path = key_file(
+            &dir,
+            "7b1e4d92c0a3f65e8d47b2091fca35e6d80b47139ea2c5f60381bd94e27a6c05",
+        );
+        let (_, public_key) = keys(&path).expect("the second sample key loads");
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+        public_key
     }
 
     /// The genesis document the sample key mints on `network`, with no network
@@ -1541,6 +2487,7 @@ mod tests {
                 1,
                 2,
                 "aa".repeat(32),
+                String::new(),
                 json!({ "targetVersionId": 2 }),
             )],
         }
@@ -1659,6 +2606,32 @@ mod tests {
             matches!(error, MintError::StateMismatch { ref field, .. } if field == "network"),
             "got {error:?}"
         );
+
+        // A different endpoint, with the scenario, chain and key unchanged. The
+        // emission reads the endpoint out of the state file, so a resume that
+        // silently accepted this would mint against one node and capture the
+        // fixture from another.
+        let error = load_or_init_state(
+            &path,
+            "clean-rotating-beacons",
+            "regtest",
+            "http://127.0.0.1:3001",
+            &offline_client(),
+            &public_key(),
+        )
+        .expect_err("a session cannot continue against another endpoint");
+        match &error {
+            MintError::StateMismatch {
+                field,
+                in_file,
+                requested,
+            } => {
+                assert_eq!(field, "endpoint");
+                assert_eq!(in_file, "http://localhost:3000");
+                assert_eq!(requested, "http://127.0.0.1:3001");
+            }
+            other => panic!("expected StateMismatch on the endpoint, got {other:?}"),
+        }
 
         // A different DID, with everything else matching.
         let mut state = sample_state();
@@ -1787,6 +2760,27 @@ mod tests {
     }
 
     #[test]
+    fn a_key_file_that_is_not_text_is_refused_by_reason_not_by_encoding() {
+        // The loader reads bytes rather than a `String`, so a file that is not
+        // valid UTF-8 is judged by the same three reasons as any other malformed
+        // key file — not reported as an I/O failure by a decoder that had no
+        // business seeing the key at all.
+        let dir = scratch_dir("binary-key");
+        let path = dir.join("key.hex");
+        let mut contents = KEY_HEX.as_bytes().to_vec();
+        contents.push(0xff);
+        std::fs::write(&path, &contents).expect("the key file is writable");
+
+        let error = keys(&path).expect_err("a trailing non-UTF-8 byte is not a key");
+        match &error {
+            MintError::KeyFile { reason, .. } => assert_eq!(*reason, REASON_LENGTH),
+            other => panic!("expected KeyFile, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
     fn mint_errors_never_echo_key_bytes() {
         let dir = scratch_dir("no-echo");
         let good = key_file(&dir, KEY_HEX);
@@ -1833,6 +2827,102 @@ mod tests {
                 );
             }
         }
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn the_broadcast_gate_names_the_funding_and_the_mining_it_authorizes() {
+        let genesis = genesis_document(Network::Regtest);
+        let address = genesis
+            .beacons()
+            .nth(CLEAN_STEPS[0].beacon_index)
+            .expect("the genesis document declares that beacon")
+            .address()
+            .clone();
+
+        // On a chain this tool mines, agreeing authorizes up to a hundred and one
+        // blocks and a wallet transfer before the announcement — all of it after
+        // the gate, so all of it has to be named at the gate.
+        let mined = announce_plan(&FakeOps::on_demand(), &CLEAN_STEPS[0], &address, 6_000);
+        assert!(mined.contains(&address.to_string()), "{mined}");
+        assert!(mined.contains("6000"), "the amount is named: {mined}");
+        assert!(
+            mined.contains("maturity") && mined.contains("node wallet"),
+            "the block production the funding may require is named: {mined}"
+        );
+        assert!(mined.contains("broadcast"), "{mined}");
+
+        // On a chain that mines itself this tool produces no block, so the prompt
+        // must not claim it will.
+        let public = announce_plan(&FakeOps::self_mining(), &CLEAN_STEPS[0], &address, 6_000);
+        assert!(
+            !public.contains("maturity") && !public.contains("node wallet"),
+            "this tool mines nothing on a self-mining chain: {public}"
+        );
+        assert!(
+            public.contains("6000") && public.contains("broadcast"),
+            "{public}"
+        );
+    }
+
+    #[test]
+    fn a_declined_step_leaves_the_chain_untouched() {
+        // `ensure_funded` on a chain this tool mines can load a wallet, produce a
+        // hundred blocks to reach coinbase maturity, send a transfer and mine
+        // again. Asking after it meant declining had already moved the tip the
+        // frozen vendor captures are measured against.
+        let dir = scratch_dir("declined");
+        let path = dir.join("state.json");
+        let (secret, _) = sample_keys();
+        let genesis = genesis_document(Network::Regtest);
+        let did = genesis.as_ref()["id"]
+            .as_str()
+            .expect("the created document names its DID")
+            .to_string();
+        let extra = extra_beacon_address(&secret, Network::Regtest).expect("it derives");
+        let update = genesis
+            .construct_signed_update(
+                add_beacon_service_patch(&did, &extra),
+                NonZeroU64::new(2).expect("version 2 is above zero"),
+                &vm_id(&did),
+                update_secret(&secret).expect("the update key builds"),
+            )
+            .expect("the update signs with no network");
+
+        let mut state = sample_state();
+        state.steps.clear();
+        write_state_atomic(&path, &state).expect("the initial state is writable");
+
+        let ops = FakeOps::on_demand();
+        let client = offline_client();
+        let session = MintSession {
+            client: &client,
+            ops: &ops,
+            state_path: &path,
+            beacon_sk: secret,
+            fee: 1_000,
+            confirm: &always_no,
+        };
+
+        let error = session
+            .announce(&mut state, &CLEAN_STEPS[0], &genesis, update)
+            .expect_err("a declined step must not proceed");
+        assert!(matches!(error, MintError::Declined), "got {error:?}");
+        assert!(
+            ops.calls().is_empty(),
+            "declining must leave the chain as it was — no funding, no mining, no \
+             confirmation wait: {:?}",
+            ops.calls()
+        );
+        assert!(
+            state.steps.is_empty(),
+            "a declined step records nothing either"
+        );
+        assert!(
+            error.to_string().contains("funded"),
+            "the message says what did NOT happen: {error}"
+        );
 
         std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
@@ -1928,6 +3018,7 @@ mod tests {
                 1,
                 2,
                 "bb".repeat(32),
+                String::new(),
                 json!({ "targetVersionId": 2 }),
             ),
         )
@@ -2099,7 +3190,10 @@ mod tests {
         // second broadcast.
         assert_eq!(
             resume_action(&state, "v2-add-beacon-service"),
-            StepAction::AwaitConfirmation("aa".repeat(32))
+            StepAction::AwaitConfirmation {
+                txid: "aa".repeat(32),
+                raw_tx: String::new(),
+            }
         );
         assert_eq!(
             resume_action(&state, "v3-add-non-beacon-service"),
@@ -2131,6 +3225,7 @@ mod tests {
                 CLEAN_STEPS[0].beacon_index,
                 CLEAN_STEPS[0].target_version_id,
                 "cc".repeat(32),
+                String::new(),
                 json!({ "targetVersionId": 2 }),
             ),
         )
@@ -2157,6 +3252,34 @@ mod tests {
         assert_eq!(after.steps[0].block_height, 213);
         assert_eq!(after.steps[0].block_time, 1_700_000_500);
         assert!(after.steps[0].is_confirmed());
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn a_confirmation_for_an_unrecorded_step_fails_instead_of_writing_nothing() {
+        let dir = scratch_dir("confirm-unknown");
+        let path = dir.join("state.json");
+        let mut state = sample_state();
+        write_state_atomic(&path, &state).expect("the initial state is writable");
+        let before = std::fs::read_to_string(&path).expect("the state is readable");
+
+        let error = confirm_step(&mut state, &path, "v9-does-not-exist", 213, 1_700_000_500)
+            .expect_err("a confirmation with nowhere to go must not be reported as success");
+        match &error {
+            MintError::UnknownStep { name } => assert_eq!(name, "v9-does-not-exist"),
+            other => panic!("expected UnknownStep, got {other:?}"),
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the state survives"),
+            before,
+            "a refused confirmation must not rewrite the state file at all"
+        );
+        assert!(
+            !state.steps[0].is_confirmed(),
+            "the recorded step is untouched by a confirmation aimed at another name"
+        );
 
         std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
@@ -2290,6 +3413,7 @@ mod tests {
                 step.beacon_index,
                 step.target_version_id,
                 txid.repeat(32),
+                String::new(),
                 json!({ "targetVersionId": step.target_version_id }),
             );
             recorded.block_height = height;
@@ -2313,20 +3437,74 @@ mod tests {
         require_distinct_heights(&fork_state(213, 214))
             .expect("a later second branch is what the scenario is for");
 
-        for (height_a, height_b) in [(213, 213), (214, 213)] {
-            let error = require_distinct_heights(&fork_state(height_a, height_b))
-                .expect_err("two indistinguishable announcements must not pass");
+        let error = require_distinct_heights(&fork_state(213, 213))
+            .expect_err("two indistinguishable announcements must not pass");
+        match &error {
+            MintError::SameBlock {
+                name_a,
+                name_b,
+                height,
+            } => {
+                assert_eq!(name_a, "v2-branch-a");
+                assert_eq!(name_b, "v2-branch-b");
+                assert_eq!(*height, 213);
+            }
+            other => panic!("expected SameBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_second_branch_that_confirmed_first_is_reported_as_out_of_order() {
+        // A DIFFERENT fault from a shared block, with a different diagnosis: the
+        // confirmation wait reported the wrong transaction's block, or the state
+        // file was edited. Reporting it as "both confirmed in block 213" would
+        // state something that is not true of either branch.
+        let error = require_distinct_heights(&fork_state(214, 213))
+            .expect_err("a second branch confirming earlier must not pass");
+        match &error {
+            MintError::OutOfOrderBranches {
+                name_a,
+                height_a,
+                name_b,
+                height_b,
+            } => {
+                assert_eq!(name_a, "v2-branch-a");
+                assert_eq!(*height_a, 214);
+                assert_eq!(name_b, "v2-branch-b");
+                assert_eq!(*height_b, 213);
+            }
+            other => panic!("expected OutOfOrderBranches, got {other:?}"),
+        }
+
+        let message = error.to_string();
+        assert!(
+            message.contains("214") && message.contains("213"),
+            "the message carries both heights rather than one of them twice: {message}"
+        );
+        assert!(
+            !message.contains("both confirmed in block"),
+            "two different heights are not one shared block: {message}"
+        );
+        assert!(
+            message.contains("THIRD") && message.contains("fresh key"),
+            "the recovery advice is the same one that actually recovers: {message}"
+        );
+    }
+
+    #[test]
+    fn a_state_file_missing_a_branch_fails_the_ordering_check() {
+        // A truncated state file means the ordering was never checked, which is
+        // not the same as its having held — and the fork's whole anomaly rests on
+        // the two announcements being distinguishable by height.
+        for missing in [FORK_STEPS[0].name, FORK_STEPS[1].name] {
+            let mut state = fork_state(213, 214);
+            state.steps.retain(|step| step.name != missing);
+
+            let error = require_distinct_heights(&state)
+                .expect_err("an unverifiable ordering must not be reported as verified");
             match &error {
-                MintError::SameBlock {
-                    name_a,
-                    name_b,
-                    height,
-                } => {
-                    assert_eq!(name_a, "v2-branch-a");
-                    assert_eq!(name_b, "v2-branch-b");
-                    assert_eq!(*height, height_b);
-                }
-                other => panic!("expected SameBlock, got {other:?}"),
+                MintError::MissingBranch { name } => assert_eq!(name, missing),
+                other => panic!("expected MissingBranch for {missing}, got {other:?}"),
             }
         }
     }
@@ -2412,6 +3590,146 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_fork_leaves_no_state_file_blocking_its_own_remedy() {
+        // The remedy for a shared DID is "re-run with the fork's own key file",
+        // and it has to still work. If the state file were created first, the
+        // refused run would leave a file recording the CLEAN DID, and the
+        // corrected re-run against the same --state-file would be refused all
+        // over again — this time for a DID mismatch against a file this tool
+        // wrote for a session it went on to refuse.
+        let dir = scratch_dir("fork-guard-order");
+        let state_file = dir.join("poisoned.json");
+
+        // A clean session already claims the DID this key mints.
+        let (genesis, did) = prepare_session(
+            CLEAN_SCENARIO,
+            "regtest",
+            &dir.join("clean.json"),
+            &offline_client(),
+            &public_key(),
+        )
+        .expect("the clean scenario runs no shared-DID guard");
+        let mut clean = sample_state();
+        clean.did = did.clone();
+        write_state_atomic(&dir.join("clean.json"), &clean).expect("writable");
+        assert_eq!(
+            did_of(&genesis).expect("the generated document names its DID"),
+            did
+        );
+
+        let error = prepare_session(
+            FORK_SCENARIO,
+            "regtest",
+            &state_file,
+            &offline_client(),
+            &public_key(),
+        )
+        .expect_err("a fork on a DID being minted clean must be refused");
+        assert!(
+            matches!(error, MintError::SharedDid { .. }),
+            "got {error:?}"
+        );
+        assert!(
+            !state_file.exists(),
+            "the refusal must come before any state file of this tool's own \
+             making, or it blocks the re-run it asks for"
+        );
+
+        // And the remedy works: another key's DID is not this one's problem, and
+        // the session then initializes onto the untouched path.
+        prepare_session(
+            FORK_SCENARIO,
+            "regtest",
+            &state_file,
+            &offline_client(),
+            &other_public_key(),
+        )
+        .expect("the fork's own key is permitted");
+        load_or_init_state(
+            &state_file,
+            FORK_SCENARIO,
+            "regtest",
+            "http://localhost:3000",
+            &offline_client(),
+            &other_public_key(),
+        )
+        .expect("the corrected re-run initializes onto a clean path");
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn a_bare_state_file_name_scans_the_current_directory() {
+        // `Path::new("poisoned.json").parent()` is `Some("")`. Treating that as
+        // "nowhere to look" turned the guard into a silent no-op for every
+        // operator who runs from the state directory — including this crate's own
+        // CLI tests, which pass `--state-file s.json`.
+        assert_eq!(
+            state_dir(Path::new("poisoned.json")),
+            PathBuf::from("."),
+            "a bare file name lives in the current directory, not nowhere"
+        );
+        assert_eq!(
+            state_dir(Path::new("/var/mint/poisoned.json")),
+            PathBuf::from("/var/mint"),
+            "an explicit directory is used as given"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_guard_recognizes_its_own_state_file_by_location_not_by_spelling() {
+        // Two spellings of ONE file. A textual comparison calls them different
+        // files, so the guard would read its own state file as evidence about
+        // another session — and, for a bare `--state-file` name, would fail to
+        // skip the entry the scan of `.` produces for it.
+        let dir = scratch_dir("own-file");
+        let real = dir.join("real");
+        std::fs::create_dir(&real).expect("the state directory is creatable");
+        let own = real.join("poisoned.json");
+        std::fs::write(&own, b"{}").expect("the state file is writable");
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("the symlink is creatable");
+        let as_scanned = link.join("poisoned.json");
+
+        assert_ne!(
+            as_scanned, own,
+            "this test is only meaningful while the two spellings differ as paths"
+        );
+        assert!(
+            is_own_state_file(&as_scanned, &own),
+            "the same file under two spellings is still this session's own"
+        );
+        assert!(
+            !is_own_state_file(&real.join("clean.json"), &own),
+            "a different file is not this session's own"
+        );
+        assert_ne!(
+            Path::new("./poisoned.json"),
+            Path::new("poisoned.json"),
+            "a leading `.` is NOT normalized away, which is exactly the pair a bare \
+             --state-file name puts in front of this comparison"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
+    fn an_unreadable_state_directory_fails_rather_than_passing_the_guard() {
+        // "The directory could not be read" is not evidence that no clean session
+        // claims this DID. Swallowing it let the guard report success without
+        // having inspected anything.
+        let dir = scratch_dir("unreadable");
+        let absent = dir.join("no-such-directory/poisoned.json");
+
+        let error = refuse_shared_did("did:btcr2:k1qsample", &absent)
+            .expect_err("a directory the guard cannot read must not pass silently");
+        assert!(matches!(error, MintError::Io(_)), "got {error:?}");
+
+        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+    }
+
+    #[test]
     fn the_anomaly_is_recognized_by_variant_and_not_by_wording() {
         use did_btcr2::error::Btcr2Error;
         use did_btcr2::resolver::Error as ResolverError;
@@ -2435,6 +3753,42 @@ mod tests {
             ResolverError::UpdateHashMismatch
         )));
         assert!(!is_late_publishing(&did_btcr2_client::Error::NoBeacon));
+    }
+
+    #[test]
+    fn a_fork_that_fails_for_another_reason_keeps_its_cause_chain() {
+        use error_iter::ErrorIter as _;
+
+        // A `#[from]` variant of the client error displays as its own doc
+        // sentence, with the substance one level down. Flattening it into a
+        // String field left `main`'s cause-chain walk nothing to walk, so the
+        // actual failure never reached stderr.
+        let cause = did_btcr2_client::Error::Btcr2(Btcr2Error::InvalidDidUpdate(
+            "the update's targetHash does not match".to_string(),
+        ));
+        let buried = cause.to_string();
+        let error = MintError::AnomalyNotReached { source: cause };
+
+        assert!(
+            !error.to_string().contains(&buried),
+            "the top line is this crate's own sentence, not the client's: {error}"
+        );
+        let chain: Vec<String> = error.sources().skip(1).map(|s| s.to_string()).collect();
+        assert!(
+            chain.iter().any(|line| line.contains(&buried)),
+            "the client's failure must survive as a source, not be rendered away: \
+             {chain:?}"
+        );
+
+        // The clean-resolve arm has no error to carry, so it is a distinct
+        // variant naming the version instead of a stringified non-failure.
+        let resolved = MintError::AnomalyResolvedCleanly { version: 2 };
+        assert!(resolved.to_string().contains("version 2"), "{resolved}");
+        assert_eq!(
+            resolved.sources().skip(1).count(),
+            0,
+            "a resolve that succeeded has no cause to report"
+        );
     }
 
     /// A DID from the vendor regtest vectors, so the emission tests carry a real
@@ -2481,6 +3835,7 @@ mod tests {
                 beacon_index: index,
                 target_version_id: index as u64 + 2,
                 txid: format!("{:02x}", 0xd0 + index).repeat(32),
+                raw_tx: String::new(),
                 block_height: 100 + index as u32,
                 block_time: 1_700_000_000 + index as i64,
                 update,
@@ -2618,7 +3973,8 @@ mod tests {
         .expect("a capture that announces every update builds a fixture");
 
         assert_eq!(fixture.vector, "minted/clean-rotating-beacons");
-        let path = fixture::fixture_path(&fixture.vector).expect("the minted id is safe");
+        let path = fixture::fixture_path_in(&fixture::fixture_root(), &fixture.vector)
+            .expect("the minted id is safe");
         assert!(
             path.to_string_lossy()
                 .ends_with("fixtures/chain/minted/clean-rotating-beacons.json"),
@@ -2688,6 +4044,43 @@ mod tests {
     }
 
     #[test]
+    fn an_emission_whose_capture_holds_an_unreadable_body_names_the_address() {
+        // A body that is a JSON array — which is all the recorder itself checks —
+        // but whose elements are not Esplora transactions. The signal scan skips
+        // it, so without the parse gate the emission would report the update as
+        // never announced and send the operator to look at the chain for an
+        // endpoint fault. The vendor capture path has always named the address;
+        // the minted path must give the same answer.
+        let state = minted_state(
+            CLEAN_SCENARIO,
+            "regtest",
+            vec![signed_update(2, "announced")],
+        );
+        let addresses = BTreeMap::from([(
+            "bcrt1qproxy".to_string(),
+            vec![json!({ "not": "an esplora transaction" })],
+        )]);
+
+        let error = build_minted_fixture(
+            &state,
+            212,
+            &addresses,
+            clean_expected(&json!({ "id": MINTED_DID }), 4),
+        )
+        .expect_err("a body that does not parse must refuse the emission");
+
+        assert!(
+            matches!(
+                error,
+                MintError::Validate(validate::ValidateError::UnparseableBody { ref address, .. })
+                    if address == "bcrt1qproxy"
+            ),
+            "the refusal must name the endpoint fault and the address, not a \
+             missing announcement: {error:?}"
+        );
+    }
+
+    #[test]
     fn emission_runs_from_a_completed_state_file_alone() {
         // No key file, no chain, no minting: a completed state file is the whole
         // input, which is what makes a lost fixture regenerable.
@@ -2744,6 +4137,701 @@ mod tests {
             fork.iter().any(|line| line.contains("late publishing")),
             "got: {fork:?}"
         );
+    }
+
+    #[test]
+    fn a_scenario_this_tool_does_not_mint_claims_no_coverage() {
+        // An `else` arm would hand a third scenario the fork's coverage claim at
+        // the moment its fixture was written, stating something nobody checked.
+        assert_eq!(
+            minted_contributions("smt-beacon-rotation"),
+            &[] as &[&str],
+            "an unrecognized scenario contributes nothing rather than another \
+             scenario's claims"
+        );
+    }
+
+    #[test]
+    fn a_state_file_naming_a_third_scenario_is_refused_rather_than_treated_as_clean() {
+        // The offline client refuses every request, so reaching a resolve at all
+        // would fail with a transport error. The refusal below has to come from
+        // the name check, before anything is contacted.
+        let mut state = minted_state(CLEAN_SCENARIO, "regtest", vec![signed_update(2, "a")]);
+        state.scenario = "smt-beacon-rotation".to_string();
+        let did = Did::from_str(MINTED_DID).expect("the vendor DID parses");
+
+        let error = expectation_of(
+            &offline_client(),
+            &did,
+            &state,
+            ResolutionOptions::default(),
+        )
+        .expect_err("an unrecognized scenario must not be driven down the clean path");
+        match &error {
+            MintError::UnknownScenario { scenario, known } => {
+                assert_eq!(scenario, "smt-beacon-rotation");
+                assert!(
+                    known.contains(CLEAN_SCENARIO) && known.contains(FORK_SCENARIO),
+                    "the refusal lists the scenarios that do exist: {known}"
+                );
+            }
+            other => panic!("expected UnknownScenario, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_completed_session_emits_a_fixture_a_replay_can_load() {
+        // The emission end of the pipeline, which used to reach the real network
+        // for its resolve and this repository's own fixture tree for its write —
+        // so nothing exercised it. Driving a scenario and then emitting from the
+        // state file it left is the whole production path, offline.
+        let driven = DrivenSession::new("clean-emit", CLEAN_SCENARIO, &CLEAN_STEPS);
+        let ops = FakeOps::on_demand();
+        let mut state = driven.state_clone();
+        mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect("a fresh clean session runs to completion");
+
+        let root = scratch_dir("clean-emit-fixtures");
+        let path = emit_minted_in(&root, &driven.persisted(), driven.chain.clone())
+            .expect("a completed session emits its fixture");
+
+        assert!(
+            path.exists(),
+            "the fixture is on disk at {}",
+            path.display()
+        );
+        let written: ChainFixture = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("the emitted fixture is readable"),
+        )
+        .expect("and parses as a chain fixture");
+
+        assert_eq!(written.vector, "minted/clean-rotating-beacons");
+        assert_eq!(written.did, driven.persisted().did);
+        assert_eq!(
+            written.signals.len(),
+            3,
+            "one captured signal per announcement: {:?}",
+            written.signals
+        );
+        assert!(
+            written.sidecar.is_some(),
+            "a minted fixture carries the sidecar its replay must resolve with"
+        );
+        assert!(
+            written.expected.is_some(),
+            "and the expectation that replay asserts against"
+        );
+        assert_eq!(
+            written.tip_height, 762,
+            "the tip is the chain's own number — the block the last announcement \
+             confirmed in — captured by the recorder rather than chosen by this tool"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_fresh_clean_session_walks_three_beacons_to_a_deactivated_version_four() {
+        // The whole loop, against a chain that answers: three updates, each
+        // announced from a different beacon, each confirmed before the next is
+        // built, ending deactivated. The step tables, patches and guards are
+        // tested on their own elsewhere; this is the composition of them, which
+        // is where a resume or ordering defect lives.
+        let driven = DrivenSession::new("clean-fresh", CLEAN_SCENARIO, &CLEAN_STEPS);
+        let ops = FakeOps::on_demand();
+        let mut state = driven.state_clone();
+
+        mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect("a fresh clean session runs to completion");
+
+        let persisted = driven.persisted();
+        assert_eq!(
+            persisted
+                .steps
+                .iter()
+                .map(|step| (
+                    step.name.as_str(),
+                    step.target_version_id,
+                    step.beacon_index
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("v2-add-beacon-service", 2, 1),
+                ("v3-add-non-beacon-service", 3, 2),
+                ("v4-deactivate", 4, 0),
+            ],
+            "every step is recorded, in order, with the beacon it announced from"
+        );
+        assert!(
+            persisted.steps.iter().all(MintStep::is_confirmed),
+            "each step confirmed before the next was built"
+        );
+
+        let heights: Vec<u32> = persisted
+            .steps
+            .iter()
+            .map(|step| step.block_height)
+            .collect();
+        let mut sorted = heights.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            heights, sorted,
+            "three announcements at three strictly increasing heights, which is what \
+             gives a replay something to sequence: {heights:?}"
+        );
+
+        let announced = driven.chain.announcements();
+        assert_eq!(
+            announced.len(),
+            3,
+            "one announcement per step: {announced:?}"
+        );
+        let addresses: std::collections::BTreeSet<&str> =
+            announced.iter().map(|(a, _, _)| a.as_str()).collect();
+        assert_eq!(
+            addresses.len(),
+            3,
+            "three DIFFERENT beacon addresses announced, which no vendor vector covers"
+        );
+
+        assert_eq!(
+            driven
+                .persisted()
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "v2-add-beacon-service",
+                "v3-add-non-beacon-service",
+                "v4-deactivate",
+            ],
+            "the completed state file is what the fixture is built from, so it has \
+             to hold every step of the scenario and nothing else"
+        );
+
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_clean_session_resumes_from_two_confirmed_steps() {
+        // The case the module header calls out by name — a container restarts, a
+        // terminal closes — reproduced by declining at the last step's gate and
+        // then coming back.
+        let driven = DrivenSession::new("clean-resume", CLEAN_SCENARIO, &CLEAN_STEPS);
+        let ops = FakeOps::on_demand();
+
+        let stop_before_the_last = |prompt: &str| {
+            if prompt.contains(CLEAN_STEPS[2].name) {
+                Err(MintError::Declined)
+            } else {
+                Ok(())
+            }
+        };
+        let mut state = driven.state_clone();
+        let error = mint_clean(
+            &driven.session(&ops, &stop_before_the_last),
+            &mut state,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect_err("the session stops where the operator declined");
+        assert!(matches!(error, MintError::Declined), "got {error:?}");
+
+        let interrupted = driven.persisted();
+        assert_eq!(
+            interrupted.steps.len(),
+            2,
+            "two steps are on chain and recorded"
+        );
+        assert!(interrupted.steps.iter().all(MintStep::is_confirmed));
+
+        // The resume. Every recorded step is already confirmed, so the first
+        // iteration re-checks a step whose version the chain has moved past —
+        // and must not read that as "the step did not land".
+        let mut resumed = driven.state_clone();
+        mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut resumed,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect("an interrupted session resumes rather than dying on a step that landed");
+
+        let finished = driven.persisted();
+        assert_eq!(
+            finished
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "v2-add-beacon-service",
+                "v3-add-non-beacon-service",
+                "v4-deactivate",
+            ],
+            "the resume added exactly the step that was missing"
+        );
+        assert_eq!(
+            driven.chain.announcements().len(),
+            3,
+            "the resume re-announced nothing: a second announcement of a version \
+             already on chain would fork the DID being minted"
+        );
+
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_relayed_announcement_whose_answer_was_lost_is_not_announced_twice() {
+        // The window the state file exists to close. A relay can reach the
+        // network and still fail to report it — a non-2xx after the node
+        // accepted it, a 200 carrying a proxy page, a read timeout after the
+        // POST was written. If the step were recorded only after a successful
+        // answer, the announcement would be on chain with nothing recording it,
+        // and the next run would announce the SAME version from a different
+        // output: a fork of the DID being minted.
+        let driven = DrivenSession::new("clean-lost-answer", CLEAN_SCENARIO, &CLEAN_STEPS);
+        driven.chain.withholding_answers(1);
+        let ops = FakeOps::on_demand();
+        let mut state = driven.state_clone();
+
+        let error = mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect_err("a relay whose answer is not a txid is reported as a failure");
+        assert!(
+            matches!(
+                error,
+                MintError::Client(did_btcr2_client::Error::BroadcastRejected { .. })
+            ),
+            "got {error:?}"
+        );
+
+        let on_chain = driven.chain.announcements();
+        assert_eq!(
+            on_chain.len(),
+            1,
+            "the announcement DID reach the chain, which is the whole difficulty"
+        );
+        let interrupted = driven.persisted();
+        assert_eq!(
+            interrupted.steps.len(),
+            1,
+            "and the state file records it, because it was written before the relay"
+        );
+        assert_eq!(
+            interrupted.steps[0].txid, on_chain[0].1,
+            "the recorded txid is the one on chain, computed from the bytes rather \
+             than reported by the endpoint"
+        );
+        assert!(
+            !interrupted.steps[0].is_confirmed(),
+            "recorded, not yet confirmed"
+        );
+        assert!(
+            !interrupted.steps[0].raw_tx.is_empty(),
+            "the transaction is retained so a resume can re-relay THOSE bytes rather \
+             than build a second announcement of the same version"
+        );
+
+        // The resume: it must adopt the announcement already on chain.
+        let mut resumed = driven.state_clone();
+        mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut resumed,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect("the resume completes the session");
+
+        let announced = driven.chain.announcements();
+        assert_eq!(
+            announced.len(),
+            3,
+            "exactly one announcement per version — a second version 2 would abort \
+             this DID's resolution permanently: {announced:?}"
+        );
+        let finished = driven.persisted();
+        let versions: std::collections::BTreeSet<u64> = finished
+            .steps
+            .iter()
+            .map(|step| step.target_version_id)
+            .collect();
+        assert_eq!(
+            versions.len(),
+            finished.steps.len(),
+            "no version is recorded twice either: {versions:?}"
+        );
+
+        driven.cleanup();
+    }
+
+    /// Drive a clean session that is interrupted during the SECOND step's
+    /// confirmation wait, leaving one confirmed step followed by one that is
+    /// recorded and not confirmed. `fate` decides whether that second
+    /// announcement is still waiting on the network or already in a block —
+    /// both are reachable, and they are the two sides of the same window.
+    fn interrupted_after_the_first_step(tag: &str, fate: RelayFate) -> DrivenSession {
+        let driven = DrivenSession::new(tag, CLEAN_SCENARIO, &CLEAN_STEPS);
+        driven.chain.relaying(&[RelayFate::Mined, fate]);
+        let ops = FakeOps::on_demand().giving_up_after(1);
+        let mut state = driven.state_clone();
+
+        let error = mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect_err("a wait that gives up stops the session where it stood");
+        assert!(
+            matches!(
+                error,
+                MintError::Chain(ChainError::ConfirmationTimeout { .. })
+                    | MintError::Client(did_btcr2_client::Error::BroadcastRejected { .. })
+            ),
+            "the interrupt must be the wait or the relay's answer, got {error:?}"
+        );
+
+        let interrupted = driven.persisted();
+        assert_eq!(interrupted.steps.len(), 2, "two steps are recorded");
+        assert!(
+            interrupted.steps[0].is_confirmed(),
+            "the first step's block landed and was written"
+        );
+        assert!(
+            !interrupted.steps[1].is_confirmed(),
+            "the second step is recorded and its block is not written — the state \
+             this whole resume path exists for"
+        );
+        assert!(
+            !interrupted.steps[1].raw_tx.is_empty(),
+            "its bytes are retained, so the resume re-relays them rather than \
+             building a second announcement of the same version"
+        );
+        driven
+    }
+
+    /// Finish an interrupted session and assert it walked to the end without
+    /// announcing any version twice.
+    fn resume_to_completion(driven: &DrivenSession) {
+        let ops = FakeOps::on_demand();
+        let mut resumed = driven.state_clone();
+        mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut resumed,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect("a resume must reach the end of the scenario");
+
+        let finished = driven.persisted();
+        assert_eq!(
+            finished
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "v2-add-beacon-service",
+                "v3-add-non-beacon-service",
+                "v4-deactivate",
+            ],
+            "the resume finished the scenario"
+        );
+        assert!(
+            finished.steps.iter().all(MintStep::is_confirmed),
+            "and every step's block is recorded"
+        );
+        assert_eq!(
+            driven.chain.announcements().len(),
+            3,
+            "one announcement per version — a second version 2 would abort this \
+             DID's resolution permanently"
+        );
+    }
+
+    #[test]
+    fn a_resume_whose_pending_step_is_still_on_the_network_waits_for_it() {
+        // The window an interrupt during `await_confirmation` leaves behind: the
+        // FIRST step is confirmed and the SECOND is recorded with its block not
+        // yet seen. The first iteration of the resume processes a step that DID
+        // land, and must not be measured against the version the pending one
+        // targets — the chain cannot report that version until the announcement
+        // sitting on the network is mined, and it is the NEXT iteration that
+        // re-relays it and waits. Measuring against the pending target aborts
+        // here, before that iteration is ever reached, and tells the operator
+        // the chain lost their history when the tool only needed to wait.
+        let driven = interrupted_after_the_first_step("clean-pending", RelayFate::Pending);
+        assert_eq!(
+            driven.chain.announcements().len(),
+            1,
+            "the second announcement is on the network and in no block, which is \
+             precisely why the chain still reports the first step's version"
+        );
+
+        resume_to_completion(&driven);
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_resume_accepts_a_chain_ahead_of_what_the_state_file_confirms() {
+        // The other side of the same window, and the reason the check is a floor
+        // rather than an equality. The confirmation is written AFTER the block is
+        // seen, so an interrupt in between leaves a step whose announcement is
+        // already mined and whose state-file entry still says unconfirmed. The
+        // first iteration then resolves a chain one version AHEAD of everything
+        // the state file confirms. That is a resume with more history than it
+        // recorded, not a failure, and refusing it would trade one unrecoverable
+        // session for another.
+        let driven = interrupted_after_the_first_step("clean-ahead", RelayFate::AnswerLost);
+        assert_eq!(
+            driven.chain.announcements().len(),
+            2,
+            "the second announcement reached a block; only the answer was lost"
+        );
+
+        resume_to_completion(&driven);
+        driven.cleanup();
+    }
+
+    /// Build an `OP_RETURN <payload>` output for a hand-made retained value.
+    fn op_return_output(payload: &[u8]) -> esploda::bitcoin::TxOut {
+        use esploda::bitcoin::blockdata::opcodes::all::OP_RETURN;
+        use esploda::bitcoin::blockdata::script::{Builder, PushBytesBuf};
+
+        let mut pb = PushBytesBuf::new();
+        pb.extend_from_slice(payload)
+            .expect("payload fits a single push");
+        esploda::bitcoin::TxOut {
+            value: 0,
+            script_pubkey: Builder::new()
+                .push_opcode(OP_RETURN)
+                .push_slice(&pb)
+                .into_script(),
+        }
+    }
+
+    fn retained_hex(output: Vec<esploda::bitcoin::TxOut>) -> String {
+        let tx = esploda::bitcoin::Transaction {
+            version: 2,
+            lock_time: esploda::bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output,
+        };
+        hex::encode(esploda::bitcoin::consensus::encode::serialize(&tx))
+    }
+
+    #[test]
+    fn a_retained_announcement_round_trips_through_the_type_that_asserts_its_shape() {
+        let raw = retained_hex(vec![op_return_output(&[0x42u8; 32])]);
+        let signed = retained_announcement(&raw).expect("a well-formed announcement reads back");
+        assert_eq!(
+            hex::encode(esploda::bitcoin::consensus::encode::serialize(
+                signed.as_tx()
+            )),
+            raw,
+            "the bytes relayed on a resume are the bytes that were retained"
+        );
+    }
+
+    #[test]
+    fn a_retained_value_that_is_not_an_announcement_is_refused_before_it_is_relayed() {
+        // The resume path relays bytes that have been to disk and back. A value
+        // that is corrupt, truncated, or no longer a beacon signal must be caught
+        // by the same `OP_RETURN <32>` gate the resolver matches on, rather than
+        // being pushed at a node.
+        let not_a_signal = retained_hex(vec![op_return_output(&[0x42u8; 31])]);
+        let no_outputs = retained_hex(vec![]);
+
+        for (retained, why) in [
+            ("not hex at all", "a non-hex value"),
+            ("abc", "an odd number of hex characters"),
+            ("deadbeef", "hex that is not a transaction"),
+            (not_a_signal.as_str(), "a 31-byte signal push"),
+            (no_outputs.as_str(), "a transaction with no outputs"),
+        ] {
+            let fault = retained_announcement(retained)
+                .err()
+                .unwrap_or_else(|| panic!("{why} must be refused, not relayed"));
+            let rendered = fault.to_string();
+            assert!(
+                !rendered.contains(retained),
+                "the refusal names the fault, not the value: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_step_that_never_reached_a_block_still_stops_the_session() {
+        // The did-it-land check has to keep failing when a step really did not
+        // land, or relaxing it for the resume case would have bought the resume
+        // by giving up the check.
+        let driven = DrivenSession::new("clean-lost", CLEAN_SCENARIO, &CLEAN_STEPS);
+        driven.chain.dropping_relays();
+        let ops = FakeOps::on_demand();
+        let mut state = driven.state_clone();
+
+        let error = mint_clean(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+            Network::Regtest,
+        )
+        .expect_err("an announcement that reached no block must stop the session");
+        match &error {
+            MintError::StepDidNotLand {
+                name,
+                expected,
+                got,
+            } => {
+                assert_eq!(name, CLEAN_STEPS[0].name);
+                assert_eq!(*expected, 2, "the state file records an announcement of 2");
+                assert_eq!(*got, 1, "the chain still reports genesis");
+            }
+            other => panic!("expected StepDidNotLand, got {other:?}"),
+        }
+
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_completed_clean_session_can_be_re_run_to_regenerate_its_fixture() {
+        // The emission's own contract is that it reads NOTHING but the state
+        // file, which is what makes a lost or hand-deleted fixture recoverable
+        // without touching the chain again. There is no other entry point to it,
+        // so a completed session that cannot be re-run silently invalidates that.
+        let driven = DrivenSession::new("clean-rerun", CLEAN_SCENARIO, &CLEAN_STEPS);
+        let ops = FakeOps::on_demand();
+
+        for run in 1..=2 {
+            let mut state = driven.state_clone();
+            mint_clean(
+                &driven.session(&ops, &always_yes),
+                &mut state,
+                &driven.genesis,
+                Network::Regtest,
+            )
+            .unwrap_or_else(|e| panic!("run {run} of a completed session must succeed: {e}"));
+        }
+
+        assert_eq!(
+            driven.persisted().steps.len(),
+            3,
+            "re-running a finished session records nothing new"
+        );
+        assert_eq!(
+            driven.chain.announcements().len(),
+            3,
+            "and announces nothing new"
+        );
+
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_fresh_fork_session_publishes_two_conflicting_version_twos_from_one_beacon() {
+        let driven = DrivenSession::new("fork-fresh", FORK_SCENARIO, &FORK_STEPS);
+        let ops = FakeOps::on_demand();
+        let mut state = driven.state_clone();
+
+        mint_fork(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+        )
+        .expect("a fresh fork session reaches the late-publishing anomaly");
+
+        let persisted = driven.persisted();
+        assert_eq!(
+            persisted
+                .steps
+                .iter()
+                .map(|step| (step.name.as_str(), step.target_version_id))
+                .collect::<Vec<_>>(),
+            vec![("v2-branch-a", 2), ("v2-branch-b", 2)],
+            "both branches target version 2: the anomaly is two histories, not two \
+             versions"
+        );
+        assert_ne!(
+            persisted.steps[0].update, persisted.steps[1].update,
+            "identical updates would be a duplicate announcement, not a fork"
+        );
+        assert!(
+            persisted.steps[1].block_height > persisted.steps[0].block_height,
+            "the two announcements must be distinguishable by height"
+        );
+
+        let announced = driven.chain.announcements();
+        let addresses: std::collections::BTreeSet<&str> =
+            announced.iter().map(|(a, _, _)| a.as_str()).collect();
+        assert_eq!(
+            addresses.len(),
+            1,
+            "both branches announce from the SAME beacon: {announced:?}"
+        );
+
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_fork_whose_branches_are_not_ordered_by_height_writes_no_fixture() {
+        // The resolver orders signals by (targetVersionId, block height), so two
+        // version 2 announcements that are not separated by height leave the
+        // anomaly a coin flip. Driven rather than asserted on the guard alone:
+        // the fixture must not be written, and the session must say which fault
+        // it hit.
+        for (heights, expected) in [
+            (
+                [214u32, 213u32],
+                "the second branch confirmed before the first",
+            ),
+            ([213, 213], "both branches confirmed in one block"),
+        ] {
+            let driven = DrivenSession::new("fork-unordered", FORK_SCENARIO, &FORK_STEPS);
+            let ops = FakeOps::on_demand().confirming_at(&heights);
+            let mut state = driven.state_clone();
+
+            let error = mint_fork(
+                &driven.session(&ops, &always_yes),
+                &mut state,
+                &driven.genesis,
+            )
+            .expect_err(expected);
+            assert!(
+                matches!(
+                    error,
+                    MintError::OutOfOrderBranches { .. } | MintError::SameBlock { .. }
+                ),
+                "{expected}, got {error:?}"
+            );
+
+            // Both announcements ARE on chain — the guard runs after them, which
+            // is why its message says a retry adds a third rather than recovers.
+            assert_eq!(
+                driven.chain.announcements().len(),
+                2,
+                "the guard is a check on what was published, not a gate before it"
+            );
+
+            driven.cleanup();
+        }
     }
 
     #[test]

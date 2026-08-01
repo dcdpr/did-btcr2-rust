@@ -266,6 +266,33 @@ fn parse_body(body: &[Value]) -> Result<Vec<Transaction>, serde_json::Error> {
     serde_json::from_value(Value::Array(body.to_vec()))
 }
 
+/// Require every recorded body to be an Esplora transaction list, naming the
+/// address of the first that is not.
+///
+/// The gate that has to run BEFORE anything scans for announcements. [`scan_all`]
+/// skips a body it cannot parse, so without this an endpoint fault — a proxy
+/// page, an error document, a shape serde will not take — contributes zero
+/// signals and surfaces as "this update was never announced", pointing the
+/// operator at the chain instead of at the endpoint.
+///
+/// Shared rather than restated because there are two paths that build a fixture
+/// from captured bodies — the vendor capture and the minted emission — and a gate
+/// that exists on only one of them is a gate that will be missing from whichever
+/// path is read second.
+pub fn assert_bodies_parse(
+    vector: &str,
+    addresses: &BTreeMap<String, Vec<Value>>,
+) -> Result<(), ValidateError> {
+    for (address, body) in addresses {
+        parse_body(body).map_err(|source| ValidateError::UnparseableBody {
+            vector: vector.to_string(),
+            address: address.clone(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 /// Reject a capture that must not be written.
 ///
 /// Returns the announcements the capture proved, in the order they were found,
@@ -275,17 +302,8 @@ pub fn validate(
     tip_height: u32,
     addresses: &BTreeMap<String, Vec<Value>>,
 ) -> Result<Vec<CapturedSignal>, ValidateError> {
-    // 1. Every recorded body is an Esplora transaction list. A body that does not
-    //    parse here would silently contribute no signals below, turning a broken
-    //    capture into a "missing announcement" error that points at the chain
-    //    instead of at the endpoint.
-    for (address, body) in addresses {
-        parse_body(body).map_err(|source| ValidateError::UnparseableBody {
-            vector: target.id.clone(),
-            address: address.clone(),
-            source,
-        })?;
-    }
+    // 1. Every recorded body is an Esplora transaction list.
+    assert_bodies_parse(&target.id, addresses)?;
 
     let updates = sidecar_updates(&target.id, &target.sidecar)?;
     let wanted: Vec<[u8; 32]> = updates.iter().map(|u| u.hash).collect();

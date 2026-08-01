@@ -223,6 +223,32 @@ pub fn emit(
     addresses: &BTreeMap<String, Vec<Value>>,
     observed_confirmations: Option<u32>,
 ) -> Result<CaptureOutcome, CaptureError> {
+    emit_to(
+        &fixture::fixture_root(),
+        target,
+        endpoint,
+        tip_height,
+        addresses,
+        observed_confirmations,
+    )
+}
+
+/// [`emit`] against an explicit destination root.
+///
+/// The gate and the write stay one function; only where the file lands is a
+/// parameter. Without it, testing the write semantics meant writing into this
+/// repository's committed fixture tree and deleting the file afterwards — which
+/// a failing assertion in between would skip, leaving a stray file no
+/// committed-fixture check would catch, because that ledger is an explicit list
+/// rather than a directory scan.
+pub fn emit_to(
+    root: &std::path::Path,
+    target: &VectorTarget,
+    endpoint: &str,
+    tip_height: u32,
+    addresses: &BTreeMap<String, Vec<Value>>,
+    observed_confirmations: Option<u32>,
+) -> Result<CaptureOutcome, CaptureError> {
     let signals = validate::validate(target, tip_height, addresses)?;
     let fixture = ChainFixture {
         captured_at: Utc::now().to_rfc3339(),
@@ -238,7 +264,7 @@ pub fn emit(
         sidecar: None,
         expected: None,
     };
-    let path = fixture::write_atomic(&fixture)?;
+    let path = fixture::write_atomic_in(root, &fixture)?;
     // The derived path runs through the crate manifest directory, so it carries
     // `../..` segments; the file exists by now, so report the resolved one. A
     // filesystem that cannot resolve it is not a reason to fail a written
@@ -636,13 +662,23 @@ mod tests {
             .collect()
     }
 
-    /// Remove a fixture written by a test, and the directory holding it when that
-    /// leaves it empty.
-    fn remove_fixture(path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
+    /// A scratch fixture root unique to one test, removed by the test itself.
+    ///
+    /// Every emission test writes HERE. Writing into the repository's own
+    /// `fixtures/chain/` and deleting afterwards left a stray file whenever an
+    /// assertion in between failed, and `ALL_CHAIN_FIXTURES` is an explicit list
+    /// rather than a directory scan, so nothing would have caught it before a
+    /// `git add .` did.
+    fn scratch_root(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "chain-capture-emit-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch fixture root is creatable");
+        dir
     }
 
     #[test]
@@ -751,6 +787,7 @@ mod tests {
 
     #[test]
     fn emit_writes_a_fixture_when_validation_passes() {
+        let root = scratch_root("pass");
         let vector = "minted/__test_emit_pass";
         let one = update(2, "bitcoin:mmBCLTLMZqUFhiG4vhhaM7EbLRN6h7sCfG");
         let sidecar = json!({ "updates": [one] });
@@ -761,8 +798,23 @@ mod tests {
             ("bcrt1qquiet", Vec::new()),
         ]);
 
-        let outcome = emit(&target, "http://localhost:3000", 212, &addresses, Some(93))
-            .expect("a validated capture is written");
+        let outcome = emit_to(
+            &root,
+            &target,
+            "http://localhost:3000",
+            212,
+            &addresses,
+            Some(93),
+        )
+        .expect("a validated capture is written");
+        assert!(
+            outcome
+                .path
+                .starts_with(std::fs::canonicalize(&root).expect("the scratch root resolves")),
+            "the fixture lands under the destination it was given, not the \
+             repository's own tree: {}",
+            outcome.path.display()
+        );
 
         let body = std::fs::read_to_string(&outcome.path).expect("the fixture was written");
         let written: Value = serde_json::from_str(&body).expect("the fixture is JSON");
@@ -793,13 +845,14 @@ mod tests {
         assert_eq!(outcome.confirmations.expected, Some(93));
         assert_eq!(outcome.confirmations.observed, Some(93));
 
-        remove_fixture(&outcome.path);
+        std::fs::remove_dir_all(&root).expect("scratch fixture root is removable");
     }
 
     #[test]
     fn emit_writes_nothing_when_validation_fails() {
+        let root = scratch_root("refuse");
         let vector = "minted/__test_emit_refuse";
-        let path = fixture::fixture_path(vector).expect("the throwaway id is safe");
+        let path = fixture::fixture_path_in(&root, vector).expect("the throwaway id is safe");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("the fixture directory is creatable");
         }
@@ -811,8 +864,15 @@ mod tests {
         // Bodies that carry no announcement at all: the gate must refuse.
         let addresses = bodies(vec![("bcrt1qbeacon", Vec::new())]);
 
-        let error = emit(&target, "http://localhost:3000", 212, &addresses, Some(93))
-            .expect_err("an unannounced update must not be written");
+        let error = emit_to(
+            &root,
+            &target,
+            "http://localhost:3000",
+            212,
+            &addresses,
+            Some(93),
+        )
+        .expect_err("an unannounced update must not be written");
         assert!(
             matches!(
                 error,
@@ -833,7 +893,37 @@ mod tests {
             "a refused capture must not leave a temporary file behind"
         );
 
-        remove_fixture(&path);
+        std::fs::remove_dir_all(&root).expect("scratch fixture root is removable");
+    }
+
+    #[test]
+    fn emit_defaults_to_the_repositorys_fixture_tree() {
+        // `emit_to` takes the destination so the write is testable, and
+        // `emit_writes_a_fixture_when_validation_passes` proves that root is a
+        // real parameter. What is left unguarded by that is the DEFAULT: `emit`
+        // must still target the tree a capture session writes into, and nothing
+        // else does.
+        //
+        // Compared against an independently built literal, never against a
+        // second call to the same function. Two identical calls agree for ANY
+        // definition of `fixture_root` — including one repointed at /tmp — so
+        // such an assertion cannot fail and buys nothing.
+        let vector = "minted/__test_emit_pass";
+        assert_eq!(
+            fixture::fixture_path_in(&fixture::fixture_root(), vector)
+                .expect("the throwaway id is safe"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/chain")
+                .join(format!("{vector}.json")),
+            "emit's default root is the repository's own fixtures/chain, never a \
+             scratch tree"
+        );
+        assert!(
+            fixture::fixture_root().starts_with(env!("CARGO_MANIFEST_DIR")),
+            "and it is derived from this crate's location rather than from the \
+             working directory a session happens to run in: {}",
+            fixture::fixture_root().display()
+        );
     }
 
     #[test]
