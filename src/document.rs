@@ -640,7 +640,7 @@ impl SidecarData {
     /// Append a signed update to the sidecar and rebuild the lookup table.
     ///
     /// This method is dedup-on-hash by design: it skips the append if an update
-    /// with the same [`Update::hash()`] is already present (the resolver
+    /// with the same `Update::hash()` is already present (the resolver
     /// collapses dupes, but a clean file is preferred). It preserves
     /// `genesis_document` (and the other wire fields) untouched, so the CLI — a
     /// separate crate that cannot reach the `pub(crate)` wire fields — can

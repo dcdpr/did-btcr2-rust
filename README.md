@@ -25,6 +25,7 @@ mapping spec requirements to implementation status.
 
 - **Specification:** [did:btcr2 method spec](https://github.com/dcdpr/did-btcr2)
 - **Conformance matrix + gap list:** [CONFORMANCE.md](./CONFORMANCE.md)
+- **Test-suite map:** [TESTING.md](./TESTING.md)
 - **Resolve usage:** the `did-btcr2-cli` `resolve` subcommand (below)
 
 ## Resolving a DID

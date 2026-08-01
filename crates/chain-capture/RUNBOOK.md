@@ -24,6 +24,19 @@ cargo build -p chain-capture
 You need: Docker with the `compose` plugin, `unzip`, `curl`, and roughly 300 MB
 of free disk for the unpacked regtest chain.
 
+> **Run this on a machine you control, alone.** The Polar export publishes
+> bitcoind's JSON-RPC on `18443` and the Esplora API on `3000` with **no host-IP
+> prefix** (`'18443:18443'`, `'3000:3000'` in its `docker-compose.yml`), so
+> Docker binds them on **all interfaces**, not loopback — the `127.0.0.1` in the
+> commands below is where *you* reach them, not the limit of who can. The RPC
+> credential is `polaruser:polarpass`, published in the export itself. For the
+> duration of a session, anyone who can reach this host can spend the node's
+> wallet and mine on the chain. That is acceptable on a single-user machine with
+> a throwaway regtest chain and worthless coins; it is not acceptable on a shared
+> host, a LAN you do not own, or anything reachable from the internet. If you
+> must run it on such a host, prefix both published ports with `127.0.0.1:` in
+> the unpacked compose file before `docker compose up`.
+
 ---
 
 ## Session order (do not reorder)
@@ -145,7 +158,9 @@ curl -s --user polaruser:polarpass -H 'content-type: application/json' \
   capture and mint command below names.
 - `http://127.0.0.1:18443` is bitcoind's JSON-RPC port. `polaruser:polarpass` is
   the export's own published credential on a throwaway chain — it is in the
-  compose file and in the electrs `--cookie` argument.
+  compose file and in the electrs `--cookie` argument. Both ports are published
+  on all interfaces, not just loopback; see the caution at the top of this
+  document.
 
 **Both must report 758.** That is the frozen tip the four `confirmations`
 expectations are measured against, and it is a property of the export, not of
