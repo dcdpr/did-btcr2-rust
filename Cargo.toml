@@ -11,6 +11,27 @@ categories = ["cryptography::cryptocurrencies", "authentication", "encoding"]
 readme = "README.md"
 documentation = "https://docs.rs/did-btcr2"
 
+# An allowlist, so a new file at the root does not ship by default. Everything
+# here is either compiled, read by a test, or linked from README.md. The
+# development record — docs/, the vendored test-suite submodule, and the CI and
+# lint configuration — stays in the repository and out of the package.
+#
+# Patterns match gitignore-style, so a bare name matches at every depth: keep
+# the leading slash on the single files or `README.md` also drags in
+# `test-suite/README.md`. Verify a change here with `cargo package --list`.
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "fixtures/**/*.json",
+    "specs-snapshot/**/*.md",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/CONFORMANCE.md",
+    "/TESTING.md",
+]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
