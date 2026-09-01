@@ -12,3 +12,9 @@ target/
 # databases
 *.sled/
 *.rocksdb/
+
+# chain-capture session artifacts: never commit a key or a mint state file
+*.hex
+*-state.json
+# an interrupted atomic fixture write leaves one of these behind
+*.json.tmp

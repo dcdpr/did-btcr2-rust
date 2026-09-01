@@ -1,27 +1,26 @@
-//! Root Capability derivation and management for DID:BTC1
+//! Root Capability derivation and management for DID:BTCR2
 //!
-//! This module implements the algorithms specified in section 11.4 of the DID:BTC1
+//! This module implements the algorithms specified in section 11.4 of the DID:BTCR2
 //! specification for deriving and dereferencing root capabilities.
 
-use crate::error::Btc1Error;
+use crate::error::Btcr2Error;
 use crate::identifier::Did;
 
 pub(crate) mod proof;
 
-/// Derive a root capability from a DID:BTC1 identifier
+/// Derive a root capability from a DID:BTCR2 identifier
 ///
-/// This implements the algorithm from section 9.4.1 of the DID:BTC1 specification:
-/// "Derive Root Capability from did:btc1 Identifier"
+/// This implements the algorithm from section 9.4.1 of the DID:BTCR2 specification:
+/// "Derive Root Capability from did:btcr2 Identifier"
 ///
 /// # Arguments
 ///
-/// * `did_identifier` - The DID:BTC1 identifier (e.g., "did:btc1:k1qqpuww...")
+/// * `did_identifier` - The DID:BTCR2 identifier (e.g., "did:btcr2:k1qqpuww...")
 ///
 /// # Returns
 ///
 /// * `Ok(RootCapability)` - The derived root capability
 /// * `Err(Error)` - If the DID identifier is invalid
-#[allow(dead_code)] // todo: not needed until we impl Update
 pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
     // Step 3: URL encode the DID identifier
     let encoded_identifier = urlencoding::encode(did_identifier.encode());
@@ -32,7 +31,7 @@ pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
 
 /// Dereference a root capability identifier to get the capability object
 ///
-/// This implements the algorithm from section 11.4.2 of the DID:BTC1 specification:
+/// This implements the algorithm from section 11.4.2 of the DID:BTCR2 specification:
 /// "Dereference Root Capability Identifier"
 ///
 /// # Arguments
@@ -43,16 +42,16 @@ pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
 ///
 /// * `Ok(Did)` - The dereferenced root capability as a did
 /// * `Err(Error)` - If the capability ID is invalid
-pub(crate) fn dereference_root_capability(capability_id: &str) -> Result<Did, Btc1Error> {
+pub(crate) fn dereference_root_capability(capability_id: &str) -> Result<Did, Btcr2Error> {
     let Some(did_identifier_str) = capability_id.strip_prefix("urn:zcap:root:") else {
-        return Err(Btc1Error::Zcap("invalid root capability".into()));
+        return Err(Btcr2Error::Zcap("invalid root capability".into()));
     };
 
     let did = urlencoding::decode(did_identifier_str)
-        .map_err(|e| Btc1Error::Zcap(format!("Failed to decode DID from capability ID: {e:?}")))?;
+        .map_err(|e| Btcr2Error::Zcap(format!("Failed to decode DID from capability ID: {e:?}")))?;
 
     did.parse()
-        .map_err(|err| Btc1Error::Zcap(format!("Invalid DID in root capability: {err}")))
+        .map_err(|err| Btcr2Error::Zcap(format!("Invalid DID in root capability: {err}")))
 }
 
 #[cfg(test)]
@@ -60,8 +59,8 @@ mod tests {
     use super::*;
 
     const TEST_DID: &str =
-        "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
-    const TEST_CAP_ID: &str = "urn:zcap:root:did%3Abtc1%3Ak1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+        "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+    const TEST_CAP_ID: &str = "urn:zcap:root:did%3Abtcr2%3Ak1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
 
     #[test]
     fn test_dereference_root_capability() {
@@ -76,6 +75,45 @@ mod tests {
         assert!(dereference_root_capability("urn:zcap:invalid:test").is_err());
         assert!(dereference_root_capability("urn:invalid:root:test").is_err());
         assert!(dereference_root_capability("invalid:zcap:root:test").is_err());
+    }
+
+    // ---- dereference bad-payload negative tests -----------------
+    //
+    // A `urn:zcap:root:` capability id is attacker-supplied; a crafted id must
+    // NOT dereference to a bogus/authorized Did — it must fail closed. ALL
+    // dereference failure paths return `Btcr2Error::Zcap(_)` (zcap.rs:47/51/54),
+    // so both tests bind + match that variant.
+
+    /// A valid `urn:zcap:root:` prefix wrapping a percent-encoded
+    /// NON-DID payload (`not%2Da%2Ddid` decodes to `not-a-did`) is rejected —
+    /// the inner `did.parse()` fails (zcap.rs:53-54) -> `Btcr2Error::Zcap`.
+    #[test]
+    fn test_dereference_rejects_non_did_payload() {
+        let err = dereference_root_capability("urn:zcap:root:not%2Da%2Ddid")
+            .expect_err("a non-DID payload must not dereference");
+        assert!(
+            matches!(err, Btcr2Error::Zcap(_)),
+            "expected Btcr2Error::Zcap, got {err:?}"
+        );
+    }
+
+    /// A `urn:zcap:root:` prefix wrapping a bad percent-escape (`%ZZ`)
+    /// is rejected with `Btcr2Error::Zcap`. MECHANISM (verified): `urlencoding::decode`
+    /// is LENIENT — on `%ZZ` it passes the literal `%` through and yields the
+    /// valid-UTF-8 string `%ZZ`, returning `Ok` (it only errors on non-UTF-8
+    /// bytes). So this input does NOT trip the decode-error arm (zcap.rs:51); the
+    /// rejection arrives one step later when the decoded string fails to parse as
+    /// a Did (zcap.rs:53). This test binds fail-closed REJECTION via the downstream
+    /// DID-parse path — it does NOT exercise a percent-decode failure (so it does
+    /// not overclaim the decode-failure mechanism).
+    #[test]
+    fn test_dereference_rejects_bad_percent_encoding() {
+        let err = dereference_root_capability("urn:zcap:root:%ZZ")
+            .expect_err("a bad-percent-encoding payload must not dereference");
+        assert!(
+            matches!(err, Btcr2Error::Zcap(_)),
+            "expected Btcr2Error::Zcap, got {err:?}"
+        );
     }
 
     #[test]

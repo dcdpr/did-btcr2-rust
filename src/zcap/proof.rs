@@ -115,7 +115,7 @@ pub struct ProofInner {
     pub capability_action: String,
 
     // TODO: What is this? Our spec looks wrong...?
-    // See example in https://dcdpr.github.io/did-btc1/#dereference-root-capability-identifier
+    // See example in https://dcdpr.github.io/did-btcr2/#dereference-root-capability-identifier
     // `invocationTarget` is used in an ephemeral object (never serialized) named "root capability",
     // but also appears in ZCAP delegated capability OUTSIDE of `proof`:
     // https://w3c-ccg.github.io/zcap-spec/#delegated-capability
@@ -135,17 +135,13 @@ impl Proof {
 pub(crate) enum CryptoSuiteName {
     #[default]
     #[serde(rename = "bip340-jcs-2025")]
-    Jcs, // todo: remove JCS asap
-
-    #[serde(rename = "bip340-rdfc-2025")]
-    Rdfc,
+    Jcs,
 }
 
 impl fmt::Display for CryptoSuiteName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Jcs => f.write_str("bip340-jcs-2025"),
-            Self::Rdfc => f.write_str("bip340-rdfc-2025"),
         }
     }
 }

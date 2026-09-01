@@ -1,0 +1,20 @@
+[package]
+name = "did-btcr2-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+did-btcr2 = { path = "../.." }
+esploda = "0.2"
+ureq = { version = "3", features = ["json"] }
+http = "1"
+secp256k1 = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+json-patch = "4"
+onlyerror = "0.1"
+
+[dev-dependencies]
+bitcoin = "0.30"
+hex = "0.4"

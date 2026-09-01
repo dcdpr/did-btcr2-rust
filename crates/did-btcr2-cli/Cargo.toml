@@ -1,0 +1,21 @@
+[package]
+name = "did-btcr2-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "did-btcr2"
+path = "src/main.rs"
+
+[dependencies]
+did-btcr2 = { path = "../.." }
+did-btcr2-client = { path = "../did-btcr2-client" }
+onlyargs = "0.2"
+onlyerror = "0.1"
+error-iter = "0.4"
+ureq = { version = "3", features = ["json"] }
+serde_json = "1"
+secp256k1 = { version = "0.27", features = ["rand"] }
+hex = "0.4"
+esploda = "0.2"

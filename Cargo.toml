@@ -1,17 +1,45 @@
 [package]
-name = "did-btc1"
+name = "did-btcr2"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
-description = "Implementation of DID:BTC1"
-repository = "https://github.com/dcdpr/did-btc1.git"
+description = "Implementation of DID:BTCR2"
+repository = "https://github.com/dcdpr/did-btcr2.git"
 authors = ["Dan Pape <dpape@dpape.com>", "Jay Oster <jay@blipjoy.com>"]
-keywords = ["did", "did-btc1", "decentralized"]
+keywords = ["did", "did-btcr2", "decentralized"]
+categories = ["cryptography::cryptocurrencies", "authentication", "encoding"]
 readme = "README.md"
+documentation = "https://docs.rs/did-btcr2"
+
+# An allowlist, so a new file at the root does not ship by default. Everything
+# here is either compiled, read by a test, or linked from README.md. The
+# development record — docs/, the vendored test-suite submodule, and the CI and
+# lint configuration — stays in the repository and out of the package.
+#
+# Patterns match gitignore-style, so a bare name matches at every depth: keep
+# the leading slash on the single files or `README.md` also drags in
+# `test-suite/README.md`. Verify a change here with `cargo package --list`.
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "fixtures/**/*.json",
+    "specs-snapshot/**/*.md",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/CONFORMANCE.md",
+    "/TESTING.md",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hex = "0.4"
+nonempty = { version = "0.12", default-features = false }
 onlyerror = "0.1"
 rand = "0.8"
 
@@ -20,6 +48,7 @@ json-patch = "4"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
 serde_json = "1"
+base64 = "0.22"
 
 # Cryptography
 base58 = "0.2"
@@ -35,8 +64,22 @@ esploda = "0.2"
 urlencoding = "2"
 
 [dev-dependencies]
-anyhow = "1"
-ureq = { version = "3", features = ["json"] }
+# Test-only re-declaration of `bitcoin` (already brought transitively by
+# `esploda` 0.2) with the `bitcoinconsensus` feature enabled. This wires the
+# full-script `Script::verify` oracle used by the announce-signing tests
+# WITHOUT changing the published crate's feature surface. `esploda` 0.2
+# does NOT re-expose a `bitcoin/bitcoinconsensus` passthrough feature, so this
+# direct dev-dependency is the supported path; it resolves to the same
+# bitcoin 0.30.2 lock entry as `esploda::bitcoin`.
+bitcoin = { version = "0.30", features = ["bitcoinconsensus"] }
+
+[features]
+# Gates the legacy Base58-encoded test-suite fixtures (e.g.
+# test_document_from_did_components in document.rs) so CI can stay green after
+# the hash-encoding switch
+# encoding to base64url-no-pad. Off by default; enabled only when running the
+# pre-rename fixtures.
+old-spec-fixtures = []
 
 [workspace]
 members = [

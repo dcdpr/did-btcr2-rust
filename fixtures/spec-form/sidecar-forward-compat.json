@@ -1,0 +1,17 @@
+{
+  "@context": "https://btcr2.dev/context/v1",
+  "updates": [],
+  "casUpdates": [
+    {
+      "did:btcr2:k1q5pa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dag02h0cp": "a4ayc_80_OGda4BO_1o_V0etpOqiLx1JwB5S3beHW0s",
+      "arbitraryField": 42
+    }
+  ],
+  "smtProofs": [
+    {
+      "fakeProof": "0xdeadbeef",
+      "rootHash": "fakeroot"
+    }
+  ],
+  "genesisDocument": null
+}

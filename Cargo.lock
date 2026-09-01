@@ -50,12 +50,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.99"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0674a1ddeecb70197781e945de4b3b8ffb61fa939a5597bcf48503737663100"
-
-[[package]]
 name = "arbitrary-int"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -149,6 +143,7 @@ dependencies = [
  "bech32",
  "bitcoin-private",
  "bitcoin_hashes",
+ "bitcoinconsensus",
  "hex_lit",
  "secp256k1",
  "serde",
@@ -168,6 +163,16 @@ checksum = "5d7066118b13d4b20b23645932dfb3a81ce7e29f95726c2036fa33cd7b092501"
 dependencies = [
  "bitcoin-private",
  "serde",
+]
+
+[[package]]
+name = "bitcoinconsensus"
+version = "0.20.2-0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54505558b77e0aa21b2491a7b39cbae9db22ac8b1bc543ef4600edb762306f9c"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]
@@ -336,6 +341,28 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "chain-capture"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "did-btcr2",
+ "did-btcr2-client",
+ "error-iter",
+ "esploda",
+ "hex",
+ "http",
+ "json-patch",
+ "onlyargs",
+ "onlyerror",
+ "secp256k1",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "chrono"
@@ -541,17 +568,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "did-btc1"
+name = "did-btcr2"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base58",
+ "base64",
  "bech32-rust",
+ "bitcoin",
  "chrono",
  "esploda",
  "hex",
  "json-patch",
  "multibase",
+ "nonempty",
  "onlyerror",
  "rand",
  "secp256k1",
@@ -559,8 +588,40 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
- "ureq",
  "urlencoding",
+]
+
+[[package]]
+name = "did-btcr2-cli"
+version = "0.1.0"
+dependencies = [
+ "did-btcr2",
+ "did-btcr2-client",
+ "error-iter",
+ "esploda",
+ "hex",
+ "onlyargs",
+ "onlyerror",
+ "secp256k1",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "did-btcr2-client"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "did-btcr2",
+ "esploda",
+ "hex",
+ "http",
+ "json-patch",
+ "onlyerror",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -646,6 +707,12 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "error-iter"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8070547d90d1b98debb6626421d742c897942bbb78f047694a5eb769495eccd6"
 
 [[package]]
 name = "esploda"
@@ -1302,6 +1369,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nonempty"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9737e026353e5cd0736f98eddae28665118eb6f6600902a7f50db585621fecb6"
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1385,6 +1458,12 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+
+[[package]]
+name = "onlyargs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00d78a5eb5c0119da8284d056af5b352002594003e50fe1d6ee892acabfe6184"
 
 [[package]]
 name = "onlyerror"

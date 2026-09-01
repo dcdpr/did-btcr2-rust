@@ -1,0 +1,37 @@
+[package]
+name = "chain-capture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "chain-capture"
+path = "src/main.rs"
+
+[dependencies]
+did-btcr2 = { path = "../.." }
+did-btcr2-client = { path = "../did-btcr2-client" }
+onlyargs = "0.2"
+onlyerror = "0.1"
+error-iter = "0.4"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.1"
+sha2 = "0.10"
+# No `rand` feature: this tool generates no key. The minting key is supplied by
+# the operator via --key-file and produced outside both repositories (see
+# RUNBOOK.md), so enabling secp256k1's key-generation surface here would be a
+# misleading signal about where this tool's keys come from.
+secp256k1 = "0.27"
+hex = "0.4"
+base64 = "0.22"
+esploda = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+# Applying a scenario's own patch to the document it is built for, so the tests
+# prove the RFC-6902 paths exist rather than only that the patch parses. The
+# tool itself never applies a patch — the core crate does that inside the
+# resolver — so this is a test-only dependency.
+json-patch = "4"
