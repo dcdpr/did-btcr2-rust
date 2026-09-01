@@ -325,6 +325,49 @@ captured block — rather than against a stated number.
 To re-capture, see [crates/chain-capture/README.md](./crates/chain-capture/README.md)
 and [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
 
+### Spec-form fixtures
+
+`fixtures/spec-form/` holds the sidecar and update payloads the offline unit
+tests run against. Every one that any test reads is pulled in with
+`include_str!`, so these are **compile-time inputs**: delete one and the test
+build fails rather than a test failing.
+
+`golden-signed-update.json` is the exception that proves the rule. It is
+`include_str!`'d at three assertion sites, but `bless_or_assert` also opens it
+at runtime through `CARGO_MANIFEST_DIR` (`src/document.rs:3426`), because a
+blessed file has to be read back the same way it was written for `BLESS=1` to
+round-trip. That constraint is spelled out at `tests/conformance.rs:770`.
+
+| Fixture | Shape | What it pins |
+|---|---|---|
+| `golden-signed-update.json` | a signed update | The blessed update vector. Re-blessed by `BLESS=1`, never hand-edited; construction derives it from `source_documents()`. |
+| `sidecar-two-updates.json` | 2 updates | The ordinary chained case, used for lookup-table build, apply order, and version walking. |
+| `sidecar-empty.json` | 0 updates | A sidecar carrying no updates at all. |
+| `sidecar-missing-update.json` | 0 updates | A beacon signal whose hash is absent from the lookup table, raising `MISSING_UPDATE_DATA`. |
+| `sidecar-forward-compat.json` | 0 updates, plus `casUpdates`, `smtProofs`, `genesisDocument` | Not-yet-implemented sidecar members must parse and be ignored, not rejected. |
+| `sidecar-empty-service-genesis.json` | `genesisDocument` only | A hostile external genesis whose `service` array is empty must return a typed error, not panic. |
+| `sidecar-deactivated.json` | 2 updates | Currently referenced by no test. See below. |
+
+`sidecar-deactivated.json` is **unused**. It was added alongside the other
+spec-form sidecars when the resolver converged on the spec wire shape, but the
+deactivation tests build their state in memory instead, so nothing reads it.
+It is kept rather than deleted only because that is a call for a human to make;
+it is not evidence of coverage.
+
+### Unit fixtures
+
+Three files sit at `fixtures/` directly.
+
+| Fixture | Read by | How |
+|---|---|---|
+| `singleton-beacon-signal-txs.json` | `src/resolver.rs:1791`, as `UNCONFIRMED_FIXTURE` | `include_str!` |
+| `k1qypa5t...l0mgs4-transactions.json` | `src/document.rs:1873`, in `test_document_from_did_components` | `include_str!`, and the test is gated behind the `old-spec-fixtures` feature |
+| `initialDidDoc-missing-verificationMethod-id.json` | `src/document.rs:1809` | runtime `InitialDocument::from_file`, so a missing file fails the test rather than the build |
+
+The first two are compile-time inputs like the spec-form set. The third is the
+only fixture in the crate opened at runtime by path; it pins that a verification
+method with no `id` is rejected with `JsonMissingKey("id")`.
+
 ## 7. The replay harness
 
 Lives in `src/test_vectors.rs` and the test module of `src/resolver.rs`.

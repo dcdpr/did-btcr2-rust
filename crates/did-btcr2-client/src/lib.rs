@@ -9,8 +9,31 @@
 //! composition is shared by the CLI and a future HTTP front-end, and so offline
 //! tests can inject an in-process fake transport.
 //!
-//! This plan delivers the spine: the transport seam, [`Client::create`] (no
-//! I/O), and [`Client::resolve`] (drives the resolver FSM through the transport).
+//! # The four operations
+//!
+//! - [`Client::create`] mints a DID from a public key, or from an intermediate
+//!   document for the external (`x1`) form. Performs no I/O.
+//! - [`Client::resolve`] drives the core resolver FSM, serving each round of
+//!   beacon-signal requests through the transport.
+//! - [`Client::update`] and [`Client::deactivate`] build a signed update, fund
+//!   and construct its beacon announcement, then broadcast it.
+//!
+//! # Where the beacon key lives
+//!
+//! Announcement signing is split so the beacon secret never enters the core: the
+//! core builds an unsigned transaction plus its sighashes, [`sign_beacon_tx`]
+//! signs them here, and the core reassembles and re-validates the result. See
+//! `docs/adr/0001-beacon-construct-sign-split.md`.
+//!
+//! # Funding
+//!
+//! [`resolve_fee`] settles an absolute or rate-based [`Fee`] against the fee
+//! estimates the endpoint reports, and [`select`] picks the funding inputs under
+//! the bounded single-input contract. [`network_base_url`] and
+//! [`resolve_base_url`] map a network name to its Esplora endpoint; regtest has
+//! no default and requires one to be supplied.
+
+#![deny(missing_docs)]
 
 mod client;
 mod error;
