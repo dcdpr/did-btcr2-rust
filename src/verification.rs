@@ -45,6 +45,19 @@ pub struct VerificationMethod<T> {
     pub public_key: PublicKey,
 }
 
+/// One entry of a verification-relationship array (`authentication`,
+/// `assertionMethod`, `capabilityInvocation`, `capabilityDelegation`):
+/// either a reference to an entry of `verificationMethod`, or a
+/// verification method embedded in place (DID Core 1.1 §5.3.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationRelationship<T> {
+    /// A DID URL naming an entry of `verificationMethod`; may be relative to
+    /// the document `id`.
+    Reference(VerificationMethodId),
+    /// A verification method carried in the relationship array itself.
+    Embedded(VerificationMethod<T>),
+}
+
 impl<T> VerificationMethod<T> {
     /// Create a new Multikey verification method.
     ///

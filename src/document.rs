@@ -9,7 +9,7 @@ use crate::cryptosuite::CryptoSuite;
 use crate::error::{Btcr2Error, ProblemDetails};
 use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network, Sha256Hash};
 use crate::key::{PublicKey, PublicKeyExt as _};
-use crate::verification::{VerificationMethod, VerificationMethodId};
+use crate::verification::{VerificationMethod, VerificationMethodId, VerificationRelationship};
 use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofType};
 use crate::zcap::{dereference_root_capability, derive_root_capability, proof::ProofPurpose};
 use crate::{
@@ -133,7 +133,13 @@ mod document_mode {
 /// `NonEmpty<U>` — compile-time non-emptiness. For `T = String`
 /// (intermediate / placeholder-DID variant), `Sequence<U>` resolves to
 /// `Vec<U>` — unconstrained.
-pub(crate) trait DocumentMode: document_mode::Sealed {
+///
+/// The supertraits are what `Sequence<U>` demands of its element type, so a
+/// relationship entry parameterised over the mode (`VerificationRelationship<T>`)
+/// can itself be a sequence element.
+pub(crate) trait DocumentMode:
+    document_mode::Sealed + Clone + std::fmt::Debug + PartialEq + Eq
+{
     type Sequence<U>: Clone + std::fmt::Debug + PartialEq + Eq
     where
         U: Clone + std::fmt::Debug + PartialEq + Eq;
@@ -214,10 +220,14 @@ pub(crate) struct DocumentFields<T: DocumentMode> {
 
     pub(crate) verification_method: Vec<VerificationMethod<T>>,
 
-    authentication: Vec<VerificationMethodId>,
-    assertion_method: Vec<VerificationMethodId>,
-    capability_invocation: <T as DocumentMode>::Sequence<VerificationMethodId>,
-    capability_delegation: Vec<VerificationMethodId>,
+    // The four verification-relationship arrays. Each entry is either a
+    // reference into `verification_method` or an embedded verification method
+    // (DID Core 1.1 §5.3.1); only `capability_invocation` is consulted when an
+    // update proof is checked, see `DocumentFields<Did>::invoking_public_key`.
+    authentication: Vec<VerificationRelationship<T>>,
+    assertion_method: Vec<VerificationRelationship<T>>,
+    capability_invocation: <T as DocumentMode>::Sequence<VerificationRelationship<T>>,
+    capability_delegation: Vec<VerificationRelationship<T>>,
 
     pub(crate) service: <T as DocumentMode>::Sequence<Beacon>,
 
@@ -240,9 +250,8 @@ where
     T: FromStr
         + TryNetworkExt
         + DocumentMode
-        + SequenceFromVec<VerificationMethodId>
+        + SequenceFromVec<VerificationRelationship<T>>
         + SequenceFromVec<Beacon>,
-    VerificationMethodId: FromStr,
     Error: From<<T as FromStr>::Err>,
     json_tools::JsonError: From<<T as FromStr>::Err> + From<<VerificationMethodId as FromStr>::Err>,
 {
@@ -271,19 +280,20 @@ where
         // is retained regardless of the declared type; strictness is deferred to
         // VerificationMethod::public_key (which rejects non-Multikey at the
         // crypto-trust boundary). D-09b.
-        let verification_method = vec_from_object(value, "verificationMethod", |method| {
-            Ok(VerificationMethod::with_type(
-                string_from_object(method, "id")?.parse()?,
-                string_from_object(method, "controller")?.parse()?,
-                PublicKey::from_multikey(string_from_object(method, "publicKeyMultibase")?)?,
-                string_from_object(method, "type")?.to_string(),
-            ))
+        let verification_method =
+            vec_from_object(value, "verificationMethod", verification_method_from_value)?;
+        let authentication = vec_from_object(value, "authentication", |entry| {
+            relationship_from_value(entry, "authentication")
         })?;
-        let authentication = vec_from_value(value, "authentication")?;
-        let assertion_method = vec_from_value(value, "assertionMethod")?;
-        let capability_invocation_vec: Vec<VerificationMethodId> =
-            vec_from_value(value, "capabilityInvocation")?;
-        let capability_delegation = vec_from_value(value, "capabilityDelegation")?;
+        let assertion_method = vec_from_object(value, "assertionMethod", |entry| {
+            relationship_from_value(entry, "assertionMethod")
+        })?;
+        let capability_invocation_vec = vec_from_object(value, "capabilityInvocation", |entry| {
+            relationship_from_value(entry, "capabilityInvocation")
+        })?;
+        let capability_delegation = vec_from_object(value, "capabilityDelegation", |entry| {
+            relationship_from_value(entry, "capabilityDelegation")
+        })?;
         // Two-tier leniency, pulls in upstream fix for
         // https://github.com/dcdpr/did-btcr2/issues/170:
         // a service whose `type` does not name a beacon type (e.g.
@@ -322,7 +332,7 @@ where
         // NonEmpty (returning Btcr2Error::InvalidDidDocument on empty);
         // for T = String this is a no-op pass-through.
         let capability_invocation =
-            <T as SequenceFromVec<VerificationMethodId>>::sequence_from_vec(
+            <T as SequenceFromVec<VerificationRelationship<T>>>::sequence_from_vec(
                 capability_invocation_vec,
                 "capabilityInvocation",
             )?;
@@ -358,6 +368,56 @@ where
             service,
             deactivated,
         })
+    }
+}
+
+/// Parse one verification method object (`id`, `type`, `controller`,
+/// `publicKeyMultibase`), whether it sits in `verificationMethod` or is
+/// embedded in a relationship array.
+///
+/// Lenient envelope: the declared `type` is carried verbatim rather than
+/// hard-coded to "Multikey". A present, well-formed `publicKeyMultibase` is
+/// retained regardless of the declared type; strictness is deferred to
+/// `VerificationMethod::public_key`, which rejects non-Multikey at the
+/// crypto-trust boundary.
+fn verification_method_from_value<T>(
+    method: &Value,
+) -> Result<VerificationMethod<T>, json_tools::JsonError>
+where
+    T: FromStr,
+    json_tools::JsonError: From<<T as FromStr>::Err> + From<<VerificationMethodId as FromStr>::Err>,
+{
+    use json_tools::string_from_object;
+
+    Ok(VerificationMethod::with_type(
+        string_from_object(method, "id")?.parse()?,
+        string_from_object(method, "controller")?.parse()?,
+        PublicKey::from_multikey(string_from_object(method, "publicKeyMultibase")?)?,
+        string_from_object(method, "type")?.to_string(),
+    ))
+}
+
+/// Parse one entry of a verification-relationship array: a JSON string is a
+/// reference (possibly a relative DID URL), a JSON object is an embedded
+/// verification method (DID Core 1.1 §5.3.1). Any other JSON type is a typed
+/// error naming `field`, never a panic.
+fn relationship_from_value<T>(
+    entry: &Value,
+    field: &str,
+) -> Result<VerificationRelationship<T>, json_tools::JsonError>
+where
+    T: FromStr,
+    json_tools::JsonError: From<<T as FromStr>::Err> + From<<VerificationMethodId as FromStr>::Err>,
+{
+    match entry {
+        Value::String(reference) => Ok(VerificationRelationship::Reference(reference.parse()?)),
+        Value::Object(_) => Ok(VerificationRelationship::Embedded(
+            verification_method_from_value(entry)?,
+        )),
+        _ => Err(json_tools::JsonError::UnexpectedJsonType(
+            field.into(),
+            json_tools::ExpectedType::StringOrObject,
+        )),
     }
 }
 
@@ -655,32 +715,68 @@ impl SidecarData {
 }
 
 impl DocumentFields<Did> {
-    /// The single definition of the capabilityInvocation-membership rule, shared
-    /// by both the construction primitive (`Document::construct_signed_update`)
-    /// and the resolve path (`InitialDocument::apply_update`) so the spec rule has
-    /// one home and cannot drift between the two sides.
+    /// The single definition of the capabilityInvocation lookup, shared by both
+    /// the construction primitive (`Document::construct_signed_update`) and the
+    /// resolve path (`InitialDocument::apply_update`) so the spec rule has one
+    /// home and cannot drift between the two sides.
     ///
-    /// A proof's `verificationMethod` id MUST appear in this document's
-    /// `capabilityInvocation` set — only a key the document authorized to invoke
-    /// its root capability may sign an update. A non-member is rejected with the
-    /// spec-literal INVALID_DID_UPDATE (`Btcr2Error::InvalidDidUpdate`), matching
+    /// Finds the entry of this document's `capabilityInvocation` set that
+    /// identifies `verification_method` (a proof's `verificationMethod`, or the
+    /// id a caller wants to sign with) and returns the public key that entry
+    /// carries — only a key the document authorized to invoke its root
+    /// capability may sign an update. A reference entry identifies it when the
+    /// two DID URLs are equal; an embedded verification method object
+    /// identifies it when the object's `id` is equal. Every DID URL is resolved
+    /// against the document `id` (`absolutize_did_url`) before comparison, so
+    /// a relative reference such as `#key-0` on either side compares equal to
+    /// its absolute form. The first entry in `capabilityInvocation` order that
+    /// identifies the id wins, and the key is read from that entry only.
+    ///
+    /// For an embedded object the key is the object's `publicKeyMultibase`;
+    /// for a reference it is the `publicKeyMultibase` of the
+    /// `verificationMethod` entry whose (absolutized) `id` equals the reference.
+    /// Both read the parsed `public_key` field directly, as the resolve path
+    /// always has — not the strict `VerificationMethod::public_key` accessor.
+    ///
+    /// Rejected with the spec-literal INVALID_DID_UPDATE
+    /// (`Btcr2Error::InvalidDidUpdate`) when no entry identifies the id, or
+    /// when the referenced verification method does not exist — matching
     /// did-btcr2/src/operations/update.md (construction) and
-    /// did-btcr2/src/operations/resolve.md:198 (resolution) — the same code on
-    /// both sides, so no interop-visible divergence ships.
-    fn ensure_capability_invocation_member(
-        &self,
-        verification_method_id: &str,
-    ) -> Result<(), Btcr2Error> {
-        if self
+    /// did-btcr2/src/operations/resolve.md (resolution), the same code on both
+    /// sides, so no interop-visible divergence ships.
+    fn invoking_public_key(&self, verification_method: &str) -> Result<PublicKey, Btcr2Error> {
+        let target = absolutize_did_url(verification_method, &self.id);
+
+        let entry = self
             .capability_invocation
             .iter()
-            .any(|id| id.0 == verification_method_id)
-        {
-            Ok(())
-        } else {
-            Err(Btcr2Error::InvalidDidUpdate(
-                "verificationMethod id not present in the capabilityInvocation set".into(),
-            ))
+            .find(|entry| {
+                let id = match entry {
+                    VerificationRelationship::Reference(reference) => &reference.0,
+                    VerificationRelationship::Embedded(method) => &method.id.0,
+                };
+                absolutize_did_url(id, &self.id) == target
+            })
+            .ok_or_else(|| {
+                Btcr2Error::InvalidDidUpdate(
+                    "verificationMethod id not present in the capabilityInvocation set".into(),
+                )
+            })?;
+
+        match entry {
+            VerificationRelationship::Embedded(method) => Ok(method.public_key),
+            VerificationRelationship::Reference(_) => self
+                .verification_method
+                .iter()
+                .find(|method| absolutize_did_url(&method.id.0, &self.id) == target)
+                .map(|method| method.public_key)
+                .ok_or_else(|| {
+                    Btcr2Error::InvalidDidUpdate(
+                        "capabilityInvocation references a verificationMethod id that is not \
+                         present in the document"
+                            .into(),
+                    )
+                }),
         }
     }
 }
@@ -776,21 +872,22 @@ impl Document {
     /// announcing the update on a beacon. It does not mutate `self`; it
     /// returns the signed [`Update`] for the caller (or a beacon) to announce.
     ///
-    /// Before any signing, three guards run:
-    ///   1. `verification_method_id` must name a method in this document's
-    ///      verification method set,
-    ///   2. that same id must appear in the document's capabilityInvocation
-    ///      set, and
-    ///   3. the public key derived from `secret_key` must equal the matched
-    ///      method's public key.
+    /// Before any signing, two guards run:
+    ///   1. an entry of this document's capabilityInvocation set must identify
+    ///      `verification_method_id` — a reference equal to it, or an embedded
+    ///      verification method whose `id` equals it — and, for a reference,
+    ///      the referenced verification method must exist (relative DID URLs
+    ///      are resolved against the document `id` first), and
+    ///   2. the public key derived from `secret_key` must equal the public key
+    ///      that entry carries.
     ///
-    /// The first two checks are spec requirements (raising `INVALID_DID_UPDATE`
-    /// on failure); the third is a project correctness guard that prevents
-    /// emitting a signed update nobody could verify (see adrs/0006).
+    /// The first is a spec requirement (raising `INVALID_DID_UPDATE` on
+    /// failure, via the lookup shared with the resolve path); the second is a
+    /// project correctness guard that prevents emitting a signed update nobody
+    /// could verify (see adrs/0006).
     ///
-    /// Spec: did-btcr2/src/operations/update.md — the verificationMethod and
-    /// capabilityInvocation membership requirements and the Data Integrity
-    /// Config shape.
+    /// Spec: did-btcr2/src/operations/update.md — the capabilityInvocation
+    /// lookup and the Data Integrity Config shape.
     pub fn construct_signed_update(
         &self,
         patch: Patch,
@@ -808,30 +905,17 @@ impl Document {
             ));
         }
 
-        // Guard 1: the id must name a method in the verificationMethod set.
-        let method = self
-            .fields
-            .verification_method
-            .iter()
-            .find(|m| m.id.0 == verification_method_id)
-            .ok_or_else(|| {
-                Btcr2Error::InvalidDidUpdate(
-                    "verificationMethod id not present in the document verificationMethod set"
-                        .into(),
-                )
-            })?;
+        // Guard 1: an entry of the capabilityInvocation set must identify the id
+        // and yield its public key (shared with apply_update via the single
+        // lookup helper).
+        let public_key = self.fields.invoking_public_key(verification_method_id)?;
 
-        // Guard 2: the id must also appear in the capabilityInvocation set
-        // (shared with apply_update via the single membership helper).
-        self.fields
-            .ensure_capability_invocation_member(verification_method_id)?;
-
-        // Guard 3: the caller key must match the matched method's public key,
-        // so the produced signature will verify against this document.
+        // Guard 2: the caller key must match that public key, so the produced
+        // signature will verify against this document.
         let derived = secret_key
             .as_inner()
             .public_key(&secp256k1::Secp256k1::new());
-        if derived != method.public_key {
+        if derived != public_key {
             return Err(Btcr2Error::InvalidDidUpdate(
                 "secret key does not match the verificationMethod public key".into(),
             ));
@@ -1166,25 +1250,14 @@ impl InitialDocument {
 
         let crypto_suite = CryptoSuite;
 
-        // Extract public key from the document
-        let verification_method = &update.proof.inner.verification_method;
+        // The proof's verificationMethod MUST be identified by an entry of this
+        // document's capabilityInvocation set, and the key is read from that
+        // entry (resolve.md, "Check update.proof"). Shared with
+        // construct_signed_update via the single lookup helper; a missing entry
+        // or a dangling reference is the spec-literal INVALID_DID_UPDATE.
         let public_key = self
             .fields
-            .verification_method
-            .iter()
-            .find_map(|method| (&method.id.0 == verification_method).then_some(method.public_key))
-            .ok_or_else(|| {
-                Btcr2Error::ProofVerification(format!(
-                    "verificationMethod `{verification_method}` not found in document "
-                ))
-            })?;
-
-        // The proof's verificationMethod MUST be an authorized invoker — a member
-        // of this document's capabilityInvocation set (resolve.md:198). Shared with
-        // construct_signed_update via the single membership helper, mapped to the
-        // spec-literal INVALID_DID_UPDATE.
-        self.fields
-            .ensure_capability_invocation_member(verification_method)?;
+            .invoking_public_key(&update.proof.inner.verification_method)?;
 
         // NOTE (resolve-path proof checks, O-1/O-2): proof.expires and
         // proof.capabilityAction are NOT enforced here — they appear nowhere in
@@ -1357,6 +1430,101 @@ fn find_and_replace(value: &mut Value, from: &str, to: &str) {
     }
 }
 
+/// Resolve a DID URL reference against the document's DID.
+///
+/// DID Core 1.1 §3.2.1 applies RFC 3986 §5.2 with the DID as the base URI:
+/// scheme `did`, authority `method:method-specific-id`, empty path. An
+/// absolute reference (one starting with `did:`) is returned unchanged. A
+/// relative one is re-composed onto the DID: `#f` and `?q` append; a path
+/// merges as `/` + path (§5.2.3, base has an authority and an empty path)
+/// and is dot-normalised (§5.2.4), so `key-1`, `./key-1` and `../key-1`
+/// all resolve to `<did>/key-1` and no reference can climb above the DID.
+/// Implementations MUST resolve a relative DID URL against the document
+/// id before they compare (did-btcr2/src/data-structures.md).
+///
+/// The base is always the document's own `id`, never a DID taken from the
+/// proof or the capability, so an update cannot choose what a relative
+/// reference resolves against.
+pub(crate) fn absolutize_did_url(reference: &str, base: &Did) -> String {
+    if reference.starts_with("did:") {
+        return reference.to_owned();
+    }
+    let (before_fragment, fragment) = match reference.split_once('#') {
+        Some((rest, fragment)) => (rest, Some(fragment)),
+        None => (reference, None),
+    };
+    let (path, query) = match before_fragment.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (before_fragment, None),
+    };
+    let mut target = base.encode().to_owned();
+    if !path.is_empty() {
+        let merged = if path.starts_with('/') {
+            path.to_owned()
+        } else {
+            format!("/{path}")
+        };
+        target.push_str(&remove_dot_segments(&merged));
+    }
+    if let Some(query) = query {
+        target.push('?');
+        target.push_str(query);
+    }
+    if let Some(fragment) = fragment {
+        target.push('#');
+        target.push_str(fragment);
+    }
+    target
+}
+
+/// RFC 3986 §5.2.4 `remove_dot_segments`, rule for rule (A–E).
+pub(crate) fn remove_dot_segments(path: &str) -> String {
+    let mut input = path.to_owned();
+    let mut output = String::new();
+    while !input.is_empty() {
+        if let Some(rest) = input
+            .strip_prefix("../")
+            .or_else(|| input.strip_prefix("./"))
+        {
+            // A: a leading "../" or "./" is dropped
+            input = rest.to_owned();
+        } else if let Some(rest) = input.strip_prefix("/./") {
+            // B: "/./" becomes "/"
+            input = format!("/{rest}");
+        } else if input == "/." {
+            // B: a trailing "/." becomes "/"
+            input = "/".to_owned();
+        } else if let Some(rest) = input.strip_prefix("/../") {
+            // C: "/../" becomes "/" and the last output segment goes
+            input = format!("/{rest}");
+            pop_last_segment(&mut output);
+        } else if input == "/.." {
+            // C: a trailing "/.." becomes "/" and the last output segment goes
+            input = "/".to_owned();
+            pop_last_segment(&mut output);
+        } else if input == "." || input == ".." {
+            // D: a bare "." or ".." is dropped
+            input.clear();
+        } else {
+            // E: move the first path segment (with its leading "/", if any,
+            // up to but not including the next "/") from input to output
+            let start = usize::from(input.starts_with('/'));
+            let end = input[start..].find('/').map_or(input.len(), |i| i + start);
+            output.push_str(&input[..end]);
+            input = input[end..].to_owned();
+        }
+    }
+    output
+}
+
+/// Drop the last `/segment` of `output` (RFC 3986 §5.2.4 rule C).
+fn pop_last_segment(output: &mut String) {
+    match output.rfind('/') {
+        Some(i) => output.truncate(i),
+        None => output.clear(),
+    }
+}
+
 // Spec section 7.2.1.1.1
 fn generate_beacons(
     did: &Did,
@@ -1427,6 +1595,50 @@ mod tests {
         assert_eq!(v["sibling"], "did:btcr2:x1abcXYZ");
         assert_eq!(v["list"][0], "did:btcr2:_"); // exercises Array recursion arm
         assert_eq!(v["list"][1], "did:btcr2:_#svc");
+    }
+
+    /// DID Core 1.1 §3.2.1 / RFC 3986 §5.2 with the DID as the base: fragment
+    /// and query references append; path references (with or without a
+    /// leading `/`, `./` or `../`) become `<did>/` + the dot-normalised path,
+    /// so no reference can climb above the DID; an absolute `did:` reference
+    /// is returned unchanged (and is never parsed, so a foreign DID passes
+    /// through as-is).
+    #[test]
+    fn absolutize_did_url_resolves_relative_references_against_the_document_id() {
+        let (base, _vm_id, _initial, _document) = source_documents();
+        let did = base.encode().to_owned();
+        let foreign = "did:btcr2:x1qother#key-0".to_owned();
+        let table: Vec<(String, String)> = vec![
+            ("#key-0".into(), format!("{did}#key-0")),
+            ("?versionId=2".into(), format!("{did}?versionId=2")),
+            ("/path".into(), format!("{did}/path")),
+            ("key-1".into(), format!("{did}/key-1")),
+            ("./key-1".into(), format!("{did}/key-1")),
+            ("../key-1".into(), format!("{did}/key-1")),
+            ("../../key-1".into(), format!("{did}/key-1")),
+            ("a/./b/../c?x=1#f".into(), format!("{did}/a/c?x=1#f")),
+            ("".into(), did.clone()),
+            (format!("{did}#key-0"), format!("{did}#key-0")),
+            (foreign.clone(), foreign),
+        ];
+        for (reference, expected) in table {
+            assert_eq!(
+                absolutize_did_url(&reference, &base),
+                expected,
+                "{reference:?}"
+            );
+        }
+    }
+
+    /// RFC 3986 §5.4.2's two worked examples for `remove_dot_segments`, plus
+    /// the two shapes that matter for a DID base: a leading `/../` cannot pop
+    /// below the root, and a trailing `/..` leaves the trailing slash.
+    #[test]
+    fn remove_dot_segments_matches_rfc_3986_examples() {
+        assert_eq!(remove_dot_segments("/a/b/c/./../../g"), "/a/g");
+        assert_eq!(remove_dot_segments("mid/content=5/../6"), "mid/6");
+        assert_eq!(remove_dot_segments("/../key-1"), "/key-1");
+        assert_eq!(remove_dot_segments("/a/b/.."), "/a/");
     }
 
     // This helper reads the legacy fixture `resolutionOptions.json`, which keys
@@ -2989,8 +3201,9 @@ mod tests {
         );
     }
 
-    /// update.md:85 — a vm_id absent from the verificationMethod set is rejected
-    /// before any signing.
+    /// update.md — a vm_id that no capabilityInvocation entry identifies (and
+    /// that names no verification method at all) is rejected before any
+    /// signing.
     #[test]
     fn update_rejects_unknown_vm() {
         let (did, _vm_id, _initial, document) = source_documents();
@@ -3182,6 +3395,291 @@ mod tests {
             .construct_signed_update(patch, version, &vm_id, source_secret_key())
             .expect_err("a vm_id absent from capabilityInvocation must be rejected");
         assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
+    }
+
+    /// A verification method object carrying a freshly generated key, for
+    /// embedding in a relationship array under `id`.
+    fn embedded_method_json(did: &Did, id: &str) -> Value {
+        let secp = Secp256k1::new();
+        let key = SecretKey::generate().as_inner().public_key(&secp);
+        serde_json::json!({
+            "id": id,
+            "type": "Multikey",
+            "controller": did.encode(),
+            "publicKeyMultibase": key.to_multikey(),
+        })
+    }
+
+    /// The signing key's verification method object (the key
+    /// `source_secret_key` derives), for embedding in `capabilityInvocation`
+    /// so an update can be verified with no `verificationMethod` entry at all.
+    fn embedded_source_method_json(did: &Did, id: &str) -> Value {
+        let secp = Secp256k1::new();
+        let key = source_secret_key().as_inner().public_key(&secp);
+        serde_json::json!({
+            "id": id,
+            "type": "Multikey",
+            "controller": did.encode(),
+            "publicKeyMultibase": key.to_multikey(),
+        })
+    }
+
+    const RELATIONSHIP_FIELDS: [&str; 4] = [
+        "authentication",
+        "assertionMethod",
+        "capabilityInvocation",
+        "capabilityDelegation",
+    ];
+
+    /// DID Core 1.1 §5.3.1 / data-structures.md: every relationship array
+    /// accepts a mix of references and embedded verification method objects,
+    /// and the parsed entries keep their shape and the embedded object's id.
+    #[test]
+    fn relationship_arrays_accept_embedded_objects() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let embedded_id = format!("{}#embedded", did.encode());
+        let mut json = document_json(&did, &vm_id);
+        for field in RELATIONSHIP_FIELDS {
+            json[field] = serde_json::json!([vm_id, embedded_method_json(&did, &embedded_id)]);
+        }
+
+        let parsed = InitialDocument::from_json_value(json)
+            .expect("a document with embedded relationship entries parses");
+        let arrays: [&[VerificationRelationship<Did>]; 4] = [
+            &parsed.fields.authentication,
+            &parsed.fields.assertion_method,
+            &parsed
+                .fields
+                .capability_invocation
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            &parsed.fields.capability_delegation,
+        ];
+        for (field, entries) in RELATIONSHIP_FIELDS.iter().zip(arrays) {
+            assert_eq!(entries.len(), 2, "{field}");
+            assert!(
+                matches!(entries[0], VerificationRelationship::Reference(_)),
+                "{field}[0]"
+            );
+            match &entries[1] {
+                VerificationRelationship::Embedded(method) => {
+                    assert_eq!(method.id.0, embedded_id, "{field}[1]");
+                }
+                other => panic!("{field}[1]: expected Embedded, got {other:?}"),
+            }
+        }
+    }
+
+    /// A relationship entry that is neither a string nor an object is a typed
+    /// JSON error naming the field (T-18-13: no panic on odd JSON), for both a
+    /// plain `Vec` array and the `NonEmpty` `capabilityInvocation` array.
+    #[test]
+    fn relationship_entry_rejects_non_string_non_object() {
+        let (did, vm_id, _initial, _document) = source_documents();
+
+        let mut json = document_json(&did, &vm_id);
+        json["authentication"] = serde_json::json!([42]);
+        let err = InitialDocument::from_json_value(json)
+            .expect_err("a numeric relationship entry must be rejected");
+        match err {
+            Error::JsonValue(json_tools::JsonError::UnexpectedJsonType(
+                field,
+                json_tools::ExpectedType::StringOrObject,
+            )) => assert_eq!(field, "authentication"),
+            other => panic!("expected UnexpectedJsonType(_, StringOrObject), got {other:?}"),
+        }
+
+        let mut json = document_json(&did, &vm_id);
+        json["capabilityInvocation"] = serde_json::json!([true]);
+        let err = InitialDocument::from_json_value(json)
+            .expect_err("a boolean relationship entry must be rejected");
+        match err {
+            Error::JsonValue(json_tools::JsonError::UnexpectedJsonType(
+                field,
+                json_tools::ExpectedType::StringOrObject,
+            )) => assert_eq!(field, "capabilityInvocation"),
+            other => panic!("expected UnexpectedJsonType(_, StringOrObject), got {other:?}"),
+        }
+    }
+
+    /// resolve.md "Check update.proof": an embedded capabilityInvocation object
+    /// whose `id` equals the proof's verificationMethod identifies it, and
+    /// `publicKeyMultibase` is read from the object — no `verificationMethod`
+    /// entry is needed. Round-trips through construct so the target hash
+    /// matches.
+    #[test]
+    fn apply_update_accepts_embedded_capability_invocation() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"] = serde_json::json!([]);
+        json["capabilityInvocation"] =
+            serde_json::json!([embedded_source_method_json(&did, &vm_id)]);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let document = Document::from_json_value(json.clone()).expect("document is conformant");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction against the embedded shape succeeds");
+
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target is conformant");
+        target
+            .apply_update(&update)
+            .expect("an update identified by an embedded capabilityInvocation object applies");
+        assert_eq!(target.hash(), update.target_hash);
+    }
+
+    /// update.md "Construct BTCR2 Signed Update": an embedded
+    /// capabilityInvocation object identifies `verificationMethodId` and
+    /// supplies the key the signer is checked against.
+    #[test]
+    fn construct_signed_update_accepts_embedded_capability_invocation() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"] = serde_json::json!([]);
+        json["capabilityInvocation"] =
+            serde_json::json!([embedded_source_method_json(&did, &vm_id)]);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let document = Document::from_json_value(json).expect("document is conformant");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("an embedded capabilityInvocation object identifies the signing method");
+        assert_eq!(update.proof.inner.verification_method, vm_id);
+    }
+
+    /// resolve.md "Check update.proof": a reference entry whose verification
+    /// method does not exist is INVALID_DID_UPDATE — not the granular
+    /// ProofVerification the resolve path used to raise.
+    #[test]
+    fn apply_update_rejects_reference_to_missing_verification_method() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("a valid signed update is produced");
+
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"] = serde_json::json!([]);
+        json["capabilityInvocation"] = serde_json::json!([vm_id]);
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target is conformant");
+        let err = target
+            .apply_update(&update)
+            .expect_err("a dangling capabilityInvocation reference must be rejected on apply");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("not present in the document"),
+                "rejection must be the dangling-reference check; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// update.md "Construct BTCR2 Signed Update": a reference entry whose
+    /// verification method does not exist is INVALID_DID_UPDATE before signing.
+    #[test]
+    fn construct_signed_update_rejects_reference_to_missing_verification_method() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"] = serde_json::json!([]);
+        json["capabilityInvocation"] = serde_json::json!([vm_id]);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let document = Document::from_json_value(json).expect("document is conformant");
+        let err = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect_err("a dangling capabilityInvocation reference must be rejected");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("not present in the document"),
+                "rejection must be the dangling-reference check; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// data-structures.md: a relative DID URL in capabilityInvocation is
+    /// resolved against the document id before comparison, so `#initialKey`
+    /// identifies a proof whose verificationMethod is also `#initialKey`, and
+    /// the referenced entry (absolute `<did>#initialKey`) supplies the key.
+    #[test]
+    fn apply_update_resolves_relative_did_url() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json["capabilityInvocation"] = serde_json::json!(["#initialKey"]);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let document = Document::from_json_value(json.clone()).expect("document is conformant");
+        let update = document
+            .construct_signed_update(
+                benign_patch(&vm_id),
+                version,
+                "#initialKey",
+                source_secret_key(),
+            )
+            .expect("construction with a relative verificationMethod id succeeds");
+        assert_eq!(update.proof.inner.verification_method, "#initialKey");
+
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target is conformant");
+        target
+            .apply_update(&update)
+            .expect("a relative proof verificationMethod resolves against the document id");
+        assert_eq!(target.hash(), update.target_hash);
+    }
+
+    /// update.md: the construction side applies the same relative-URL
+    /// resolution — `#initialKey` on the call site matches the absolute
+    /// `<did>#initialKey` reference the document carries, and the proof
+    /// carries the caller's string verbatim.
+    #[test]
+    fn construct_signed_update_resolves_relative_did_url() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let json = document_json(&did, &vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let document = Document::from_json_value(json).expect("document is conformant");
+        let update = document
+            .construct_signed_update(
+                benign_patch(&vm_id),
+                version,
+                "#initialKey",
+                source_secret_key(),
+            )
+            .expect("a relative verificationMethod id resolves against the document id");
+        assert_eq!(update.proof.inner.verification_method, "#initialKey");
+    }
+
+    /// T-18-11: an embedded object identifies the proof only by its own `id`.
+    /// An object under a different id does not identify `<did>#initialKey`
+    /// even though its key material would verify, so the update is rejected
+    /// by the capabilityInvocation lookup.
+    #[test]
+    fn apply_update_rejects_embedded_object_with_foreign_id() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("a valid signed update is produced");
+
+        let other_id = format!("{}#other", did.encode());
+        let mut json = document_json(&did, &vm_id);
+        json["capabilityInvocation"] =
+            serde_json::json!([embedded_source_method_json(&did, &other_id)]);
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target is conformant");
+        let err = target
+            .apply_update(&update)
+            .expect_err("an embedded object under a foreign id must not identify the proof");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("capabilityInvocation"),
+                "rejection must be the capabilityInvocation lookup; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
     }
 
     /// The pre-sign key-match guard: a secret key whose public key does not

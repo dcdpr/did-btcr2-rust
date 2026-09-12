@@ -50,6 +50,9 @@ pub enum ExpectedType {
     Boolean,
     Array,
     Object,
+    /// Either a JSON string or a JSON object — the two shapes a
+    /// verification-relationship entry may take.
+    StringOrObject,
 }
 
 impl Display for ExpectedType {
@@ -60,6 +63,7 @@ impl Display for ExpectedType {
             ExpectedType::Boolean => write!(f, "Boolean"),
             ExpectedType::Array => write!(f, "Array"),
             ExpectedType::Object => write!(f, "Object"),
+            ExpectedType::StringOrObject => write!(f, "string or object"),
         }
     }
 }
