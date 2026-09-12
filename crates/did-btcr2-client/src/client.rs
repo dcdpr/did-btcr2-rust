@@ -403,6 +403,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use std::cell::RefCell;
 
+    use did_btcr2::document::Error as DocumentError;
+    use did_btcr2::error::{Btcr2Error, ProblemDetails as _};
     use did_btcr2::identifier::Network;
     use did_btcr2::key::PublicKey;
     use secp256k1::{Secp256k1, SecretKey};
@@ -799,6 +801,32 @@ mod tests {
             !result.document_metadata.deactivated,
             "genesis is not deactivated",
         );
+    }
+
+    /// An externally-created (`x1`) DID whose genesis document is supplied
+    /// neither in the sidecar nor by a CAS fetcher cannot be resolved: the
+    /// core raises the standard DID Resolution `NOT_FOUND` while constructing
+    /// the resolver, and the client surfaces it unchanged inside `Error::Core`
+    /// (the resolver-construction error, which delegates its problem details
+    /// to the spec error it wraps). The check happens before any beacon
+    /// request is issued, so the transport body is never consulted.
+    #[test]
+    fn resolve_external_without_genesis_is_not_found() {
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://fake".to_string(), transport);
+        let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
+            .parse()
+            .expect("a well-formed external DID parses");
+
+        let err = client
+            .resolve(&did, ResolutionOptions::default())
+            .expect_err("no genesis source");
+
+        let Error::Core(core @ DocumentError::Btcr2Error(Btcr2Error::NotFound(_))) = &err else {
+            panic!("expected Error::Core(Btcr2Error(NotFound)), got {err:?}");
+        };
+        let details = core.details().expect("NotFound yields problem details");
+        assert_eq!(details["type"], "https://www.w3.org/ns/did#NOT_FOUND");
     }
 
     #[test]

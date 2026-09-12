@@ -27,6 +27,9 @@ pub enum Btcr2Error {
     /// The DID document was malformed.
     InvalidDidDocument(String),
 
+    /// The Genesis Document could not be retrieved.
+    NotFound(String),
+
     // Errors from DID BTCR2 Spec
     //
     /// Sidecar data was invalid
@@ -65,8 +68,8 @@ pub enum Btcr2Error {
     /// Proof generation error
     ProofGeneration(String),
 
-    /// A subject-controlled beacon/CAS path (CAS Map / Sparse Merkle Tree /
-    /// genesis-CAS retrieval) reached an arm that is not yet implemented.
+    /// A subject-controlled beacon/CAS path (CAS Map / Sparse Merkle Tree)
+    /// reached an arm that is not yet implemented.
     //
     // Returned instead of panicking the resolver, so a remote-published DID
     // reaching these arms yields a typed resolution error rather than crashing
@@ -91,7 +94,9 @@ impl Btcr2Error {
 impl ProblemDetails for Btcr2Error {
     fn details(&self) -> Option<Value> {
         let prefix = match self {
-            Self::InvalidDid(_) | Self::InvalidDidDocument(_) => "https://www.w3.org/ns/did",
+            Self::InvalidDid(_) | Self::InvalidDidDocument(_) | Self::NotFound(_) => {
+                "https://www.w3.org/ns/did"
+            }
             // TODO: Is this the right error namespace?
             // From: https://github.com/dcdpr/did-btcr2/issues/71#issuecomment-3179550385
             Self::InvalidSidecarData(_)
@@ -109,6 +114,7 @@ impl ProblemDetails for Btcr2Error {
         let name = match self {
             Self::InvalidDid(_) => "INVALID_DID",
             Self::InvalidDidDocument(_) => "INVALID_DID_DOCUMENT",
+            Self::NotFound(_) => "NOT_FOUND",
             Self::InvalidSidecarData(_) => "INVALID_SIDECAR_DATA",
             Self::LatePublishingError(_) => "LATE_PUBLISHING",
             Self::MissingUpdateData { .. } => "MISSING_UPDATE_DATA",
@@ -130,6 +136,7 @@ impl ProblemDetails for Btcr2Error {
             "detail": match self {
                 Self::InvalidDid(detail) => detail.clone(),
                 Self::InvalidDidDocument(detail) => detail.clone(),
+                Self::NotFound(detail) => detail.clone(),
                 Self::InvalidSidecarData(detail) => detail.clone(),
                 Self::LatePublishingError(detail) => detail.clone(),
                 Self::MissingUpdateData { update_hash } => {
@@ -166,6 +173,25 @@ mod tests {
             "https://btc1.dev/context/v1#UNSUPPORTED_BEACON",
         );
         assert_eq!(details["detail"], message);
+    }
+
+    /// `NotFound` is the DID Resolution `NOT_FOUND` error: its `type` is the
+    /// standard `https://www.w3.org/ns/did#NOT_FOUND` identifier (not a
+    /// method-namespaced URI), the `title` is the Display text, and the
+    /// `detail` is the fixed sentence the resolver raised it with. Proves all
+    /// three match arms (prefix, name, detail) are present.
+    #[test]
+    fn not_found_problem_details_shape() {
+        let message =
+            "no sidecar genesisDocument was supplied and this resolver has no CAS fetcher";
+        let err = Btcr2Error::NotFound(message.into());
+        let details = err.details().expect("NotFound yields problem details");
+        assert_eq!(details["type"], "https://www.w3.org/ns/did#NOT_FOUND");
+        assert_eq!(details["detail"], message);
+        assert_eq!(
+            details["title"],
+            "The Genesis Document could not be retrieved."
+        );
     }
 
     /// `InvalidDid` carries the W3C `did` namespace prefix, the `INVALID_DID`

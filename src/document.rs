@@ -1093,8 +1093,10 @@ impl InitialDocument {
         //      External `genesisBytes`. This is the production sidecar path a CLI
         //      `resolve --sidecar <file>` deserializes (`initial_document: None`,
         //      `genesis_document: Some(..)`).
-        // If neither is present (no sidecar, or both fields None) the genesis-CAS
-        // retrieval path is not yet implemented — preserve the typed error.
+        // If neither is present (no sidecar, or both fields None) the Genesis
+        // Document cannot be retrieved: this crate has no CAS fetcher, and the
+        // resolve algorithm names that outcome NOT_FOUND
+        // (did-btcr2/src/operations/resolve.md, Process Sidecar Data).
         let initial_document = if let Some(doc) =
             sidecar.and_then(|data| data.initial_document.as_ref())
         {
@@ -1108,8 +1110,10 @@ impl InitialDocument {
             let initial = intermediate.into_initial(did)?;
             initial.sidecar_initial_validation(hash)?
         } else {
-            return Err(Btcr2Error::Unsupported(
-                "genesis-CAS retrieval is not yet implemented".into(),
+            return Err(Btcr2Error::NotFound(
+                "no sidecar genesisDocument was supplied and this resolver has no CAS fetcher; \
+                 the Genesis Document cannot be retrieved"
+                    .into(),
             ))?;
         };
 
@@ -1282,6 +1286,19 @@ impl IntermediateDocument {
         })
     }
 
+    /// Build the Initial DID Document from this genesis (intermediate)
+    /// document by replacing every `did:btcr2:_` placeholder with `did`
+    /// (`did-btcr2/src/operations/resolve.md`, Process Sidecar Data).
+    ///
+    /// This substitution is where an external DID's `sourceHash` is anchored.
+    /// The first update's `sourceHash` is the JCS-then-SHA-256 hash of the
+    /// document AFTER this substitution — never of the sidecar
+    /// `genesisDocument` bytes as shipped. The as-shipped bytes hash to the
+    /// DID's genesis bytes (the `x1` identifier payload) instead, so a reader
+    /// who hashes the sidecar genesis document directly and compares it to
+    /// `sourceHash` will see a mismatch that is not a defect. Pinned over every
+    /// external vector with updates by
+    /// `external_source_hash_is_the_initial_document_after_placeholder_substitution`.
     pub(crate) fn into_initial(self, did: &Did) -> Result<InitialDocument, Btcr2Error> {
         // Find and replace all DID placeholder strings with the DID.
         let mut json_data = self.json_data.clone();
@@ -1690,25 +1707,93 @@ mod tests {
         );
     }
 
-    // when `resolve_external` is given no sidecar initial document, the
-    // genesis-CAS retrieval fallback is not yet implemented. It must return the
-    // typed `Btcr2Error::Unsupported` rather than panicking — a remote-published
+    /// An external vector's first-update `sourceHash` is the hash of the
+    /// initial document after `did:btcr2:_` placeholder substitution, not of
+    /// the sidecar genesis document as shipped. Both halves are asserted: the
+    /// as-shipped genesis hashes to the DID's genesis bytes, and the
+    /// substituted initial document hashes to the vector's `sourceHash`.
+    /// Iterates every external vector in the suite that carries an update, so
+    /// a regenerated vector that breaks the recipe fails here by name.
+    #[test]
+    fn external_source_hash_is_the_initial_document_after_placeholder_substitution() {
+        if !crate::test_vectors::test_suite_checked_out() {
+            eprintln!(
+                "SKIP: test-suite submodule absent; \
+                 run `git submodule update --init --recursive` to enable"
+            );
+            return;
+        }
+        const EXTERNAL_WITH_UPDATES: &[&str] = &[
+            "mutinynet/x1/q425c5wf",
+            "mutinynet/x1/q550pp4e",
+            "mutinynet/x1/q5cfewep",
+            "mutinynet/x1/q5ugrf3w",
+            "mutinynet/x1/qkrrp544",
+            "regtest/x1/q26jeds9",
+            "regtest/x1/qfl7se8f",
+        ];
+        for id in EXTERNAL_WITH_UPDATES {
+            let input = crate::test_vectors::read_fixture_json(&format!("{id}/resolve/input.json"))
+                .unwrap_or_else(|| panic!("{id}: resolve/input.json must be readable"));
+            let did: Did = input["did"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id}: `did` is a string"))
+                .parse()
+                .unwrap_or_else(|e| panic!("{id}: `did` parses: {e}"));
+            let sidecar = &input["resolutionOptions"]["sidecar"];
+            let genesis = sidecar["genesisDocument"].clone();
+            assert!(
+                genesis.is_object(),
+                "{id}: sidecar carries a genesisDocument object"
+            );
+            let first_update = Update::from_json_value(sidecar["updates"][0].clone())
+                .unwrap_or_else(|e| panic!("{id}: first sidecar update parses: {e}"));
+
+            let intermediate =
+                IntermediateDocument::from_json_value(genesis, did.components().network())
+                    .unwrap_or_else(|e| panic!("{id}: genesisDocument parses: {e}"));
+            assert_eq!(
+                intermediate.hash(),
+                did.hash_unchecked(),
+                "{id}: as-shipped genesis hashes to the DID's genesis bytes"
+            );
+            assert_ne!(
+                intermediate.hash(),
+                first_update.source_hash,
+                "{id}: sourceHash is NOT the hash of the as-shipped genesis document"
+            );
+
+            let initial = intermediate
+                .into_initial(&did)
+                .unwrap_or_else(|e| panic!("{id}: into_initial succeeds: {e}"));
+            assert_eq!(
+                initial.hash(),
+                first_update.source_hash,
+                "{id}: sourceHash is the hash AFTER did:btcr2:_ -> DID substitution"
+            );
+        }
+    }
+
+    // When `resolve_external` is given no sidecar genesis source at all, the
+    // Genesis Document cannot be retrieved (this crate has no CAS fetcher) and
+    // the resolve algorithm names that outcome NOT_FOUND. It must return the
+    // typed `Btcr2Error::NotFound` rather than panicking — a remote-published
     // External DID with no sidecar genesis cannot crash the resolver.
     #[test]
-    fn external_genesis_cas_fallback_returns_unsupported() {
+    fn external_genesis_without_sidecar_is_not_found() {
         let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
             .parse()
             .unwrap();
 
         // No sidecar genesis document supplied → the `.and_then` chain yields
-        // None and the genesis-CAS fallback fires.
+        // None and the not-found branch fires.
         let resolution_options = ResolutionOptions::default();
 
         let hash = did.hash_unchecked();
         let result = InitialDocument::resolve_external(&did, hash, &resolution_options);
         assert!(
-            matches!(result, Err(Error::Btcr2Error(Btcr2Error::Unsupported(_)))),
-            "genesis-CAS fallback must error Unsupported, got: {result:?}"
+            matches!(result, Err(Error::Btcr2Error(Btcr2Error::NotFound(_)))),
+            "an x1 DID with no genesis source must error NOT_FOUND, got: {result:?}"
         );
     }
 
