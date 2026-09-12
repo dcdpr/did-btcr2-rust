@@ -3803,17 +3803,13 @@ mod tests {
     /// emission looks for.
     fn signed_update(version: u64, salt: &str) -> Value {
         json!({
+            "@context": did_btcr2::UPDATE_CONTEXT,
             "targetVersionId": version,
             "sourceHash": "AHcGbJ3OGSIrjVTIHFbIc2OEA25EDtMOM1uXBlw2qDQ",
             "targetHash": "hduKs2Pj2VpUueLkvWLSR5MeSjTYgKPO02H9zrqjUKw",
             "patch": [{ "op": "replace", "path": "/service/0/serviceEndpoint", "value": salt }],
             "proof": {
-                "@context": [
-                    "https://w3id.org/security/v2",
-                    "https://w3id.org/zcap/v1",
-                    "https://w3id.org/json-ld-patch/v1",
-                    "https://btcr2.dev/context/v1",
-                ],
+                "@context": did_btcr2::UPDATE_CONTEXT,
                 "type": "DataIntegrityProof",
                 "cryptosuite": "bip340-jcs-2025",
                 "verificationMethod": format!("{MINTED_DID}#initialKey"),

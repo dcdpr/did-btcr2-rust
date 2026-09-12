@@ -402,17 +402,13 @@ mod tests {
     /// hash computed without canonicalization would differ.
     fn update(version: u64, salt: &str) -> Value {
         json!({
+            "@context": did_btcr2::UPDATE_CONTEXT,
             "targetVersionId": version,
             "sourceHash": "AHcGbJ3OGSIrjVTIHFbIc2OEA25EDtMOM1uXBlw2qDQ",
             "targetHash": "hduKs2Pj2VpUueLkvWLSR5MeSjTYgKPO02H9zrqjUKw",
             "patch": [{ "op": "replace", "path": "/service/0/serviceEndpoint", "value": salt }],
             "proof": {
-                "@context": [
-                    "https://w3id.org/security/v2",
-                    "https://w3id.org/zcap/v1",
-                    "https://w3id.org/json-ld-patch/v1",
-                    "https://btcr2.dev/context/v1",
-                ],
+                "@context": did_btcr2::UPDATE_CONTEXT,
                 "type": "DataIntegrityProof",
                 "cryptosuite": "bip340-jcs-2025",
                 "verificationMethod": format!("{REGTEST_DID}#initialKey"),
@@ -497,11 +493,16 @@ mod tests {
 
         // Independently: canonicalize, then digest. `serde_jcs` reorders the
         // object's keys, so this also pins that the hash is over the CANONICAL
-        // form and not over the sidecar's own byte order.
+        // form and not over the sidecar's own byte order: `@context` sorts
+        // first, and `patch` follows it directly, ahead of the `targetVersionId`
+        // and `sourceHash` the helper wrote before it.
         let jcs = serde_jcs::to_string(&one).expect("a JSON value has a JCS form");
+        let context = serde_json::to_string(&did_btcr2::UPDATE_CONTEXT)
+            .expect("the pinned context array serializes");
+        let sorted_prefix = format!(r#"{{"@context":{context},"patch":"#);
         assert!(
-            jcs.starts_with(r#"{"patch":"#),
-            "JCS sorts keys, so `patch` comes first: {jcs}"
+            jcs.starts_with(&sorted_prefix),
+            "JCS sorts keys, so `@context` then `patch` come first: {jcs}"
         );
         let expected: [u8; 32] = Sha256::digest(jcs.as_bytes()).into();
         assert_eq!(hashes[0], expected);

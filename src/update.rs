@@ -22,10 +22,26 @@ pub enum Error {
     InvalidTargetVersionId,
 }
 
+/// The `@context` every BTCR2 Unsigned Update carries, in this exact order
+/// (did-btcr2/src/data-structures.md, "BTCR2 Unsigned Update"). A resolver
+/// rejects an update, or a proof, whose `@context` differs in membership or
+/// order. The array sits inside the JCS-canonicalized bytes, so changing it
+/// changes every update hash and every proof.
+pub const UPDATE_CONTEXT: [&str; 4] = [
+    "https://w3id.org/json-ld-patch/v1",
+    "https://w3id.org/zcap/v1",
+    "https://w3id.org/security/data-integrity/v2",
+    "https://btcr2.dev/context/v1",
+];
+
 /// A signed DID update: the source/target JSON Document Hashes, the target
 /// version, the BIP340 Data Integrity proof, and the JSON Patch to apply.
 #[derive(Clone, Debug)]
 pub struct Update {
+    /// JSON Document Hash of the document this update applies to. For an
+    /// external DID's first update this is the hash of the initial document
+    /// after `did:btcr2:_` placeholder substitution — see
+    /// `IntermediateDocument::into_initial`.
     pub(crate) source_hash: Sha256Hash,
     pub(crate) target_hash: Sha256Hash,
     pub(crate) target_version_id: NonZeroU64,
@@ -334,12 +350,7 @@ impl UnsecuredUpdate {
         target_version_id: NonZeroU64,
     ) -> Self {
         let json = serde_json::json!({
-            "@context": [
-                "https://w3id.org/security/v2",
-                "https://w3id.org/zcap/v1",
-                "https://w3id.org/json-ld-patch/v1",
-                "https://btcr2.dev/context/v1"
-            ],
+            "@context": UPDATE_CONTEXT,
             "patch": patch,
             "sourceHash": source_hash,
             "targetHash": target_hash,
@@ -450,9 +461,13 @@ mod tests {
     }
 
     /// a constructed unsigned update carries exactly the four
-    /// required `@context` URLs, in spec order. The verify path requires an
-    /// exact `@context` match, so a wrong or short set would break interop
-    /// This pins the canonical set at construction time.
+    /// required `@context` URLs, in spec order
+    /// (did-btcr2/src/data-structures.md, "BTCR2 Unsigned Update"). The
+    /// verify path requires an exact `@context` match, so a wrong or short
+    /// set would break interop. The first assertion is against the literal
+    /// spec strings — not `UPDATE_CONTEXT` — so a typo in the const cannot be
+    /// self-consistent with its own test; the second pins the const to the
+    /// emitted value.
     #[test]
     fn unsigned_update_has_four_contexts() {
         let patch = sample_patch();
@@ -465,12 +480,13 @@ mod tests {
         assert_eq!(
             u.as_ref()["@context"],
             serde_json::json!([
-                "https://w3id.org/security/v2",
-                "https://w3id.org/zcap/v1",
                 "https://w3id.org/json-ld-patch/v1",
+                "https://w3id.org/zcap/v1",
+                "https://w3id.org/security/data-integrity/v2",
                 "https://btcr2.dev/context/v1"
             ])
         );
+        assert_eq!(u.as_ref()["@context"], serde_json::json!(UPDATE_CONTEXT));
     }
 
     /// the constructed unsigned update carries the expected field
