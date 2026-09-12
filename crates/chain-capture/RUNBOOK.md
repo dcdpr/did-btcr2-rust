@@ -39,31 +39,29 @@ of free disk for the unpacked regtest chain.
 
 ---
 
-## Session order (do not reorder)
+## Session order
 
 1. **Part 1** — stand the Polar chain up and capture the **four** vendor regtest
-   vectors. **Do not mine.** Leave the stack **running**.
+   vectors. Leave the stack **running**.
 2. **Part 2** — capture the **three** vendor mutinynet vectors. Independent of
    Polar, but do it in the same sitting.
 3. **Part 3** — mint the **two** scenarios on the same running Polar chain.
-   Mining is allowed from here, and only from here.
 4. **Part 4** — tear the stack down, delete the unpacked chain, check what
    landed.
 
-The reason is arithmetic, not preference. The four vendor regtest vectors state
-`confirmations` **93**, **78**, **65** and **53**, and all four are measured
-against **one frozen chain tip**. The Polar export ships `"autoMineMode": 0`
-precisely so that chain does not drift on its own. Minting raises the tip, and
-raising the tip breaks all four expectations at once.
-
-`chain-capture` refuses to produce a block while any of those four fixtures is
-missing, and names the ones that are outstanding, so getting this backwards
-fails loudly rather than silently. But the refusal costs you a restart of the
-whole session, so do it in order.
+The four vendor regtest captures were taken against the export's untouched tip
+(758), and every committed capture replays from its own file — nothing in the
+test suite reads a live chain. Part 1 comes before Part 3 when both are done in
+one sitting only because re-capturing those four vectors after mining needs a
+fresh unpack of the export: their stated `confirmations` (93, 78, 65, 53) are
+measured against 758 and stop reproducing once the tip has moved. Those four
+vectors are being regenerated upstream; when that regeneration is absorbed,
+their captures are replaced, and Part 1 is re-run against whatever chain they
+were minted on.
 
 ---
 
-## Part 1 — regtest vendor vectors (frozen chain)
+## Part 1 — regtest vendor vectors
 
 Captures four vectors:
 
@@ -106,8 +104,8 @@ grep -q 'maxtipage' /tmp/btcr2-polar/docker-compose.yml && echo 'maxtipage set: 
 
 Bitcoin Core reports `initialblockdownload: true` for any chain whose tip is
 older than `-maxtipage` (default 86400 seconds — one day), *regardless of whether
-the chain is fully synced*. This chain's tip is frozen at a fixed date in the
-past and recedes further every day, so on any machine it is permanently in
+the chain is fully synced*. This chain's tip carries a fixed date in the past
+that recedes further every day, so on any machine it is permanently in
 "initial block download" as far as the flag is concerned. electrs's startup loop
 gates on exactly that flag: it logs
 
@@ -122,8 +120,8 @@ resets it.
 `-maxtipage` changes no chain state whatsoever: same tip, same block hash, same
 heights, same `confirmations`. It only stops bitcoind from calling a
 legitimately-old chain "syncing". Mining would also clear the flag, by giving the
-tip a current timestamp — and would destroy all four vendor expectations. Do not
-be tempted; see the warning at the end of this Part.
+tip a current timestamp, but it moves the tip; use `-maxtipage` so the vendor
+captures stay reproducible from the untouched export.
 
 ### 3. Start the containers
 
@@ -162,16 +160,10 @@ curl -s --user polaruser:polarpass -H 'content-type: application/json' \
   on all interfaces, not just loopback; see the caution at the top of this
   document.
 
-**Both must report 758.** That is the frozen tip the four `confirmations`
-expectations are measured against, and it is a property of the export, not of
-your session — an unpacked-and-untouched chain reads 758 on every machine, every
-time.
-
-Any other number means this chain has been advanced since the vectors were
-generated, and the four expectations below will not reproduce. Stop and find out
-why rather than capturing against it: a captured fixture records the tip it saw,
-so capturing from a moved chain files four fixtures that silently disagree with
-the vendor vectors they claim to reproduce.
+An untouched export reports 758 on both. A higher number means this copy has
+been mined on (a previous Part 3, for instance); that is harmless for minting,
+but the four vendor `confirmations` expectations will not reproduce from it —
+unpack fresh before capturing them.
 
 ### 5. Capture
 
@@ -200,8 +192,8 @@ Only then does it write `fixtures/chain/regtest/<k1|x1>/<short-id>.json`.
 The session table goes to stderr, one row per vector: addresses captured, how
 many of them came back empty (a captured state, not a failure), signals proved,
 the confirmations check, and the fixture path. Below it: which vectors are
-drivable now, each failure with its full cause chain, the frozen tip, and the
-do-not-mine reminder.
+drivable now, each failure with its full cause chain, and the tip the
+`confirmations` were measured against.
 
 A row reading `FAILED, nothing written` means exactly that — nothing was written
 for that vector, and the other rows are unaffected.
@@ -219,21 +211,6 @@ equivalent file.
 ### 8. Leave the stack running
 
 Part 3 mints on this same chain. Teardown is Part 4, not now.
-
----
-
-> ### ⚠ Do not mine during Part 1
->
-> The upstream `test-suite/regtest/README.md` tells you to mine six blocks if
-> electrs will not serve. **Do not do that here.** The four regtest vectors state
-> `confirmations` 93 / 78 / 65 / 53 against one frozen tip; mining moves the tip
-> and breaks every one of them simultaneously, and the vectors cannot be
-> re-minted — nobody holds the keys that produced them.
->
-> If electrs will not serve: tear the stack down, delete the unpacked directory,
-> and unpack the zip again. Never advance the chain before Part 1's four
-> fixtures exist. `chain-capture mint` refuses to produce a block until all four
-> are written.
 
 ---
 
@@ -265,8 +242,9 @@ It must read `false`. While it reads `true`, electrs will never serve.
 *If the log shows index or compaction activity* — that is the genuine cold
 start. Wait and retry the smoke test; it can take a minute or two.
 
-**Do not mine to fix either one.** That is the upstream README's advice, it does
-clear the flag, and it destroys all four vendor expectations in the process.
+Prefer `-maxtipage` over mining to fix either one. The upstream README's advice
+to mine six blocks does clear the flag, but mining moves the tip and the vendor
+`confirmations` expectations stop reproducing from this copy of the export.
 
 **Port 3000 or 18443 is already in use.**
 Stop the conflicting service and start the stack again. Do not remap the ports:
@@ -288,9 +266,9 @@ then retry step 3.
 **A row fails with a confirmations mismatch.**
 The message names the vector, the expected value, what the capture yields, the
 tip and the announcement's block height. Report all four vectors' numbers and
-the tip. If all four are off by the **same** constant, the frozen chain has been
-advanced relative to when the vectors were generated — that is an upstream
-mismatch to raise, not something to work around. Do **not** pin a fabricated tip
+the tip. If all four are off by the **same** constant, this copy of the export
+has been mined on — unpack fresh and retry. If a fresh unpack still disagrees,
+that is an upstream mismatch to raise, not something to work around. Do **not** pin a fabricated tip
 to make the arithmetic come out: the tip is read from the chain, and a
 back-derived tip would make the assertion circular and unable to fail.
 
@@ -356,10 +334,6 @@ published publicly, there is no faucet on the critical path, and if a run goes
 wrong the whole chain can be thrown away and re-unpacked. That is what makes
 this the first rung: the same commands run against a public chain later, and the
 differences are spelled out at the end of this part.
-
-**Precondition: Part 1's four fixtures must already exist.** `chain-capture`
-refuses to produce a block otherwise, names the vector ids that are still
-outstanding, and refuses **before** any request reaches the node.
 
 Two DIDs are minted, from **two separate keys**. A real on-chain fork aborts
 resolution, so one DID cannot carry both a clean multi-update history and the
@@ -430,8 +404,7 @@ confirmation prompt.
 
 On regtest the tool sends each announcing beacon its funding from the node's own
 wallet and mines the transfer, so there is nothing to do by hand. If the wallet
-reports no spendable balance it first mines 101 blocks to mature a coinbase —
-which is allowed only because Part 1 is already done.
+reports no spendable balance it first mines 101 blocks to mature a coinbase.
 
 #### 4. Cadence
 
@@ -587,9 +560,9 @@ working inside the tree instead of `~/.btcr2-mint`; both `.gitignore` files
 already cover those names, so it should be invisible — if it is not, move the
 file out of the tree rather than adding another ignore rule.
 
-### One-way door
+### Re-capturing after Part 3
 
-Re-capturing the vendor **regtest** vectors after Part 3 will FAIL the
-confirmations check, because Part 3 moved the tip. That is the guard working, not
-a bug. The remedy is to unpack the zip again into a clean directory and redo
-Part 1 from step 1 on a fresh copy of the frozen chain.
+Re-capturing the vendor **regtest** vectors after Part 3 fails the confirmations
+check, because Part 3 moved the tip the vectors' `confirmations` were measured
+against. Unpack the zip again into a clean directory and redo Part 1 from step 1
+on the untouched export.

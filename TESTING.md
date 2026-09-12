@@ -222,7 +222,7 @@ Skip reasons below are the derived ones, in the rule's own terms.
 - **regtest/k1/qgppexmy** — the earliest-anchored regtest signal (height 666) and
   therefore the largest stated confirmation count in the suite, 93.
 - **regtest/k1/qgpy0hmm** — the only vector with four Singleton beacons; its 78
-  confirmations pin the frozen regtest tip.
+  confirmations were captured against the export's tip, 758.
 - **regtest/x1/q26jeds9** — the only vector with exactly two Singleton beacons;
   external DID resolved from a sidecar genesis, signal at height 694 for 65
   confirmations.
@@ -306,16 +306,17 @@ addresses captured; `signals` is the number of OP_RETURN announcements found.
 The other 4 driven vectors (`q5puld7y`, `q5g3smvu`, `qgpakaw4`, `q2fz9mz6`) are
 genesis-only and need no capture.
 
-### The regtest tip is frozen — do not mine
+### The vendor regtest captures share one tip
 
-The four regtest vendor captures share one tip, 758, and that is exactly what
-makes the vectors' stated confirmations reproduce. `tip - signal_height + 1`
-gives 758−666+1 = 93, 758−681+1 = 78, 758−694+1 = 65 and 758−706+1 = 53,
-matching the 93 / 78 / 65 / 53 in the vector table.
+The four regtest vendor captures share one tip, 758 — the Polar export's tip as
+shipped — and that is exactly what makes the vectors' stated confirmations agree.
+`tip - signal_height + 1` gives 758−666+1 = 93, 758−681+1 = 78, 758−694+1 = 65
+and 758−706+1 = 53, matching the 93 / 78 / 65 / 53 in the vector table.
 
-**The regtest chain behind these captures must not be mined further.** The "mine
-6 blocks" step in `test-suite/regtest/README.md` would move the tip and break all
-four captures at once.
+Mining on a fresh unpack of that export is how the minted scenarios below are
+produced; the vendor rows replay from their files regardless of what any live
+chain does. Re-capturing a vendor regtest vector needs a fresh unpack, since its
+`confirmations` only reproduce from the untouched tip.
 
 The three mutinynet captures share tip 3307267 and all announce at height
 3190760. Mutinynet vector outputs state no `confirmations`, so those rows assert

@@ -347,7 +347,7 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
             result.document_metadata.deactivated.to_string(),
         ));
     }
-    // A vector that states confirmations states them against a frozen tip, so the
+    // A vector that states confirmations states them against one tip, so the
     // resolver's own report is checked too. A vector that states none is not
     // checked here — the tip moves on a live chain and the vector never claimed
     // otherwise.
@@ -467,8 +467,8 @@ fn error_line(error: &CaptureError) -> String {
 }
 
 /// The operator-facing session summary: which vectors are now drivable, which
-/// failed and why, and — on a chain whose vectors pin a frozen tip — what that
-/// tip is and why it must not move.
+/// failed and why, and — on a chain whose vectors state `confirmations` — the
+/// tip those counts were measured against.
 ///
 /// Capture-time validation is this tool's operator-facing artifact. A session
 /// must end with the operator knowing exactly what is now drivable, without
@@ -504,19 +504,20 @@ fn render_summary(
     }
 
     // A chain whose vectors state `confirmations` measures every one of them
-    // against a single tip, so that tip is session state the operator has to
-    // know about before doing anything else with the chain.
-    let frozen_tip = rows
+    // against a single tip. The fixtures written above replay from their files
+    // whatever the chain does next; the tip is stated so the operator knows
+    // what a later re-capture has to be taken against.
+    let shared_tip = rows
         .iter()
         .filter_map(|(_, row)| row.as_ref().ok())
         .find(|outcome| outcome.confirmations.expected.is_some())
         .map(|outcome| outcome.tip_height);
-    if let Some(tip) = frozen_tip {
+    if let Some(tip) = shared_tip {
         out.push_str(&format!(
-            "  frozen tip {tip}: every confirmations expectation captured above is measured \
-             against this tip. DO NOT MINE on this chain until every vector filed under \
-             `{network_dir}` has been captured — one new block invalidates all of them at \
-             once, and they cannot be re-derived.\n"
+            "  tip {tip}: every confirmations expectation captured above is measured \
+             against this tip. The fixtures replay from their files regardless; to \
+             re-capture a `{network_dir}` vector after this chain has been mined on, \
+             start from a fresh unpack of the export.\n"
         ));
     }
     out
@@ -1044,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn a_regtest_session_footer_carries_the_frozen_tip_and_the_do_not_mine_reminder() {
+    fn a_regtest_session_footer_states_the_tip_the_confirmations_were_measured_against() {
         let rows = vec![
             (
                 "regtest/k1/qgppexmy".to_string(),
@@ -1074,18 +1075,22 @@ mod tests {
             "the session names each failure: {summary}"
         );
         assert!(
-            summary.contains("frozen tip 212"),
+            summary.contains("tip 212"),
             "a regtest session states the tip its confirmations are measured against: \
              {summary}"
         );
         assert!(
-            summary.to_lowercase().contains("do not mine"),
-            "a regtest session warns that mining invalidates the captures: {summary}"
+            summary.contains("fresh unpack"),
+            "a regtest session says how to re-capture once the chain has moved: {summary}"
+        );
+        assert!(
+            !summary.to_lowercase().contains("do not mine"),
+            "mining is not forbidden: the fixtures replay from their files: {summary}"
         );
     }
 
     #[test]
-    fn a_session_with_no_frozen_tip_omits_the_mining_reminder() {
+    fn a_session_with_no_stated_confirmations_omits_the_tip_footer() {
         let rows = vec![(
             "mutinynet/k1/q5p6w9su".to_string(),
             Ok(sample_outcome(
@@ -1100,8 +1105,8 @@ mod tests {
 
         assert!(summary.contains("drivable now: mutinynet/k1/q5p6w9su"));
         assert!(
-            !summary.to_lowercase().contains("do not mine"),
-            "a chain whose vectors pin no confirmations has no frozen tip to protect: \
+            !summary.contains("measured against this tip"),
+            "a chain whose vectors state no confirmations has no shared tip to report: \
              {summary}"
         );
     }

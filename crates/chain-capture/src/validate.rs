@@ -334,10 +334,10 @@ pub fn validate(
     //
     //    The tip is whatever the chain reported; it is never back-derived from
     //    the expected value, which would make this assertion circular and unable
-    //    to fail. The four regtest vectors all measure against one frozen chain
+    //    to fail. The four regtest vectors all measure against one shared chain
     //    tip, so a single captured number has to reproduce four independent
     //    expectations — the strongest check available that a capture is sound,
-    //    and the reason the minting path must not mine between those captures.
+    //    and the reason a re-capture starts from a fresh unpack of the export.
     if let Some(expected) = target.expected_confirmations {
         let applied =
             applied_signal(&updates, &scanned).ok_or_else(|| ValidateError::MissingSignal {

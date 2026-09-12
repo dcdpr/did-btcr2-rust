@@ -15,16 +15,6 @@
 //! mapping and the amount conversion are all unit-testable with no daemon
 //! running and no network.
 
-// The minting session now reaches almost everything here. Two items are still
-// only exercised by the tests below: `get_block_count` and
-// `warn_if_frozen_tip_moved`, which belong together as a session-start notice
-// (read the live tip, say so if the vendor captures were measured against a
-// different one) and need a tip reader on the operations trait to be callable
-// from behind it. Each carries its own `allow(dead_code)` and drops it with that
-// notice — deliberately NOT one attribute at module scope, which would suppress
-// the lint for every item in this file to accommodate those two, and let the next
-// unwired helper land in the crate's largest module unremarked.
-
 use base64::Engine as _;
 use did_btcr2_client::{
     BtcTransport, EsploraUtxo, TransportError, UreqTransport, confirmed_total, fetch_utxos,
@@ -33,12 +23,9 @@ use esploda::bitcoin::Address;
 use esploda::esplora::{Status, Transaction};
 use onlyerror::Error;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::fixture::{self, ChainFixture};
 use crate::secret::Secret;
-use crate::targets;
 
 /// Blocks that must be mined before a coinbase output is spendable. Bitcoin
 /// consensus, not a tuning knob: a freshly started regtest wallet has no
@@ -124,16 +111,6 @@ pub enum ChainError {
         detail: String,
     },
 
-    /// A block was about to be produced while a vendor regtest capture is
-    /// missing. See [`guard_vendor_captures_complete`].
-    #[error(
-        "refusing to mine on regtest: every vendor regtest vector's stated confirmations derives from one frozen tip, and these captures are not written yet: {missing}. Capture them first:\n  cargo run -p chain-capture -- capture --network regtest --esplora-url <url>\nSee crates/chain-capture/RUNBOOK.md Part 1."
-    )]
-    VendorCaptureOutstanding {
-        /// The outstanding vector ids, comma-separated.
-        missing: String,
-    },
-
     /// The funding wait gave up.
     #[error(
         "funding timed out on {network}: {address} still holds less than {needed_sats} confirmed sats after {waited}"
@@ -176,9 +153,6 @@ pub enum ChainError {
 
     /// A JSON body could not be built or read.
     Json(#[from] serde_json::Error),
-
-    /// A fixture path could not be derived.
-    Fixture(#[from] fixture::FixtureError),
 }
 
 /// The chain operations a minting session needs, abstracted over whether the
@@ -230,10 +204,6 @@ pub struct BitcoindRpc<T: BtcTransport> {
     /// heap copy is freed intact. Stated rather than left for a reader to
     /// discover.
     auth: Secret,
-    /// Where the vendor captures this client refuses to mine over are expected to
-    /// be. Carried on the client so the guard is exercised against a scratch tree
-    /// in tests without reaching for process-wide state.
-    fixture_root: PathBuf,
 }
 
 // `Debug` is implemented BY HAND, not derived: a derived one would print the
@@ -244,7 +214,6 @@ impl<T: BtcTransport> std::fmt::Debug for BitcoindRpc<T> {
         f.debug_struct("BitcoindRpc")
             .field("url", &self.url)
             .field("auth", &"<redacted>")
-            .field("fixture_root", &self.fixture_root)
             .finish()
     }
 }
@@ -259,15 +228,7 @@ impl<T: BtcTransport> BitcoindRpc<T> {
                 "Basic {}",
                 base64::engine::general_purpose::STANDARD.encode(user_pass.expose())
             )),
-            fixture_root: fixture::fixture_root(),
         }
-    }
-
-    /// Point the mine guard at a scratch fixture tree.
-    #[cfg(test)]
-    fn with_fixture_root(mut self, root: PathBuf) -> Self {
-        self.fixture_root = root;
-        self
     }
 
     /// Issue one JSON-RPC call.
@@ -330,16 +291,6 @@ impl<T: BtcTransport> BitcoindRpc<T> {
         }
     }
 
-    /// Current chain height.
-    #[allow(dead_code)] // Unwired: feeds the session-start notice, which is not built yet.
-    pub fn get_block_count(&self) -> Result<u32, ChainError> {
-        let result = self.call("getblockcount", json!([]))?;
-        result
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
-            .ok_or_else(|| Self::shape("getblockcount", "a block height", &result))
-    }
-
     /// The loaded wallet's spendable balance, in BTC.
     pub fn get_balance(&self) -> Result<f64, ChainError> {
         let result = self.call("getbalance", json!([]))?;
@@ -385,10 +336,12 @@ impl<T: BtcTransport> BitcoindRpc<T> {
 
     /// Produce `n` blocks paying `addr`, returning their hashes.
     ///
-    /// The ONLY place this tool produces a block, and it asks
-    /// [`guard_vendor_captures_complete`] for permission first.
+    /// The ONLY place this tool produces a block. Mining moves the regtest tip,
+    /// which is what a minting session is for; every committed chain fixture
+    /// replays from its own file, so a moved tip invalidates nothing already
+    /// captured. Re-capturing a vendor vector after mining needs a fresh unpack
+    /// of the export (see `RUNBOOK.md`).
     pub fn generate_to_address(&self, n: u32, addr: &str) -> Result<Vec<String>, ChainError> {
-        guard_vendor_captures_complete(&self.fixture_root)?;
         let result = self.call("generatetoaddress", json!([n, addr]))?;
         result
             .as_array()
@@ -400,83 +353,6 @@ impl<T: BtcTransport> BitcoindRpc<T> {
             })
             .ok_or_else(|| Self::shape("generatetoaddress", "a list of block hashes", &result))
     }
-}
-
-/// The vendor vectors whose chain data lives on the local regtest chain.
-///
-/// Read out of the drivable set rather than restated, so a vector added to or
-/// removed from that set changes what the mine guard waits for without a second
-/// list needing to be kept in step.
-fn vendor_regtest_vectors() -> impl Iterator<Item = &'static str> {
-    targets::DRIVABLE_VECTORS
-        .iter()
-        .copied()
-        .filter(|id| id.split('/').next() == Some("regtest"))
-}
-
-/// Refuse to produce a block while any vendor regtest capture is outstanding.
-///
-/// A correctness constraint rather than a preference: every vendor regtest
-/// vector states a `confirmations` count measured against ONE frozen tip, and
-/// the shipped regtest chain is exported with `autoMineMode: 0` so it does not
-/// drift. Mining raises the tip and silently invalidates all of those
-/// expectations at once, and they cannot be re-derived. The counts themselves
-/// are read from the vector files at runtime (`targets::load`) and are
-/// deliberately not restated here or in the refusal message: a restated number
-/// goes stale the moment an upstream vector changes, and nothing would fail. The
-/// upstream regtest README even offers "mine six blocks" as a troubleshooting
-/// step — this guard is what makes that advice unable to destroy those inputs.
-///
-/// The root is a parameter so both branches are testable against a scratch tree,
-/// and so a client can be pointed at the tree it is actually guarding.
-pub fn guard_vendor_captures_complete(fixture_root: &Path) -> Result<(), ChainError> {
-    let mut missing = Vec::new();
-    for id in vendor_regtest_vectors() {
-        if !fixture::fixture_path_in(fixture_root, id)?.exists() {
-            missing.push(id.to_string());
-        }
-    }
-    if missing.is_empty() {
-        return Ok(());
-    }
-    Err(ChainError::VendorCaptureOutstanding {
-        missing: missing.join(", "),
-    })
-}
-
-/// Warn when the live tip no longer matches the tip the vendor fixtures recorded.
-///
-/// NOT WIRED UP. It is intended as a session-start notice — read the live tip
-/// once, say so if the vendor captures were measured against a different one, and
-/// never per mine, because a minting session moves the tip on purpose. Reaching it
-/// from behind [`ChainOps`] needs a tip reader on that trait, which does not exist
-/// yet (see the module header). Today it is exercised only by its own unit tests.
-///
-/// Not an error when it does ship: once those fixtures are written their
-/// expectations are frozen into them, so a moved tip cannot retroactively break
-/// them. It does mean the chain has already been advanced, which the operator
-/// should know before concluding anything from a later re-capture.
-///
-/// A fixture that is absent or unreadable is skipped: this is a courtesy warning,
-/// and the refusal that actually protects the captures is the mine guard.
-#[allow(dead_code)] // Unwired: the session-start notice this belongs to is not built yet.
-pub fn warn_if_frozen_tip_moved(fixture_root: &Path, live_tip: u32) -> Option<String> {
-    let moved: Vec<String> = vendor_regtest_vectors()
-        .filter_map(|id| {
-            let path = fixture::fixture_path_in(fixture_root, id).ok()?;
-            let body = std::fs::read_to_string(path).ok()?;
-            let fixture: ChainFixture = serde_json::from_str(&body).ok()?;
-            (fixture.tip_height != live_tip)
-                .then(|| format!("{id} recorded tip {}", fixture.tip_height))
-        })
-        .collect();
-    if moved.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "the chain reports tip {live_tip}, but {}. Those captures' confirmations are already frozen into their fixtures, so nothing is broken — but this chain is no longer at the height they were measured against, and a re-capture will not reproduce them.",
-        moved.join("; ")
-    ))
 }
 
 /// Convert satoshis to the BTC amount the JSON-RPC amount fields carry.
@@ -789,7 +665,6 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
     use std::str::FromStr as _;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A 64-hex-ish placeholder txid, long enough to parse as one.
     const TXID: &str = "11111111111111111111111111111111111111111111111111111111111111ab";
@@ -991,45 +866,6 @@ mod tests {
         }
     }
 
-    /// A scratch directory unique to one test, removed by the test itself.
-    fn scratch_dir(tag: &str) -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "chain-capture-chain-{}-{tag}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch directory is creatable");
-        dir
-    }
-
-    /// Write `count` of the vendor regtest fixtures into `root`, each recording
-    /// `tip_height`.
-    fn write_vendor_fixtures(root: &Path, count: usize, tip_height: u32) {
-        for id in vendor_regtest_vectors().take(count) {
-            let path = fixture::fixture_path_in(root, id).expect("a constant id is safe");
-            std::fs::create_dir_all(path.parent().expect("the path has a parent"))
-                .expect("the fixture directory is creatable");
-            let fixture = ChainFixture {
-                captured_at: "2026-07-30T01:00:00Z".to_string(),
-                endpoint: "http://localhost:3000".to_string(),
-                network: "regtest".to_string(),
-                vector: id.to_string(),
-                did: "did:btcr2:k1placeholder".to_string(),
-                tip_height,
-                signals: Vec::new(),
-                addresses: std::collections::BTreeMap::new(),
-                sidecar: None,
-                expected: None,
-            };
-            std::fs::write(
-                &path,
-                serde_json::to_string(&fixture).expect("the envelope serializes"),
-            )
-            .expect("the fixture is writable");
-        }
-    }
-
     /// A regtest P2WPKH address to fund. Parsed, never composed, so no address
     /// literal in the tool derives from a test.
     fn regtest_address() -> Address {
@@ -1039,24 +875,21 @@ mod tests {
             .expect("the address is regtest")
     }
 
-    fn rpc(fake: FakeChain, root: PathBuf) -> BitcoindRpc<FakeChain> {
+    fn rpc(fake: FakeChain) -> BitcoindRpc<FakeChain> {
         BitcoindRpc::new(
             fake,
             "http://127.0.0.1:18443".to_string(),
             &Secret::from_exposed("user:secret"),
         )
-        .with_fixture_root(root)
     }
 
     #[test]
     fn rpc_call_sends_basic_auth_and_the_jsonrpc_envelope() {
         let fake = FakeChain::new();
-        fake.rpc_ok("getblockcount", json!(212));
-        let dir = scratch_dir("envelope");
-        write_vendor_fixtures(&dir, 4, 212);
+        fake.rpc_ok("getbalance", json!(1.5));
 
-        let client = rpc(fake.clone(), dir.clone());
-        assert_eq!(client.get_block_count().expect("the call succeeds"), 212);
+        let client = rpc(fake.clone());
+        assert_eq!(client.get_balance().expect("the call succeeds"), 1.5);
 
         let seen = fake.requests();
         assert_eq!(seen.len(), 1, "one call, one request: {seen:?}");
@@ -1072,19 +905,16 @@ mod tests {
             Some("Basic dXNlcjpzZWNyZXQ="),
             "the credential travels as HTTP basic auth"
         );
-        assert_eq!(seen[0].rpc_method.as_deref(), Some("getblockcount"));
+        assert_eq!(seen[0].rpc_method.as_deref(), Some("getbalance"));
         assert_eq!(seen[0].params, json!([]));
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
     fn rpc_error_names_the_method_and_never_the_auth_header() {
         let fake = FakeChain::new();
         fake.rpc_err("getbalance", -18, "No wallet is loaded.");
-        let dir = scratch_dir("rpc-error");
 
-        let client = rpc(fake, dir.clone());
+        let client = rpc(fake);
         let error = client.get_balance().expect_err("an RPC error propagates");
         match &error {
             ChainError::Rpc {
@@ -1103,23 +933,20 @@ mod tests {
             !rendered.contains("secret") && !rendered.contains("dXNlcjpzZWNyZXQ="),
             "no error may carry the credential: {rendered}"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
     fn rpc_non_2xx_without_a_jsonrpc_error_names_the_status() {
         let fake = FakeChain::new();
-        fake.rpc_raw("getblockcount", 401, "");
-        let dir = scratch_dir("rpc-401");
+        fake.rpc_raw("getbalance", 401, "");
 
-        let client = rpc(fake, dir.clone());
+        let client = rpc(fake);
         let error = client
-            .get_block_count()
+            .get_balance()
             .expect_err("an auth rejection is an error");
         match &error {
             ChainError::RpcHttp { method, status } => {
-                assert_eq!(method, "getblockcount");
+                assert_eq!(method, "getbalance");
                 assert_eq!(*status, 401);
             }
             other => panic!("expected RpcHttp, got {other:?}"),
@@ -1128,14 +955,11 @@ mod tests {
             error.to_string().contains("401"),
             "the message names the status: {error}"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
     fn debug_never_renders_the_password_or_the_auth_value() {
-        let dir = scratch_dir("debug");
-        let client = rpc(FakeChain::new(), dir.clone());
+        let client = rpc(FakeChain::new());
         let rendered = format!("{client:?}");
         assert!(
             !rendered.contains("secret") && !rendered.contains("dXNlcjpzZWNyZXQ="),
@@ -1149,18 +973,14 @@ mod tests {
             rendered.contains("127.0.0.1:18443"),
             "the endpoint is still visible: {rendered}"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
     fn load_wallet_treats_already_loaded_as_success() {
-        let dir = scratch_dir("loadwallet");
-
         for code in [-35, -4] {
             let fake = FakeChain::new();
             fake.rpc_err("loadwallet", code, "Wallet is already loaded.");
-            let client = rpc(fake, dir.clone());
+            let client = rpc(fake);
             client
                 .load_wallet("")
                 .unwrap_or_else(|e| panic!("code {code} is the state we wanted, got: {e}"));
@@ -1169,7 +989,7 @@ mod tests {
         // An unrelated wallet failure is still an error.
         let fake = FakeChain::new();
         fake.rpc_err("loadwallet", -18, "Wallet file verification failed.");
-        let client = rpc(fake, dir.clone());
+        let client = rpc(fake);
         let error = client
             .load_wallet("")
             .expect_err("an unrelated wallet error propagates");
@@ -1177,17 +997,14 @@ mod tests {
             matches!(error, ChainError::Rpc { code: -18, .. }),
             "{error}"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
     fn send_to_address_converts_sats_to_a_btc_amount() {
         let fake = FakeChain::new();
         fake.rpc_ok("sendtoaddress", json!(TXID));
-        let dir = scratch_dir("sendtoaddress");
 
-        let client = rpc(fake.clone(), dir.clone());
+        let client = rpc(fake.clone());
         let txid = client
             .send_to_address("bcrt1qexample", 150_000)
             .expect("the send succeeds");
@@ -1203,136 +1020,41 @@ mod tests {
         assert_eq!(sats_to_btc(1), 0.000_000_01);
         assert_eq!(sats_to_btc(SATS_PER_BTC), 1.0);
         assert_eq!(btc_to_sats(0.0015), 150_000);
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
-    fn generate_to_address_refuses_while_a_vendor_capture_is_outstanding() {
+    fn generate_to_address_is_a_plain_rpc_call() {
+        // Nothing stands between the caller and the RPC: no fixture tree is
+        // consulted, no precondition on the chain's height is checked. The one
+        // request sent is the generatetoaddress call itself.
         let fake = FakeChain::new();
         fake.rpc_ok("generatetoaddress", json!(["00".repeat(32)]));
-        let dir = scratch_dir("guard-partial");
-        // Three of the four written: the tip is still one capture short.
-        write_vendor_fixtures(&dir, 3, 212);
 
-        let client = rpc(fake.clone(), dir.clone());
-        let error = client
-            .generate_to_address(1, "bcrt1qexample")
-            .expect_err("mining is refused while a capture is outstanding");
-
-        let missing: Vec<&'static str> = vendor_regtest_vectors().skip(3).collect();
-        match &error {
-            ChainError::VendorCaptureOutstanding { missing: named } => {
-                for id in &missing {
-                    assert!(named.contains(id), "the error names `{id}`: {named}");
-                }
-            }
-            other => panic!("expected VendorCaptureOutstanding, got {other:?}"),
-        }
-        let rendered = error.to_string();
-        for id in &missing {
-            assert!(
-                rendered.contains(id),
-                "the message names `{id}`: {rendered}"
-            );
-        }
-        assert!(
-            rendered.contains("capture --network regtest"),
-            "the message names the command that fixes it: {rendered}"
-        );
-        assert!(
-            fake.requests().is_empty(),
-            "a refused mine issues no request at all: {:?}",
-            fake.requests()
-        );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
-    }
-
-    #[test]
-    fn the_mine_refusal_restates_no_number_it_reads_from_the_vectors() {
-        // The vector files carry the confirmations counts and `targets::load`
-        // reads them at runtime, so a count copied into this message would state
-        // something no longer true the moment an upstream vector changed — and
-        // nothing would fail. The refusal is asserted to name the vectors and the
-        // remedy, and NOT any of the numbers.
-        if !targets::test_suite_root()
-            .join("regtest/k1/qgppexmy/resolve/input.json")
-            .exists()
-        {
-            eprintln!("SKIP: test-suite submodule absent");
-            return;
-        }
-        let ids: Vec<&'static str> = vendor_regtest_vectors().collect();
-        let rendered = ChainError::VendorCaptureOutstanding {
-            missing: ids.join(", "),
-        }
-        .to_string();
-
-        for id in &ids {
-            let target = targets::load(id).expect("a drivable vector loads");
-            let Some(confirmations) = target.expected_confirmations else {
-                continue;
-            };
-            assert!(
-                !rendered.contains(&confirmations.to_string()),
-                "the refusal restates `{id}`'s confirmations ({confirmations}), which it \
-                 does not read: {rendered}"
-            );
-            assert!(
-                rendered.contains(id),
-                "the refusal names the outstanding vector: {rendered}"
-            );
-        }
-        assert!(
-            rendered.contains("frozen tip") && rendered.contains("capture --network regtest"),
-            "the refusal still says why it refuses and what fixes it: {rendered}"
-        );
-    }
-
-    #[test]
-    fn generate_to_address_proceeds_when_every_vendor_capture_exists() {
-        let fake = FakeChain::new();
-        fake.rpc_ok("generatetoaddress", json!(["00".repeat(32)]));
-        let dir = scratch_dir("guard-complete");
-        write_vendor_fixtures(&dir, 4, 212);
-
-        let client = rpc(fake.clone(), dir.clone());
+        let client = rpc(fake.clone());
         let hashes = client
             .generate_to_address(1, "bcrt1qexample")
-            .expect("mining proceeds once every capture is written");
+            .expect("mining is unconditional");
         assert_eq!(hashes, vec!["00".repeat(32)]);
-        assert_eq!(fake.rpc_calls(), vec!["generatetoaddress"]);
 
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
+        let seen = fake.requests();
+        assert_eq!(seen.len(), 1, "one mine, one request: {seen:?}");
+        assert_eq!(seen[0].rpc_method.as_deref(), Some("generatetoaddress"));
+        assert_eq!(seen[0].params, json!([1, "bcrt1qexample"]));
     }
 
     #[test]
-    fn the_guard_agrees_with_the_repositorys_own_fixture_tree() {
-        // The real tree, whichever branch it is in: the vendor captures are
-        // written by a later operator session, so this test asserts the refusal
-        // before that session and the permission after it, choosing from what is
-        // on disk and saying which branch it took.
-        let root = fixture::fixture_root();
-        let outstanding: Vec<&'static str> = vendor_regtest_vectors()
-            .filter(|id| {
-                !fixture::fixture_path_in(&root, id)
-                    .expect("a constant id is safe")
-                    .exists()
-            })
-            .collect();
-        let result = guard_vendor_captures_complete(&root);
-        if outstanding.is_empty() {
-            println!("every vendor regtest capture is written; the guard permits mining");
-            result.expect("a complete vendor capture set permits mining");
-        } else {
-            println!("outstanding vendor regtest captures: {outstanding:?}; the guard refuses");
-            let error = result.expect_err("an outstanding capture refuses mining");
-            assert!(
-                matches!(error, ChainError::VendorCaptureOutstanding { .. }),
-                "got {error:?}"
-            );
-        }
+    fn generate_to_address_rejects_a_reply_that_is_not_a_hash_list() {
+        let fake = FakeChain::new();
+        fake.rpc_ok("generatetoaddress", json!("not a list"));
+
+        let client = rpc(fake);
+        let error = client
+            .generate_to_address(1, "bcrt1qexample")
+            .expect_err("a non-list reply is a shape error");
+        assert!(
+            matches!(&error, ChainError::RpcResultShape { method, .. } if method == "generatetoaddress"),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -1340,14 +1062,12 @@ mod tests {
         let address = regtest_address();
         let fake = FakeChain::new();
         fake.utxos(&address.to_string(), 200_000);
-        let dir = scratch_dir("funded");
-        write_vendor_fixtures(&dir, 4, 212);
 
         let ops = RegtestOps::new(
             "regtest".to_string(),
             "http://localhost:3000".to_string(),
             fake.clone(),
-            rpc(fake.clone(), dir.clone()),
+            rpc(fake.clone()),
         );
         ops.ensure_funded(&address, 150_000)
             .expect("an already-funded address needs nothing");
@@ -1357,8 +1077,6 @@ mod tests {
             "a funded address touches no wallet and produces no block: {:?}",
             fake.rpc_calls()
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
@@ -1377,14 +1095,11 @@ mod tests {
         fake.rpc_ok("generatetoaddress", json!([]));
         fake.rpc_ok("sendtoaddress", json!(TXID));
 
-        let dir = scratch_dir("fund-empty");
-        write_vendor_fixtures(&dir, 4, 212);
-
         let ops = RegtestOps::new(
             "regtest".to_string(),
             "http://localhost:3000".to_string(),
             fake.clone(),
-            rpc(fake.clone(), dir.clone()),
+            rpc(fake.clone()),
         );
         ops.ensure_funded(&address, 150_000)
             .expect("an empty address is funded from the wallet");
@@ -1417,8 +1132,6 @@ mod tests {
             ],
             "maturity first, then exactly one block for the transfer"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
@@ -1432,14 +1145,11 @@ mod tests {
         fake.rpc_ok("generatetoaddress", json!([]));
         fake.rpc_ok("sendtoaddress", json!(TXID));
 
-        let dir = scratch_dir("fund-timeout");
-        write_vendor_fixtures(&dir, 4, 212);
-
         let ops = RegtestOps::new(
             "regtest".to_string(),
             "http://localhost:3000".to_string(),
             fake.clone(),
-            rpc(fake.clone(), dir.clone()),
+            rpc(fake.clone()),
         )
         .with_poll(instant_poll(3));
         let error = ops
@@ -1467,8 +1177,6 @@ mod tests {
             1,
             "a wallet with a balance mines once, for the transfer"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
@@ -1479,14 +1187,11 @@ mod tests {
         fake.tx(TXID, None);
         fake.tx(TXID, Some((213, 1_700_000_500)));
 
-        let dir = scratch_dir("await");
-        write_vendor_fixtures(&dir, 4, 212);
-
         let ops = RegtestOps::new(
             "regtest".to_string(),
             "http://localhost:3000".to_string(),
             fake.clone(),
-            rpc(fake.clone(), dir.clone()),
+            rpc(fake.clone()),
         )
         .with_poll(instant_poll(5));
         let (height, time) = ops
@@ -1498,8 +1203,6 @@ mod tests {
             vec!["getnewaddress", "generatetoaddress"],
             "one block, produced once"
         );
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
     }
 
     #[test]
@@ -1567,37 +1270,6 @@ mod tests {
                 .expect("a 404 is an ordinary state of the wait loop"),
             None
         );
-    }
-
-    #[test]
-    fn warn_if_frozen_tip_moved_names_both_heights() {
-        let dir = scratch_dir("tip-moved");
-        write_vendor_fixtures(&dir, 4, 212);
-
-        let warning = warn_if_frozen_tip_moved(&dir, 400).expect("a moved tip produces a warning");
-        assert!(
-            warning.contains("400") && warning.contains("212"),
-            "the warning names the live tip and the recorded one: {warning}"
-        );
-        for id in vendor_regtest_vectors() {
-            assert!(warning.contains(id), "the warning names `{id}`: {warning}");
-        }
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
-    }
-
-    #[test]
-    fn warn_if_frozen_tip_moved_is_silent_when_the_tip_agrees() {
-        let dir = scratch_dir("tip-agrees");
-        write_vendor_fixtures(&dir, 4, 212);
-        assert_eq!(warn_if_frozen_tip_moved(&dir, 212), None);
-
-        // An empty tree records no tip, so there is nothing to disagree with.
-        let empty = scratch_dir("tip-absent");
-        assert_eq!(warn_if_frozen_tip_moved(&empty, 999), None);
-
-        std::fs::remove_dir_all(&dir).expect("scratch directory is removable");
-        std::fs::remove_dir_all(&empty).expect("scratch directory is removable");
     }
 
     #[test]

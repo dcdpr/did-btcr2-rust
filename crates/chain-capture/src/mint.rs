@@ -1092,7 +1092,7 @@ impl<T: BtcTransport> MintSession<'_, T> {
         // mines can load a wallet, produce a hundred blocks to reach coinbase
         // maturity, send a transfer and mine again — so a prompt asked after it
         // would leave a DECLINED step having already moved the tip that the
-        // frozen vendor captures are measured against.
+        // vendor captures are measured against.
         (self.confirm)(&broadcast_prompt(
             self.ops.network(),
             &announce_plan(self.ops, step, &address, needed_sats),
@@ -2871,7 +2871,7 @@ mod tests {
         // `ensure_funded` on a chain this tool mines can load a wallet, produce a
         // hundred blocks to reach coinbase maturity, send a transfer and mine
         // again. Asking after it meant declining had already moved the tip the
-        // frozen vendor captures are measured against.
+        // vendor captures are measured against.
         let dir = scratch_dir("declined");
         let path = dir.join("state.json");
         let (secret, _) = sample_keys();
