@@ -64,15 +64,17 @@ operation-vector coverage: 22 vectors, 100 rows
   kind            driven  skipped
   derivation          22        0
   genesis-key         22        0
-  resolve             11       11
+  resolve              4       18
   update-crypto       17        0
   end-state           17        0
   skipped rows by reason (a row may carry several):
-    unanchored (pending.json)                                                         6
-    CAS-aggregated delivery not implemented                                           9
-    SMT-aggregated delivery not implemented                                           4
-    resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)    8
+    unanchored (pending.json)                                                                       6
+    CAS-aggregated delivery not implemented                                                         9
+    SMT-aggregated delivery not implemented                                                         4
+    resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)                  8
+    update @context predates the spec pin; regenerated upstream, absorbed at the test-suite bump   17
   fixture defects: 16 vector(s) encode versionId as a JSON number (the specification requires an ASCII string): mutinynet
+  stale update @context: 17 vector(s) predate the spec's pinned update @context (regenerated upstream; Resolve rows skipped under StaleContext until the bump): mutinynet, regtest
 
 minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counted in the upstream ledger above)
   minted/clean-rotating-beacons (minted on regtest)
@@ -90,12 +92,13 @@ minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counte
 are genesis-only and so have no `update-crypto` and no `end-state` row. That is
 also why those two kinds show 17 driven rows rather than 22.
 
-### The four skip reasons
+### The five skip reasons
 
 Defined by `SkipReason` (`src/test_vectors.rs`) and derived from each vector's
-own files by `derived_resolve_skip_reasons`. They are **additive**: a skipped row
-carries every applicable reason, not the first match, which is why the four
-counts above sum to more than the 11 skipped rows.
+own files — four by `derived_resolve_skip_reasons`, the fifth in
+`Vector::skip_reasons_with`. They are **additive**: a skipped row carries every
+applicable reason, not the first match, which is why the five counts above sum
+to more than the 18 skipped rows.
 
 - **`Unanchored`** — `pending.json` present: the vector's own generator recorded
   update steps that were never delivered on chain.
@@ -107,6 +110,17 @@ counts above sum to more than the 11 skipped rows.
   beacon, so building the next round of requests returns `Unsupported` before any
   transaction is read. Distinct from the delivery reasons: different problem,
   different code. Both are recorded when both apply.
+- **`StaleContext`** — at least one of the vector's own update files
+  (`update/**/output.json` `signedUpdate` and its `proof`, or the
+  `resolve/input.json` sidecar `updates[*]` and their proofs) carries an
+  `@context` that is not the spec's pinned four-URL array
+  (`did_btcr2::UPDATE_CONTEXT`). The vector predates the pin and is being
+  regenerated upstream. **Resolve kind only**: the `update-crypto` and
+  `end-state` drivers rebuild the update from `input.json` and compare document
+  hashes, never reading the vector's `@context`, so those rows stay driven.
+  Self-clearing — a regenerated vector stops matching the rule and its row is
+  driven again — and pinned at exactly 17 vectors by `STALE_UPDATE_CONTEXT`,
+  asserted in both directions (see below).
 - **`Override(&str)`** — a hand-written one-off. `SKIP_OVERRIDES` is currently
   **empty by design**, so every skip on disk today comes from a derived rule.
 
@@ -118,11 +132,22 @@ chain snapshot under `fixtures/chain/`.
 `DRIVEN_FLOOR` (`src/test_vectors.rs`) records the minimum driven rows per kind:
 
 ```
-Derivation 22, GenesisKey 22, Resolve 11, UpdateCrypto 17, EndState 17
+Derivation 22, GenesisKey 22, Resolve 4, UpdateCrypto 17, EndState 17
 ```
 
 It is compared with `>=`, so upstream adding vectors raises coverage without
 failing the build. Only a silent coverage **loss** fails.
+
+Resolve is 4, not 11, while the stale update `@context` population is parked:
+the four genesis-era rows (`mutinynet/k1/q5puld7y`, `mutinynet/x1/q5g3smvu`,
+`regtest/k1/qgpakaw4`, `regtest/x1/q2fz9mz6`) are driven, and the seven anchored
+past-genesis rows that `fixtures/chain/` fed are skipped under `StaleContext`.
+`resolve_driven_set_is_the_expected_four_ids` pins those four by id. UpdateCrypto
+and EndState stay at 17 because their drivers do not read the vector's
+`@context`; every update-bearing vector is stale and every one of those 34 rows
+is still driven. When the regenerated suite is absorbed, Resolve is re-raised to
+11 or more by hand — the floor is a minimum, so nothing re-raises it
+automatically.
 
 ### The versionId fixture defect
 
@@ -137,18 +162,44 @@ listed fails by name rather than being absorbed by the encoding-tolerant read,
 and a listed vector that has since been fixed upstream also fails, telling the
 reader to delete the entry.
 
+### The stale update @context population
+
+`STALE_UPDATE_CONTEXT` (`src/test_vectors.rs`) pins the 17 vectors — every
+vector with an `update/` directory in the vendor suite as checked out — whose
+update files carry an `@context` that predates the spec's pinned array. The
+five without an `update/` directory (`mutinynet/k1/q5puld7y`,
+`mutinynet/x1/q5g3smvu`, `mutinynet/x1/qh66uy2s`, `regtest/k1/qgpakaw4`,
+`regtest/x1/q2fz9mz6`) carry no update and are not stale.
+
+`live_vectors_record_their_update_context` asserts the pin in both directions
+and asserts the count is exactly 17: a stale vector that is not listed fails by
+name rather than being absorbed by the derived skip; a listed vector that is now
+clean fails, telling the reader to delete the entry and re-raise
+`DRIVEN_FLOOR`'s Resolve entry; a partial regeneration trips the count. At the
+test-suite bump this list empties, the count pin drops, and the Resolve floor
+goes back up — the regeneration cannot be absorbed silently. A regenerated
+vector that still carries the old array stays honestly skipped rather than
+failing.
+
+Until the resolver rejects a non-pinned update `@context`, the seven anchored
+Resolve rows parked here would still pass; the skip lands before the reject so
+that no commit is red, and the label becomes literally true once the reject
+lands.
+
 ## 4. The 22 upstream vectors
 
 Measured from each vector's own files: `ver` / `conf` / `deact` from
 `resolve/output.json.didDocumentMetadata`; `services` from the resolved
 document; `pending` = `pending.json` present; `sidecar` = `resolve/input.json`
 carries `resolutionOptions.sidecar.genesisDocument`; `delivery` from
-`scenario.json`. `resolve` is whether the resolve row is driven.
+`scenario.json`. `resolve` is whether the resolve row is driven; `parked
+(StaleContext)` marks a row that was driven from `fixtures/chain/` and is
+skipped only until the regenerated suite is absorbed.
 
 | Vector | ver | conf | deact | services | pending | sidecar | delivery | resolve |
 |---|---|---|---|---|---|---|---|---|
-| mutinynet/k1/q5p6w9su | 2 | - | true | 3× Singleton | no | - | - | DRIVEN |
-| mutinynet/k1/q5pgeu9z | 2 | - | - | 3× Singleton + DIDCommMessaging | no | - | - | DRIVEN |
+| mutinynet/k1/q5p6w9su | 2 | - | true | 3× Singleton | no | - | - | parked (StaleContext) |
+| mutinynet/k1/q5pgeu9z | 2 | - | - | 3× Singleton + DIDCommMessaging | no | - | - | parked (StaleContext) |
 | mutinynet/k1/q5puld7y | 1 | - | - | 3× Singleton | no | - | - | DRIVEN |
 | mutinynet/x1/q425c5wf | 2 | - | - | 3× Singleton + SMT + DWN | no | yes | - | skipped |
 | mutinynet/x1/q4lqu6gr | 2 | - | - | 3× Singleton + SMT + DIDComm | YES | - | genesis=cas | skipped |
@@ -159,16 +210,16 @@ carries `resolutionOptions.sidecar.genesisDocument`; `delivery` from
 | mutinynet/x1/q5cfewep | 2 | - | - | 3× Singleton + SMT + DIDComm | no | yes | - | skipped |
 | mutinynet/x1/q5g3smvu | 1 | - | - | 3× Singleton | no | yes | - | DRIVEN |
 | mutinynet/x1/q5m2fh36 | 3 | - | true | 3× Singleton + DIDComm | YES | - | genesis=cas | skipped |
-| mutinynet/x1/q5ugrf3w | 2 | - | - | 3× Singleton + DWN | no | yes | - | DRIVEN |
+| mutinynet/x1/q5ugrf3w | 2 | - | - | 3× Singleton + DWN | no | yes | - | parked (StaleContext) |
 | mutinynet/x1/qh66uy2s | 1 | - | - | (none) | no | - | genesis=cas | skipped |
 | mutinynet/x1/qkrrp544 | 2 | - | - | 3× Singleton + CAS + DIDComm | no | yes | - | skipped |
 | mutinynet/x1/qky9e7qz | 4 | - | true | 3× Singleton + DIDComm + DWN | YES | - | genesis=cas | skipped |
 | regtest/k1/qgpakaw4 | 1 | - | - | 3× Singleton | no | - | - | DRIVEN |
-| regtest/k1/qgppexmy | 2 | 93 | - | 3× Singleton | no | - | - | DRIVEN |
-| regtest/k1/qgpy0hmm | 2 | 78 | - | 4× Singleton | no | - | - | DRIVEN |
-| regtest/x1/q26jeds9 | 2 | 65 | - | 2× Singleton | no | yes | - | DRIVEN |
+| regtest/k1/qgppexmy | 2 | 93 | - | 3× Singleton | no | - | - | parked (StaleContext) |
+| regtest/k1/qgpy0hmm | 2 | 78 | - | 4× Singleton | no | - | - | parked (StaleContext) |
+| regtest/x1/q26jeds9 | 2 | 65 | - | 2× Singleton | no | yes | - | parked (StaleContext) |
 | regtest/x1/q2fz9mz6 | 1 | - | - | 1× Singleton | no | yes | - | DRIVEN |
-| regtest/x1/qfl7se8f | 2 | 53 | - | 1× Singleton | no | yes | - | DRIVEN |
+| regtest/x1/qfl7se8f | 2 | 53 | - | 1× Singleton | no | yes | - | parked (StaleContext) |
 
 ### What distinguishes each vector
 
@@ -234,16 +285,23 @@ Skip reasons below are the derived ones, in the rule's own terms.
 
 ### Driven versus skipped
 
-All 6 regtest vectors are resolve-driven. The 16 mutinynet vectors split:
+Four resolve rows are driven: `mutinynet/k1/q5puld7y`, `mutinynet/x1/q5g3smvu`,
+`regtest/k1/qgpakaw4`, `regtest/x1/q2fz9mz6` — the genesis-era vectors, which
+carry no update and so cannot be stale. The other 18 are skipped:
 
-- **5 driven** — `q5p6w9su`, `q5pgeu9z`, `q5puld7y`, `q5g3smvu`, `q5ugrf3w`:
-  plain Singleton beacons, nothing aggregated, nothing pending.
-- **11 skipped** — a CAS or SMT beacon in the document, and/or an aggregated
-  delivery recipe, and/or a `pending.json`.
+- **11** — a CAS or SMT beacon in the document, and/or an aggregated delivery
+  recipe, and/or a `pending.json` (all mutinynet; these carry `StaleContext`
+  too, since every one has an `update/` directory).
+- **7 newly parked** — plain Singleton beacons, nothing aggregated, nothing
+  pending, formerly driven from `fixtures/chain/`: `q5p6w9su`, `q5pgeu9z`,
+  `q5ugrf3w` on mutinynet and `qgppexmy`, `qgpy0hmm`, `q26jeds9`, `qfl7se8f` on
+  regtest. Skipped under `StaleContext` alone until the regenerated suite is
+  absorbed.
 
-Every skipped resolve row is mutinynet.
+The four regtest rows `qgppexmy`, `qgpy0hmm`, `q26jeds9`, `qfl7se8f` are the
+only skipped resolve rows that are not mutinynet.
 
-The four skip-reason counts attribute to rows exactly:
+The five skip-reason counts attribute to rows exactly:
 
 | Reason | Count | Rows |
 |---|---|---|
@@ -251,8 +309,11 @@ The four skip-reason counts attribute to rows exactly:
 | `SmtDelivery` | 4 | the 4 rows with an SMT beacon (`q425c5wf`, `q4lqu6gr`, `q4rnhfhv`, `q5cfewep`); no vector declares an `smt` delivery recipe |
 | `CasDelivery` | 9 | the 4 rows with a CAS beacon ∪ the 7 rows with a `cas` delivery recipe (`q4x4pxl2` and `q59jnwfs` are in both) |
 | `UnsupportedBeaconType` | 8 | the 4 SMT-beacon rows + the 4 CAS-beacon rows |
+| `StaleContext` | 17 | every vector with an `update/` directory |
 
-Their union is the 11 skipped rows.
+Their union is the 18 skipped rows: the 11 the first four reasons cover (each
+of which also carries `StaleContext`), plus the 7 that `StaleContext` alone
+parks.
 
 ### `k1` versus `x1`
 

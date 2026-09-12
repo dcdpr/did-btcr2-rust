@@ -682,6 +682,14 @@ pub(crate) struct Vector {
     /// silently-absorbed fixture defect is exactly the kind of gap this ledger
     /// exists to surface. The flag clears itself when the fixtures are corrected.
     pub(crate) version_id_is_number: bool,
+    /// At least one update step in this vector's own files —
+    /// `update/**/output.json` `signedUpdate` and its `proof`, or
+    /// `resolve/input.json` sidecar `updates[*]` and their proofs — carries an
+    /// `@context` that is not the pinned BTCR2 Unsigned Update array. Such a
+    /// vector predates the spec's pin and is being regenerated upstream; its
+    /// Resolve row is skipped under `StaleContext` until the regenerated vector
+    /// lands, at which point this flag clears itself.
+    pub(crate) stale_update_context: bool,
     /// `pending.json` exists.
     pub(crate) has_pending: bool,
     /// `scenario.json.delivery.genesis` as a string, when present.
@@ -938,6 +946,33 @@ pub(crate) fn discover() -> Vec<Vector> {
                 let has_sidecar_genesis_document =
                     !resolve_input["resolutionOptions"]["sidecar"]["genesisDocument"].is_null();
 
+                // Every update the vector carries — the signed output of each
+                // update step, and the sidecar copies the resolve step feeds
+                // back in — must carry the spec's pinned `@context` on the
+                // update and on its proof. A vector with no update steps and
+                // no sidecar updates has nothing to be stale about.
+                let pinned = serde_json::json!(crate::update::UPDATE_CONTEXT);
+                let mut stale_update_context = false;
+                for step in update_layout.step_prefixes() {
+                    if let Some(output) = read_fixture_json(&format!("{id}/{step}/output.json")) {
+                        let signed_update = &output["signedUpdate"];
+                        if signed_update["@context"] != pinned
+                            || signed_update["proof"]["@context"] != pinned
+                        {
+                            stale_update_context = true;
+                        }
+                    }
+                }
+                if let Some(updates) =
+                    resolve_input["resolutionOptions"]["sidecar"]["updates"].as_array()
+                {
+                    for update in updates {
+                        if update["@context"] != pinned || update["proof"]["@context"] != pinned {
+                            stale_update_context = true;
+                        }
+                    }
+                }
+
                 let has_pending = vector_path.join("pending.json").is_file();
 
                 // The regtest vectors ship no `scenario.json`, and `delivery`
@@ -986,6 +1021,7 @@ pub(crate) fn discover() -> Vec<Vector> {
                     update_layout,
                     expected_version_id,
                     version_id_is_number,
+                    stale_update_context,
                     has_pending,
                     delivery_genesis,
                     delivery_announcement,
@@ -1082,6 +1118,15 @@ pub(crate) enum SkipReason {
     /// an announcement is DELIVERED — a different problem fixed in different
     /// code. Both are recorded when both apply.
     UnsupportedBeaconType,
+    /// The vector's update `@context` predates the spec's pin; regenerated
+    /// upstream and absorbed when the regenerated suite is bumped. Applies to
+    /// the Resolve kind only: the UpdateCrypto and EndState drivers rebuild the
+    /// update from `input.json` and compare document hashes, so those rows
+    /// stay driven. Until the resolver rejects a non-pinned `@context`, the
+    /// rows parked here would still pass; the skip lands before the reject so
+    /// that no commit is ever red, and the label becomes literally true once
+    /// the reject lands.
+    StaleContext,
     /// A one-off no derived rule expresses; the payload is the stated reason.
     Override(&'static str),
 }
@@ -1094,6 +1139,10 @@ impl fmt::Display for SkipReason {
             Self::SmtDelivery => f.write_str("SMT-aggregated delivery not implemented"),
             Self::UnsupportedBeaconType => f.write_str(
                 "resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)",
+            ),
+            Self::StaleContext => f.write_str(
+                "update @context predates the spec pin; regenerated upstream, absorbed at the \
+                 test-suite bump",
             ),
             Self::Override(reason) => f.write_str(reason),
         }
@@ -1158,18 +1207,67 @@ pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[
     "mutinynet/x1/qky9e7qz",
 ];
 
+/// The vectors whose update files carry an `@context` that predates the spec's
+/// pinned BTCR2 Unsigned Update array — every vector with an `update/`
+/// directory in the vendor suite as checked out today.
+///
+/// The upstream suite is being regenerated with the pinned array. Until that
+/// lands, these vectors' Resolve rows are skipped under
+/// [`SkipReason::StaleContext`]; the population is pinned to an explicit id set
+/// and asserted in BOTH directions:
+/// - a stale vector NOT listed here is a NEW pre-pin vector and fails by name,
+///   instead of being absorbed by the derived skip;
+/// - a listed vector that is now clean also fails, telling the reader to delete
+///   the entry and re-raise [`DRIVEN_FLOOR`]'s Resolve entry.
+///
+/// The second direction is the point. A derived skip with no pin would absorb
+/// the regeneration silently — a regenerated vector clears the rule, its row
+/// is driven, and nobody re-raises the floor. With the pin, the bump trips
+/// this list (and the count check on it) until the regeneration is absorbed
+/// deliberately; a regenerated vector that still carries the old array stays
+/// honestly skipped rather than failing. At the bump this list should empty
+/// and the guard flip to "none expected".
+pub(crate) const STALE_UPDATE_CONTEXT: &[&str] = &[
+    "mutinynet/k1/q5p6w9su",
+    "mutinynet/k1/q5pgeu9z",
+    "mutinynet/x1/q425c5wf",
+    "mutinynet/x1/q4lqu6gr",
+    "mutinynet/x1/q4rnhfhv",
+    "mutinynet/x1/q4x4pxl2",
+    "mutinynet/x1/q550pp4e",
+    "mutinynet/x1/q59jnwfs",
+    "mutinynet/x1/q5cfewep",
+    "mutinynet/x1/q5m2fh36",
+    "mutinynet/x1/q5ugrf3w",
+    "mutinynet/x1/qkrrp544",
+    "mutinynet/x1/qky9e7qz",
+    "regtest/k1/qgppexmy",
+    "regtest/k1/qgpy0hmm",
+    "regtest/x1/q26jeds9",
+    "regtest/x1/qfl7se8f",
+];
+
 /// The number of rows each assertion kind must drive, at minimum.
 ///
 /// A coverage ratchet, not a census: `reconcile_driven_with` passes trivially
 /// when both the expected and the observed set are empty, so upstream churn
 /// that made every row of a kind skipped-with-a-reason would zero that kind's
 /// coverage without failing anything — only the stderr summary would change.
-/// Resolve is the live exposure: its eleven rows depend on fixture properties
-/// outside this repository (for an external vector, the presence of
-/// `resolve/input.json.resolutionOptions.sidecar.genesisDocument`) AND, for the
-/// seven past-genesis rows, on captured chain fixtures inside it. Either kind of
+/// Resolve is the live exposure: its rows depend on fixture properties outside
+/// this repository (for an external vector, the presence of
+/// `resolve/input.json.resolutionOptions.sidecar.genesisDocument`) AND, for
+/// past-genesis rows, on captured chain fixtures inside it. Either kind of
 /// loss — an upstream vector losing its sidecar genesis document, or a deleted
 /// capture — must fail here rather than shrink coverage quietly.
+///
+/// Four Resolve rows are driven today: the genesis-era vectors
+/// `mutinynet/k1/q5puld7y`, `mutinynet/x1/q5g3smvu`, `regtest/k1/qgpakaw4`
+/// and `regtest/x1/q2fz9mz6`. The seven anchored past-genesis rows that were
+/// driven from `fixtures/chain/` are parked under [`SkipReason::StaleContext`]
+/// while the upstream suite is regenerated with the pinned update `@context`;
+/// re-raise this entry to 11 or more when the regenerated suite is absorbed
+/// and [`STALE_UPDATE_CONTEXT`] empties. UpdateCrypto and EndState are
+/// unaffected: their drivers never read the vector's `@context`.
 ///
 /// Compared with `>=`, so upstream ADDING vectors raises coverage without
 /// failing; only silent coverage LOSS fails.
@@ -1181,7 +1279,7 @@ pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[
 pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
     (AssertionKind::Derivation, 22),
     (AssertionKind::GenesisKey, 22),
-    (AssertionKind::Resolve, 11),
+    (AssertionKind::Resolve, 4),
     (AssertionKind::UpdateCrypto, 17),
     (AssertionKind::EndState, 17),
 ];
@@ -1211,6 +1309,13 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
 /// driven from its captured chain snapshot, so "past genesis" is no longer a
 /// reason to skip; see [`SkipReason`] for the escape route a v2+ vector whose
 /// chain data cannot be captured takes instead.
+///
+/// A fourth rule lives in [`Vector::skip_reasons_with`] rather than here,
+/// because it reads a field this function's unit-tested signature does not
+/// carry:
+/// 4. any update step's `@context` (or its proof's) is not the pinned array
+///    -> `StaleContext` (Resolve only) — from the vector's own update files
+///    (`update/**/output.json`, `resolve/input.json` sidecar `updates`).
 pub(crate) fn derived_resolve_skip_reasons(
     has_pending: bool,
     delivery_genesis: Option<&str>,
@@ -1348,6 +1453,14 @@ impl Vector {
         } else {
             BTreeSet::new()
         };
+
+        // Rule 4: a pre-pin update `@context`, from the vector's own update
+        // files. Resolve only — the update-crypto and end-state drivers never
+        // read the vector's `@context` (they rebuild the update and compare
+        // document hashes), so those rows are genuinely driven.
+        if kind == AssertionKind::Resolve && self.stale_update_context {
+            reasons.insert(SkipReason::StaleContext);
+        }
 
         for entry in overrides {
             if entry.vector == self.id && entry.kind == kind {
@@ -1619,6 +1732,23 @@ pub(crate) fn render_summary_with(vectors: &[Vector], overrides: &[SkipOverride]
             "  fixture defects: {} vector(s) encode versionId as a JSON number \
              (the specification requires an ASCII string): {}\n",
             defective.len(),
+            networks.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    // Vectors whose update @context predates the spec's pin. Their Resolve
+    // rows are parked under `StaleContext` while the upstream suite is
+    // regenerated; named on every run so the parked coverage is visible, and
+    // self-clearing once the regenerated vectors land.
+    let stale: Vec<&Vector> = vectors.iter().filter(|v| v.stale_update_context).collect();
+    if stale.is_empty() {
+        out.push_str("  stale update @context: none\n");
+    } else {
+        let networks: BTreeSet<&str> = stale.iter().map(|v| v.network_dir.as_str()).collect();
+        out.push_str(&format!(
+            "  stale update @context: {} vector(s) predate the spec's pinned update @context \
+             (regenerated upstream; Resolve rows skipped under StaleContext until the bump): {}\n",
+            stale.len(),
             networks.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
@@ -2228,6 +2358,7 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
         update_layout: UpdateLayout::None,
         expected_version_id: 1,
         version_id_is_number: false,
+        stale_update_context: false,
         has_pending: false,
         delivery_genesis: None,
         delivery_announcement: None,
@@ -2508,6 +2639,57 @@ fn live_vectors_record_their_version_id_encoding() {
     }
 }
 
+/// The stale update `@context` population is exactly `STALE_UPDATE_CONTEXT`,
+/// in both directions: a stale vector not listed is a new pre-pin vector, and
+/// a listed vector that is now clean means the list is stale. The count is
+/// pinned too, so a partial regeneration trips this rather than being absorbed
+/// by the derived skip while `DRIVEN_FLOOR`'s Resolve entry stays lowered.
+#[test]
+fn live_vectors_record_their_update_context() {
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover();
+    assert!(!vectors.is_empty());
+
+    assert_eq!(
+        STALE_UPDATE_CONTEXT.len(),
+        17,
+        "the stale update @context population is pinned at 17 vectors — every vector with \
+         an update/ directory in the vendor suite as checked out; when the regenerated suite \
+         is absorbed, empty the list, re-raise DRIVEN_FLOOR's Resolve entry, and drop this pin"
+    );
+
+    // Vacuity guard: the list describes vectors that exist.
+    for listed in STALE_UPDATE_CONTEXT {
+        assert!(
+            vectors.iter().any(|v| v.id == *listed),
+            "{listed} is listed in STALE_UPDATE_CONTEXT but was not discovered — \
+             the vector was renamed or removed upstream; delete the entry"
+        );
+    }
+
+    for v in &vectors {
+        let listed = STALE_UPDATE_CONTEXT.contains(&v.id.as_str());
+        assert!(
+            v.stale_update_context == listed,
+            "{}: {}",
+            v.id,
+            if v.stale_update_context {
+                "NEW vector carrying the pre-pin update @context — add this id to \
+                 STALE_UPDATE_CONTEXT, or fix the fixture"
+            } else {
+                "update @context is now the pinned array — delete this id from \
+                 STALE_UPDATE_CONTEXT and re-raise DRIVEN_FLOOR's Resolve entry"
+            }
+        );
+    }
+}
+
 /// Three synthetic vectors spanning the shapes the ledger has to tell apart: a
 /// fully drivable genesis-era vector, an unanchored multi-update vector, and a
 /// genesis-era vector classified solely by its delivery declaration.
@@ -2736,6 +2918,98 @@ fn summary_reports_the_version_id_fixture_defect() {
     assert!(
         render_summary_with(&clean, &[]).contains("fixture defects: none"),
         "a clean ledger says so explicitly rather than omitting the line"
+    );
+}
+
+/// The summary names the stale update `@context` population on every run, so
+/// a green run says out loud how many Resolve rows are parked and why; and it
+/// says "none" rather than omitting the line once the population empties.
+#[test]
+fn summary_reports_stale_context() {
+    let ledger: Vec<Vector> = synthetic_ledger()
+        .into_iter()
+        .map(|mut v| {
+            v.stale_update_context = true;
+            v
+        })
+        .collect();
+    let stale = ledger.iter().filter(|v| v.stale_update_context).count();
+    assert_eq!(stale, 3, "the fixture must exercise the non-empty case");
+
+    let summary = render_summary_with(&ledger, &[]);
+    assert!(summary.contains("stale update @context: 3"), "{summary}");
+    assert!(
+        summary.contains("StaleContext") && summary.contains("regenerated upstream"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("mutinynet, regtest"),
+        "both networks in the ledger are named:\n{summary}"
+    );
+    assert!(
+        summary.contains(&SkipReason::StaleContext.to_string()),
+        "the reason is broken out in the skipped-rows table:\n{summary}"
+    );
+
+    let clean: Vec<Vector> = ledger
+        .into_iter()
+        .map(|mut v| {
+            v.stale_update_context = false;
+            v
+        })
+        .collect();
+    let summary = render_summary_with(&clean, &[]);
+    assert!(
+        summary.contains("stale update @context: none"),
+        "a clean ledger says so explicitly rather than omitting the line:\n{summary}"
+    );
+    assert!(
+        !summary.contains(&SkipReason::StaleContext.to_string()),
+        "no row carries the reason once the population is empty:\n{summary}"
+    );
+}
+
+/// `StaleContext` parks the Resolve row only. The update-crypto and end-state
+/// drivers rebuild the update from `input.json` and compare document hashes,
+/// never reading the vector's `@context`, so skipping them would hide rows
+/// whose assertion passes.
+#[test]
+fn stale_context_applies_to_the_resolve_kind_only() {
+    let mut v = synthetic_vector("regtest/k1/qgppexmy", "k1");
+    v.update_layout = UpdateLayout::Flat;
+    v.expected_version_id = 2;
+    v.stale_update_context = true;
+
+    assert!(
+        v.skip_reasons_with(AssertionKind::Resolve, &[])
+            .contains(&SkipReason::StaleContext),
+        "a stale vector's resolve row is parked"
+    );
+    assert!(
+        !v.should_drive_with(AssertionKind::Resolve, &[]),
+        "a parked row is not driven"
+    );
+    for kind in [
+        AssertionKind::Derivation,
+        AssertionKind::GenesisKey,
+        AssertionKind::UpdateCrypto,
+        AssertionKind::EndState,
+    ] {
+        assert!(
+            !v.skip_reasons_with(kind, &[])
+                .contains(&SkipReason::StaleContext),
+            "{kind} must not inherit the resolve-scoped StaleContext reason"
+        );
+        assert!(
+            v.should_drive_with(kind, &[]),
+            "{kind} stays driven on a stale vector"
+        );
+    }
+
+    v.stale_update_context = false;
+    assert!(
+        v.skip_reasons_with(AssertionKind::Resolve, &[]).is_empty(),
+        "the rule clears itself with the flag"
     );
 }
 
@@ -3269,13 +3543,18 @@ fn live_vectors_name_the_beacon_types_the_resolver_cannot_query() {
 /// The rows the resolve driver is expected to drive, pinned BY ID.
 ///
 /// [`DRIVEN_FLOOR`] alone would say only that the number moved. This says WHICH
-/// row moved: the four genesis-era rows that were driven before this phase, plus
-/// the seven past-genesis rows fed from `fixtures/chain/`. A vector losing its
-/// sidecar genesis document, gaining a `pending.json`, or an upstream vector
-/// arriving with a shape the rules classify differently fails here naming the
-/// difference, instead of being absorbed by a `>=` ratchet.
+/// row moved: the four genesis-era rows are driven; the seven anchored
+/// past-genesis rows fed from `fixtures/chain/` (`mutinynet/k1/q5p6w9su`,
+/// `mutinynet/k1/q5pgeu9z`, `mutinynet/x1/q5ugrf3w`, `regtest/k1/qgppexmy`,
+/// `regtest/k1/qgpy0hmm`, `regtest/x1/q26jeds9`, `regtest/x1/qfl7se8f`) are
+/// parked under [`SkipReason::StaleContext`] and return here when the
+/// regenerated suite is absorbed. A vector losing its sidecar genesis
+/// document, gaining a `pending.json`, clearing its stale `@context` early, or
+/// an upstream vector arriving with a shape the rules classify differently
+/// fails here naming the difference, instead of being absorbed by a `>=`
+/// ratchet.
 #[test]
-fn resolve_driven_set_is_the_expected_eleven_ids() {
+fn resolve_driven_set_is_the_expected_four_ids() {
     if !test_suite_checked_out() {
         eprintln!(
             "SKIP: test-suite submodule absent; \
@@ -3294,14 +3573,6 @@ fn resolve_driven_set_is_the_expected_eleven_ids() {
         "mutinynet/x1/q5g3smvu",
         "regtest/k1/qgpakaw4",
         "regtest/x1/q2fz9mz6",
-        // Past genesis, driven from a captured chain snapshot.
-        "mutinynet/k1/q5p6w9su",
-        "mutinynet/k1/q5pgeu9z",
-        "mutinynet/x1/q5ugrf3w",
-        "regtest/k1/qgppexmy",
-        "regtest/k1/qgpy0hmm",
-        "regtest/x1/q26jeds9",
-        "regtest/x1/qfl7se8f",
     ]
     .into_iter()
     .map(str::to_string)
@@ -3318,7 +3589,7 @@ fn resolve_driven_set_is_the_expected_eleven_ids() {
         missing.len(),
         extra.len(),
     );
-    assert_eq!(observed.len(), 11, "the floor and this list must agree");
+    assert_eq!(observed.len(), 4, "the floor and this list must agree");
 }
 
 /// `Override` stays LAST in the derived ordering: `PartialOrd`/`Ord` are derived
@@ -3328,6 +3599,7 @@ fn resolve_driven_set_is_the_expected_eleven_ids() {
 fn override_still_sorts_after_every_derived_reason() {
     let ordered: Vec<SkipReason> = BTreeSet::from([
         SkipReason::Override("a one-off"),
+        SkipReason::StaleContext,
         SkipReason::UnsupportedBeaconType,
         SkipReason::SmtDelivery,
         SkipReason::CasDelivery,
@@ -3343,6 +3615,7 @@ fn override_still_sorts_after_every_derived_reason() {
             SkipReason::CasDelivery,
             SkipReason::SmtDelivery,
             SkipReason::UnsupportedBeaconType,
+            SkipReason::StaleContext,
             SkipReason::Override("a one-off"),
         ]
     );
