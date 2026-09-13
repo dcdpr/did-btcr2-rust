@@ -484,6 +484,15 @@ fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
     // Extract the bech32 part
     let bech32_part = &did[DID_BTCR2_PREFIX.len()..];
 
+    // The spec requires a lowercase method-specific-id. Bech32 itself accepts
+    // an all-uppercase string (BIP-173 case-insensitivity), so check before
+    // decoding rather than relying on the decoder.
+    if bech32_part.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(Error::InvalidDidFormat(
+            "method-specific-id must be lowercase".to_string(),
+        ));
+    }
+
     // Decode the bech32 string
     let decoded = decode(bech32_part)?;
 
@@ -698,6 +707,8 @@ mod tests {
 
     /// A hand-built out-of-range `Network::Custom` cannot enter a
     /// validated `DidComponents` — `new` rejects it with `InvalidNetwork`.
+    /// This is the encode-side gate for the spec's reserved network values
+    /// (`6..=11`), which must not be encoded until the spec assigns them.
     #[test]
     fn did_components_new_rejects_out_of_range_custom_network() {
         let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
@@ -708,6 +719,15 @@ mod tests {
             ),
             "Custom(200) must be rejected by DidComponents::new"
         );
+        for n in 6u8..=11 {
+            assert!(
+                matches!(
+                    DidComponents::new(DidVersion::One, Network::Custom(n), key),
+                    Err(Error::InvalidNetwork(m)) if m == n
+                ),
+                "reserved network nibble {n} must be rejected on encode"
+            );
+        }
         // And an in-range Custom is accepted.
         assert!(DidComponents::new(DidVersion::One, Network::Custom(13), key).is_ok());
     }
@@ -768,6 +788,34 @@ mod tests {
         assert!(
             matches!(result, Err(Error::Bech32(_))),
             "malformed bech32 must be rejected as Bech32, got {result:?}"
+        );
+    }
+
+    /// The spec requires the `method-specific-id` to be lowercase on decode.
+    /// Bech32 permits an all-uppercase encoding of the same string (BIP-173
+    /// case-insensitivity), but did:btcr2 does not: the uppercased and the
+    /// mixed-case forms of a valid identifier are both rejected, and the
+    /// lowercase form still parses.
+    #[test]
+    fn parse_did_identifier_rejects_uppercase_method_specific_id() {
+        let did = "did:btcr2:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx";
+        assert!(parse_did_identifier(did).is_ok());
+
+        let body = &did[DID_BTCR2_PREFIX.len()..];
+        let upper = format!("{DID_BTCR2_PREFIX}{}", body.to_uppercase());
+        let result = parse_did_identifier(&upper);
+        assert!(
+            matches!(result, Err(Error::InvalidDidFormat(ref m)) if m.contains("lowercase")),
+            "an all-uppercase method-specific-id must be rejected, got {result:?}"
+        );
+
+        let mut mixed = body.to_owned();
+        mixed.replace_range(3..4, &body[3..4].to_uppercase());
+        let mixed = format!("{DID_BTCR2_PREFIX}{mixed}");
+        let result = parse_did_identifier(&mixed);
+        assert!(
+            matches!(result, Err(Error::InvalidDidFormat(ref m)) if m.contains("lowercase")),
+            "a mixed-case method-specific-id must be rejected, got {result:?}"
         );
     }
 

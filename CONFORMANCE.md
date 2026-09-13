@@ -12,7 +12,7 @@ coverage status:
   milestone (not a Singleton gap).
 - **NotApplicable** — out of scope for this method implementation, with a reason.
 
-**Totals:** 63 requirements — 52 Covered, 8 DeferredAggregation, 3 NotApplicable.
+**Totals:** 79 requirements — 62 Covered, 12 DeferredAggregation, 5 NotApplicable.
 
 ## Requirement Matrix
 
@@ -21,13 +21,21 @@ coverage status:
 | `algorithms.md:encode-invalid-did-on-error` | MUST | Covered | `identifier::tests::test_invalid_prefix` |
 | `algorithms.md:key-or-hash-genesis-bytes-variant` | MUST | Covered | `identifier::tests::test_id_type_hrps` |
 | `algorithms.md:version-number-must-be-1` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
+| `algorithms.md:reserved-network-values-not-encoded` | MUST NOT | Covered | `identifier::tests::did_components_new_rejects_out_of_range_custom_network` |
+| `algorithms.md:encode-method-specific-id-lowercase` | MUST | Covered | `identifier::pinned_mutinynet_vector_tests::encode_reproduces_spec_string` |
+| `algorithms.md:method-specific-id-bech32m-conformant` | MUST | Covered | `identifier::tests::test_from_str_rejects_malformed_bech32` |
 | `algorithms.md:decode-invalid-did-on-error` | MUST | Covered | `identifier::tests::test_invalid_genesis_length` |
 | `algorithms.md:identifier-processed-per-resolution` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
+| `algorithms.md:decode-method-specific-id-lowercase` | MUST | Covered | `identifier::tests::parse_did_identifier_rejects_uppercase_method_specific_id` |
 | `algorithms.md:btcr2-version-zero-version-number` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
-| `algorithms.md:network-value-in-table` | MUST | Covered | `identifier::tests::test_network_conversion` |
+| `algorithms.md:network-value-handled-per-table` | MUST | Covered | `identifier::tests::test_network_conversion` |
+| `algorithms.md:reserved-network-value-rejected-on-decode` | MUST | Covered | `identifier::tests::test_custom_network` |
 | `algorithms.md:hrp-k-or-x` | MUST | Covered | `identifier::tests::test_id_type_hrps` |
 | `algorithms.md:hrp-k-genesis-bytes-33-byte` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
 | `algorithms.md:hrp-x-genesis-bytes` | MUST | Covered | `identifier::tests::test_encode_decode_external` |
+| `algorithms.md:decoding-inverts-encoding` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
+| `algorithms.md:smt-proof-fields-decoded-before-hashing` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `optimized-smt.md:smt-proof-fields-decoded-before-hashing` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `privacy-considerations.md:test-suite-consensus-splits` | MUST | NotApplicable | non-normative test-suite design guidance, not an implementable method behavior |
 | `privacy-considerations.md:smt-aggregation-service-path` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `security-considerations.md:avoid-late-publishing` | MUST | Covered | `resolver::tests::unknown_signal_hash_raises_missing_update_data` |
@@ -46,15 +54,20 @@ coverage status:
 | `data-structures.md:base64url-no-pad-encoding` | MUST | Covered | `update::tests::unsigned_update_hashes_are_base64url_no_pad` |
 | `data-structures.md:did-doc-required-properties` | MUST | Covered | `document::tests::test_document_validation_missing_elements` |
 | `data-structures.md:source-target-hash-json-document-hashing` | MUST | Covered | `document::tests::golden_signed_update_bytes` |
+| `data-structures.md:update-context-pinned-array` | MUST | Covered | `document::tests::apply_update_rejects_unpinned_context` |
 | `data-structures.md:patch-result-conformant-doc` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
 | `data-structures.md:target-version-id-plus-one` | MUST | Covered | `resolver::tests::metadata_version_id_is_an_ascii_string` |
 | `data-structures.md:source-hash-applied-to` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
 | `data-structures.md:target-hash-result-of-patch` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
 | `data-structures.md:data-integrity-config-properties` | MUST | Covered | `document::tests::data_integrity_config_shape` |
+| `data-structures.md:proof-context-equals-update-context` | MUST | Covered | `document::tests::apply_update_rejects_proof_context_mismatch` |
 | `data-structures.md:capability-action-write` | MUST | Covered | `document::tests::data_integrity_config_shape` |
 | `data-structures.md:proof-purpose-capability-invocation` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
 | `data-structures.md:proof-value-detached-schnorr` | MUST | Covered | `document::tests::proof_value_is_base58btc_64_bytes` |
 | `data-structures.md:cas-announcement-hashes-base64url` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `data-structures.md:smt-proof-collapsed-bitmap` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `data-structures.md:smt-proof-hashes-sibling-nodes` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `data-structures.md:resolver-media-types` | MUST | NotApplicable | media types are a property of the HTTP DID Resolution binding; this crate returns typed Rust values, not media-typed bytes, so there is no surface to test until the binding exists |
 | `data-structures.md:sidecar-maps-dids-to-update-hashes` | MUST | Covered | `resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash` |
 | `data-structures.md:root-capability-map-only-properties` | MUST | Covered | `zcap::tests::test_round_trip` |
 | `data-structures.md:root-capability-context` | MUST | Covered | `zcap::tests::test_round_trip` |
@@ -68,13 +81,16 @@ coverage status:
 | `resolve.md:parse-did-with-decoding-algorithm` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
 | `resolve.md:invalid-did-on-decode-error` | MUST | Covered | `identifier::tests::test_invalid_prefix` |
 | `resolve.md:process-genesis-document-placeholder` | MUST | Covered | `document::tests::test_from_external_intermediate` |
-| `resolve.md:render-initial-did-document-bitcoin-uri` | MUST | Covered | `beacon::tests::from_bip21` |
+| `resolve.md:render-initial-did-document-bitcoin-uri` | MUST | Covered | `document::tests::beacons_accessor` |
 | `resolve.md:parse-rendered-template-conformant-doc` | MUST | Covered | `document::tests::test_document_parse` |
+| `resolve.md:signal-confirmed-min-conf` | MUST | Covered | `resolver::tests::unconfirmed_needed_signal_returns_err` |
 | `resolve.md:late-publishing-raised` | MUST | Covered | `update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing` |
-| `update.md:apply-patches-target-conformant` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
+| `resolve.md:capability-invocation-entry-identifies-proof-vm` | MUST | Covered | `document::tests::apply_update_accepts_embedded_capability_invocation` |
+| `update.md:apply-patch-invalid-did-update-on-failure` | MUST | Covered | `document::tests::construct_signed_update_rejects_failing_patch` |
+| `update.md:target-version-id-from-fresh-resolution` | MUST | NotApplicable | a DID-controller operating rule: the library takes the current `versionId` as an explicit argument (`construct_signed_update`, the client's `update`/`deactivate`) and cannot observe whether the caller obtained it from a fresh resolution |
 | `update.md:unsigned-update-conformant` | MUST | Covered | `update::tests::unsigned_update_has_four_contexts` |
-| `update.md:invalid-did-update-vm-set-lacks-id` | MUST | Covered | `document::tests::update_rejects_unknown_vm` |
 | `update.md:invalid-did-update-capability-invocation-lacks-id` | MUST | Covered | `document::tests::update_rejects_vm_not_in_capability_invocation` |
+| `update.md:invalid-did-update-referenced-vm-missing` | MUST | Covered | `document::tests::construct_signed_update_rejects_reference_to_missing_verification_method` |
 | `update.md:data-integrity-config-conformant` | MUST | Covered | `document::tests::data_integrity_config_shape` |
 | `terminology.md:beacon-is-singleton-smt-or-cas` | MUST | Covered | `beacon::tests::beacon_type_serde_round_trips_spec_strings` |
 | `terminology.md:must-not-complete-resolution-if-data-missing` | MUST NOT | Covered | `resolver::tests::unknown_signal_hash_raises_missing_update_data` |
@@ -88,6 +104,8 @@ No Singleton-applicable MUST/SHALL is left uncovered: every requirement above is
 Covered by a test or explicitly justified as DeferredAggregation / NotApplicable. The justified
 non-gaps are:
 
+- `algorithms.md:smt-proof-fields-decoded-before-hashing` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `optimized-smt.md:smt-proof-fields-decoded-before-hashing` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `privacy-considerations.md:test-suite-consensus-splits` (MUST) — NotApplicable: non-normative test-suite design guidance, not an implementable method behavior
 - `privacy-considerations.md:smt-aggregation-service-path` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `aggregate-beacons.md:participants-persist-nonce` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
@@ -98,6 +116,10 @@ non-gaps are:
 - `conformance.md:conformant-to-did-core` (MUST) — NotApplicable: umbrella conformance statement over DID-Core/Resolution; covered transitively by the specific rows below, not a single testable behavior
 - `data-structures.md:json-ld-conformance` (MUST) — NotApplicable: JSON-LD 1.1 layer is out of scope (see PROJECT.md Out of Scope); JCS hashing needs are met without a general JSON-LD conformance layer
 - `data-structures.md:cas-announcement-hashes-base64url` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `data-structures.md:smt-proof-collapsed-bitmap` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `data-structures.md:smt-proof-hashes-sibling-nodes` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `data-structures.md:resolver-media-types` (MUST) — NotApplicable: media types are a property of the HTTP DID Resolution binding; this crate returns typed Rust values, not media-typed bytes, so there is no surface to test until the binding exists
+- `update.md:target-version-id-from-fresh-resolution` (MUST) — NotApplicable: a DID-controller operating rule: the library takes the current `versionId` as an explicit argument (`construct_signed_update`, the client's `update`/`deactivate`) and cannot observe whether the caller obtained it from a fresh resolution
 - `update-data-distribution.md:ipfs-chunking` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 
 ## Self-Check Scope (residual)

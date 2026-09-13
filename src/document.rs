@@ -3241,6 +3241,44 @@ mod tests {
         assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
+    /// update.md — an `INVALID_DID_UPDATE` error MUST be raised if the JSON
+    /// Patch fails to apply. RFC 6902 evaluates operations in order and a
+    /// failed `test` operation fails the whole patch; a `remove` of a missing
+    /// path fails the same way. Neither produces an update.
+    #[test]
+    fn construct_signed_update_rejects_failing_patch() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let failing_test: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "test", "path": "/id", "value": "did:btcr2:not-this-document"},
+            {"op": "add", "path": "/service/-", "value": {
+                "id": "#extra", "type": "SingletonBeacon",
+                "serviceEndpoint": "bitcoin:tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+            }}
+        ]))
+        .expect("a failing `test` op is a well-formed RFC 6902 patch");
+        let err = document
+            .construct_signed_update(failing_test, version, &vm_id, source_secret_key())
+            .expect_err("a patch whose `test` op fails must be rejected");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if m.contains("JSON Patch")),
+            "got {err:?}"
+        );
+
+        let missing_path: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "remove", "path": "/service/99"}
+        ]))
+        .expect("a remove of a missing path is a well-formed RFC 6902 patch");
+        let err = document
+            .construct_signed_update(missing_path, version, &vm_id, source_secret_key())
+            .expect_err("a patch that removes a missing path must be rejected");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if m.contains("JSON Patch")),
+            "got {err:?}"
+        );
+    }
+
     /// resolve.md:198 — apply_update MUST reject an update whose proof
     /// verificationMethod is NOT a member of the document's capabilityInvocation
     /// set (an update signed by a key the document never authorized to invoke its
