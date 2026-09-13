@@ -932,6 +932,35 @@ mod tests {
         assert!(!txid.to_string().is_empty(), "a txid is returned");
     }
 
+    /// The signed update the client announces carries the spec's pinned
+    /// `@context` on both the update and its proof — the array a conforming
+    /// resolver requires (did-btcr2/src/operations/resolve.md, "Check
+    /// update.proof"). Observed here, at the layer callers use, so the
+    /// core's emitter cannot drift without a client-visible failure.
+    #[test]
+    fn update_emits_pinned_context() {
+        let transport = FakeTransport::new("[]");
+        let client = Client::new("http://fake".to_string(), transport);
+        let (doc, _did, vm_id) = created_doc(&client);
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let update = doc
+            .construct_signed_update(benign_patch(&vm_id), v2, &vm_id, test_update_sk())
+            .expect("a signed update constructs against the genesis document");
+
+        let pinned = serde_json::json!(did_btcr2::UPDATE_CONTEXT);
+        assert_eq!(
+            update.as_ref()["@context"],
+            pinned,
+            "the emitted update @context is the pinned array"
+        );
+        assert_eq!(
+            update.as_ref()["proof"]["@context"],
+            pinned,
+            "the emitted proof @context is the pinned array"
+        );
+    }
+
     /// A `current_version_id` of `NonZeroU64::MAX` makes `checked_add(1)`
     /// overflow. That check is the FIRST statement in `update` (before any
     /// signing/build/broadcast), so it must short-circuit with a typed

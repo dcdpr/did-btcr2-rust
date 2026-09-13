@@ -403,18 +403,11 @@ round-trip. That constraint is spelled out at `tests/conformance.rs:770`.
 | Fixture | Shape | What it pins |
 |---|---|---|
 | `golden-signed-update.json` | a signed update | The blessed update vector. Re-blessed by `BLESS=1`, never hand-edited; construction derives it from `source_documents()`. |
-| `sidecar-two-updates.json` | 2 updates | The ordinary chained case, used for lookup-table build, apply order, and version walking. |
+| `sidecar-two-updates.json` | 2 updates | The ordinary chained case, used for lookup-table build, apply order, and version walking. Its `@context` arrays were hand-edited to the pinned array; its proofs are not verified by any test (parse / lookup / ordering only) and were not re-signed. |
 | `sidecar-empty.json` | 0 updates | A sidecar carrying no updates at all. |
 | `sidecar-missing-update.json` | 0 updates | A beacon signal whose hash is absent from the lookup table, raising `MISSING_UPDATE_DATA`. |
 | `sidecar-forward-compat.json` | 0 updates, plus `casUpdates`, `smtProofs`, `genesisDocument` | Not-yet-implemented sidecar members must parse and be ignored, not rejected. |
 | `sidecar-empty-service-genesis.json` | `genesisDocument` only | A hostile external genesis whose `service` array is empty must return a typed error, not panic. |
-| `sidecar-deactivated.json` | 2 updates | Currently referenced by no test. See below. |
-
-`sidecar-deactivated.json` is **unused**. It was added alongside the other
-spec-form sidecars when the resolver converged on the spec wire shape, but the
-deactivation tests build their state in memory instead, so nothing reads it.
-It is kept rather than deleted only because that is a call for a human to make;
-it is not evidence of coverage.
 
 ### Unit fixtures
 

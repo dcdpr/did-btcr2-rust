@@ -1227,7 +1227,14 @@ impl InitialDocument {
         }
     }
 
-    // Spec Section 7.2.2.5
+    /// Apply a signed update to this document on the resolve path
+    /// (did-btcr2/src/operations/resolve.md, "Check update.proof" and
+    /// "Apply update"). In order: refuse if deactivated; require the update's
+    /// and its proof's `@context` to be the pinned array; the proof's root
+    /// capability must dereference to this DID; the proof's verificationMethod
+    /// must be identified by a `capabilityInvocation` entry, whose key verifies
+    /// the proof; apply the patch; re-parse; the id must be unchanged and the
+    /// result must hash to `targetHash`. Every rejection is `INVALID_DID_UPDATE`.
     pub(crate) fn apply_update(&mut self, update: &Update) -> Result<(), Btcr2Error> {
         // A deactivated DID is terminal and MUST NOT accept further updates
         // (spec: did-btcr2/src/operations/deactivate.md). The resolver FSM
@@ -1238,6 +1245,12 @@ impl InitialDocument {
                 "cannot apply an update to a deactivated DID document".into(),
             ));
         }
+
+        // The update's @context, and its proof's, must be the spec's pinned
+        // array before any proof work (resolve.md, "Check update.proof").
+        // verify_proof's proof-equals-update comparison below is the second
+        // line; this one fixes what both must equal.
+        update.ensure_pinned_context()?;
 
         let capability_id = &update.proof.inner.capability;
         let did = dereference_root_capability(capability_id)?;
@@ -2639,6 +2652,7 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────
 
     use crate::key::SecretKey;
+    use crate::update::UPDATE_CONTEXT;
     use secp256k1::Secp256k1;
 
     /// Fixed secret key for the construction tests. Any fixed valid secp256k1
@@ -2698,6 +2712,8 @@ mod tests {
 
     /// KEYSTONE: a produced signed update applied to the prior document returns
     /// Ok and the applied document's hash equals the constructed targetHash.
+    /// The produced update carries the pinned `@context` on both the update
+    /// and its proof, which is what lets `apply_update`'s context check pass.
     ///
     /// Spec: did-btcr2/src/operations/update.md (Construct Signed Update) +
     /// the verify path the resolver runs in apply_update.
@@ -2710,6 +2726,14 @@ mod tests {
         let update = document
             .construct_signed_update(patch, version, &vm_id, source_secret_key())
             .expect("a valid (patch, version, vm_id, key) must produce a signed update");
+        assert_eq!(
+            update.as_ref()["@context"],
+            serde_json::json!(UPDATE_CONTEXT)
+        );
+        assert_eq!(
+            update.as_ref()["proof"]["@context"],
+            serde_json::json!(UPDATE_CONTEXT)
+        );
 
         let mut applied = initial.clone();
         applied
@@ -4185,5 +4209,83 @@ mod tests {
             matches!(err, Btcr2Error::InvalidDidUpdate(_)),
             "resolve-path proof-verify failure must surface INVALID_DID_UPDATE, got: {err:?}"
         );
+    }
+
+    /// The array the emitter carried before the spec pinned the update
+    /// `@context`; the negative case for the resolve-side check.
+    fn pre_pin_context() -> Value {
+        serde_json::json!([
+            "https://w3id.org/security/v2",
+            "https://w3id.org/zcap/v1",
+            "https://w3id.org/json-ld-patch/v1",
+            "https://btcr2.dev/context/v1"
+        ])
+    }
+
+    /// Re-parse a mutated signed update and apply it to a fresh copy of the
+    /// source document, returning the rejection.
+    fn apply_mutated(did: &Did, json: Value) -> Btcr2Error {
+        let update = Update::from_json_value(json).expect("a context swap still re-parses");
+        let mut target = InitialDocument::from_did(did, &ResolutionOptions::default())
+            .expect("key DID regenerates its initial document");
+        target
+            .apply_update(&update)
+            .expect_err("an update whose @context is not the pinned array must be rejected")
+    }
+
+    /// resolve.md "Check update.proof": an update whose `@context` is the old
+    /// array, the pinned URLs reordered, or a strict prefix of them is rejected
+    /// by `apply_update` with `INVALID_DID_UPDATE`. The proof is otherwise
+    /// intact, so the rejection is the context check, not the signature.
+    #[test]
+    fn apply_update_rejects_unpinned_context() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+
+        let mut reversed: Vec<&str> = UPDATE_CONTEXT.to_vec();
+        reversed.reverse();
+        let mutations: [(&str, Value); 3] = [
+            ("old array", pre_pin_context()),
+            ("reversed", serde_json::json!(reversed)),
+            ("three elements", serde_json::json!(&UPDATE_CONTEXT[..3])),
+        ];
+        for (label, context) in mutations {
+            let mut json = update.as_ref().clone();
+            json["@context"] = context;
+            let err = apply_mutated(&did, json);
+            match err {
+                Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                    msg.contains("@context"),
+                    "{label}: message must name @context, got: {msg}"
+                ),
+                other => panic!("{label}: expected InvalidDidUpdate, got {other:?}"),
+            }
+        }
+    }
+
+    /// resolve.md "Check update.proof": a proof whose `@context` differs from
+    /// the pinned array — the update's own is left correct — is rejected by
+    /// `apply_update` with `INVALID_DID_UPDATE` naming the proof.
+    #[test]
+    fn apply_update_rejects_proof_context_mismatch() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+
+        let mut json = update.as_ref().clone();
+        json["proof"]["@context"] = pre_pin_context();
+        let err = apply_mutated(&did, json);
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("proof @context"),
+                "message must name the proof @context, got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
     }
 }

@@ -101,6 +101,30 @@ impl Update {
         })
     }
 
+    /// The update's `@context`, and its proof's, must be the pinned BTCR2
+    /// Unsigned Update context array — same URLs, same order
+    /// (did-btcr2/src/operations/resolve.md, "Check update.proof"). Any other
+    /// value is an invalid DID update.
+    ///
+    /// Both arrays are compared as JSON values against [`UPDATE_CONTEXT`]; a
+    /// missing key indexes to `Null`, which is not the pinned array, so a
+    /// malformed update is rejected the same way with no panic path.
+    pub(crate) fn ensure_pinned_context(&self) -> Result<(), Btcr2Error> {
+        let pinned = serde_json::json!(UPDATE_CONTEXT);
+        if self.json["@context"] != pinned {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "update @context is not the pinned BTCR2 Unsigned Update context array".into(),
+            ));
+        }
+        if self.json["proof"]["@context"] != pinned {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "update proof @context is not the pinned BTCR2 Unsigned Update context array"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     // Spec section 7.2.2.4
     pub(crate) fn confirm_duplicate(&self, hash_history: &[Sha256Hash]) -> Result<(), Btcr2Error> {
         let update_hash = UnsecuredUpdate::from(self).hash();
@@ -487,6 +511,102 @@ mod tests {
             ])
         );
         assert_eq!(u.as_ref()["@context"], serde_json::json!(UPDATE_CONTEXT));
+    }
+
+    /// The golden signed update, parsed from its bytes.
+    fn golden_update_json() -> Value {
+        serde_json::from_str(include_str!(
+            "../fixtures/spec-form/golden-signed-update.json"
+        ))
+        .expect("golden signed update is valid JSON")
+    }
+
+    /// The array the emitter carried before the spec pinned the update
+    /// `@context`: wrong first URL, wrong order. Kept only as the negative case.
+    fn pre_pin_context() -> Value {
+        serde_json::json!([
+            "https://w3id.org/security/v2",
+            "https://w3id.org/zcap/v1",
+            "https://w3id.org/json-ld-patch/v1",
+            "https://btcr2.dev/context/v1"
+        ])
+    }
+
+    /// resolve.md "Check update.proof": the golden signed update carries the
+    /// pinned array on both the update and its proof, so the check accepts it.
+    #[test]
+    fn ensure_pinned_context_accepts_the_pinned_array() {
+        let update = Update::from_json_value(golden_update_json()).expect("golden update parses");
+        assert_eq!(
+            update.as_ref()["@context"],
+            serde_json::json!(UPDATE_CONTEXT)
+        );
+        assert_eq!(
+            update.as_ref()["proof"]["@context"],
+            serde_json::json!(UPDATE_CONTEXT)
+        );
+        update
+            .ensure_pinned_context()
+            .expect("the pinned array on update and proof is accepted");
+    }
+
+    /// resolve.md "Check update.proof": an update `@context` that is the old
+    /// array, the pinned URLs reordered, or a strict prefix of them is an
+    /// `INVALID_DID_UPDATE`; so is a proof `@context` that differs from the
+    /// pinned array while the update's own is correct. Membership and order
+    /// both matter.
+    #[test]
+    fn ensure_pinned_context_rejects_old_reordered_short_and_proof_mismatch() {
+        let mut reversed: Vec<&str> = UPDATE_CONTEXT.to_vec();
+        reversed.reverse();
+        let short = &UPDATE_CONTEXT[..3];
+
+        let update_level: [(&str, Value); 3] = [
+            ("old array", pre_pin_context()),
+            ("reversed", serde_json::json!(reversed)),
+            ("three elements", serde_json::json!(short)),
+        ];
+        for (label, context) in update_level {
+            let mut json = golden_update_json();
+            json["@context"] = context;
+            let update = Update::from_json_value(json).expect("a context swap still parses");
+            let err = update
+                .ensure_pinned_context()
+                .expect_err("a non-pinned update @context must be rejected");
+            match err {
+                Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                    msg.contains("update @context") && !msg.contains("proof @context"),
+                    "{label}: message must name the update @context, got: {msg}"
+                ),
+                other => panic!("{label}: expected InvalidDidUpdate, got {other:?}"),
+            }
+        }
+
+        let mut json = golden_update_json();
+        json["proof"]["@context"] = pre_pin_context();
+        let update = Update::from_json_value(json).expect("a proof context swap still parses");
+        let err = update
+            .ensure_pinned_context()
+            .expect_err("a proof @context that is not the pinned array must be rejected");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("proof @context"),
+                "message must name the proof @context, got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+
+        // A missing key indexes to Null and is rejected the same way, not by a
+        // panic.
+        let mut json = golden_update_json();
+        json.as_object_mut()
+            .expect("golden update is an object")
+            .remove("@context");
+        let update = Update::from_json_value(json).expect("an update without @context parses");
+        assert!(matches!(
+            update.ensure_pinned_context(),
+            Err(Btcr2Error::InvalidDidUpdate(_))
+        ));
     }
 
     /// the constructed unsigned update carries the expected field
