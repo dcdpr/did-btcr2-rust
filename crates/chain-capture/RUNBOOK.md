@@ -491,11 +491,11 @@ Record them here after the session, so anyone who encounters them knows what
 they are:
 
 - `clean-rotating-beacons`:
-  `did:btcr2:k1qgpgek8c4hlam42zfrec303pmz38u8l6vtg24039r3w6qaeej92stxshy4wrf`
+  `did:btcr2:k1qgpjt50lartreh0z4k9c39eaq3n0724ysjs3m7mveyunlmuh55mrh2qnrajuw`
   — minted on the disposable Polar regtest chain at blocks 760 / 762 / 764,
   resolves to version 4 and is deactivated.
 - `late-publishing-fork`:
-  `did:btcr2:k1qgps3vxl9qffsj5z6u8a7m9dg5mgygucxwcfavty763wmme6p2jzf0gat27sv`
+  `did:btcr2:k1qgpgf9lpvpxqrgjdcsd64w6jvwehf6zyk0mpxm7j0nrahmgs62xs54s6epzvn`
   — minted on the same chain at blocks 766 / 768, two conflicting version 2
   announcements from one beacon.
 
