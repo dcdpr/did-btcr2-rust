@@ -31,7 +31,10 @@
 //! estimates the endpoint reports, and [`select`] picks the funding inputs under
 //! the bounded single-input contract. [`network_base_url`] and
 //! [`resolve_base_url`] map a network name to its Esplora endpoint; regtest has
-//! no default and requires one to be supplied.
+//! no default and requires one to be supplied. [`network_from_name`] and
+//! [`network_name`] are the one name <-> `Network` table behind the `--network`
+//! flag, and [`Client::for_did`] derives the endpoint from the network a DID
+//! encodes.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -52,7 +55,7 @@ pub use funding::{
 };
 pub use signing::sign_beacon_tx;
 pub use transport::{BtcTransport, UreqTransport};
-pub use url::{network_base_url, resolve_base_url};
+pub use url::{network_base_url, network_from_name, network_name, resolve_base_url};
 
 // Re-export the resolve option/result surface a facade caller needs, so callers
 // do not depend on `did-btcr2` paths directly for the common case.

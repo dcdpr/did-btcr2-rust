@@ -29,6 +29,10 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - `chain-capture` settles the chain five blocks past the last announcement
   before capturing a minted fixture, and records the `/block/{hash}` header
   of every announcement's block.
+- `Client::for_did(&did, network_override, esplora_url, transport)`: derives
+  the Esplora endpoint from the DID's network; `Error::NetworkMismatch` when
+  `--network` names another chain. `network_from_name` / `network_name` expose
+  the name table.
 
 ### Changed
 
@@ -64,6 +68,9 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - `Btcr2Error::NotFound`'s fixed title (problem-details `title`, leading clause
   of `Display`) is now "The DID document was not found"; the genesis-retrieval
   or `versionId` reason stays in `detail`.
+- The CLI's `resolve`, `update`, and `deactivate` no longer default to testnet:
+  the endpoint follows the DID; a contradicting `--network` is an error before
+  any request. `create` still defaults to testnet.
 
 ### Deprecated
 

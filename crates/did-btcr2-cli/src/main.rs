@@ -230,8 +230,9 @@ impl OnlyArgs for Args {
             "\n",
             "  resolve <did>                Resolve a did:btcr2 identifier and print the\n",
             "                               DID resolution result as JSON.\n",
-            "    --network <net>             Network: testnet (default), signet, mainnet,\n",
-            "                                or mutinynet.\n",
+            "    --network <net>             Network: mainnet, signet, testnet, or mutinynet.\n",
+            "                                Defaults to the network the DID is anchored\n",
+            "                                to; a flag naming another chain is an error.\n",
             "    --esplora-url <url>         Esplora base URL override (no trailing slash).\n",
             "    --sidecar <file>            Path to a sidecar data JSON file.\n",
             "    --min-conf <n>              Confirmations a beacon signal needs before it\n",
@@ -354,24 +355,18 @@ fn parse_create(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command,
     })
 }
 
-/// Map a `--network` string to a [`did_btcr2::identifier::Network`].
+/// Map a `--network` string to a [`did_btcr2::identifier::Network`] for
+/// `create`, which has no DID to derive the network from.
 ///
-/// `None` and `"testnet"` both map to `TestnetV3` (the CLI default); `"signet"`,
-/// `"mainnet"`, `"mutinynet"`, and `"regtest"` map to their variants. Anything else is a
-/// typed [`did_btcr2_client::Error::UnknownNetwork`] (surfaced via
-/// `CliRunError::Client`), mirroring how [`beacon_index`] handles an unknown
-/// beacon type — the unknown string is NOT laundered through another variant.
+/// `None` is the `create` default (testnet, `TestnetV3`). The name table lives
+/// in the client ([`did_btcr2_client::network_from_name`]) so the CLI and the
+/// facade cannot drift; an unrecognized name is its typed
+/// [`did_btcr2_client::Error::UnknownNetwork`] (surfaced via
+/// `CliRunError::Client`), never laundered through another variant.
 fn network_from_str(network: Option<&str>) -> Result<did_btcr2::identifier::Network, CliRunError> {
-    use did_btcr2::identifier::Network;
     match network {
-        None | Some("testnet") => Ok(Network::TestnetV3),
-        Some("signet") => Ok(Network::Signet),
-        Some("mainnet") => Ok(Network::Mainnet),
-        Some("mutinynet") => Ok(Network::Mutinynet),
-        Some("regtest") => Ok(Network::Regtest),
-        Some(other) => Err(CliRunError::Client(
-            did_btcr2_client::Error::UnknownNetwork(other.to_string()),
-        )),
+        None => Ok(did_btcr2::identifier::Network::TestnetV3),
+        Some(name) => did_btcr2_client::network_from_name(name).map_err(CliRunError::Client),
     }
 }
 
@@ -609,11 +604,7 @@ fn run_resolve(
 ) -> Result<(), CliRunError> {
     let did: did_btcr2::identifier::Did = did_str.parse()?;
     let opts = load_sidecar(sidecar, min_conf)?;
-    let client = Client::with_network(
-        network.unwrap_or("testnet"),
-        esplora_url,
-        UreqTransport::new(),
-    )?;
+    let client = Client::for_did(&did, network, esplora_url, UreqTransport::new())?;
     let result = client.resolve(&did, opts)?;
     let out = build_resolution_json(&result);
     writeln!(
@@ -880,8 +871,9 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
         None => None,
     };
 
-    let client = Client::with_network(
-        d.network.as_deref().unwrap_or("testnet"),
+    let client = Client::for_did(
+        &did,
+        d.network.as_deref(),
         d.esplora_url,
         UreqTransport::new(),
     )?;
@@ -2343,6 +2335,39 @@ mod tests {
             }
             other => panic!("expected UnknownNetwork, got {other:?}"),
         }
+    }
+
+    /// `resolve` derives its endpoint from the DID; a `--network` naming
+    /// another chain is refused before any request, and the error chain
+    /// `main` prints (`Error:` plus its `Caused by:` lines) names both chains
+    /// so the user can see which flag to drop.
+    #[test]
+    fn resolve_refuses_a_network_flag_that_contradicts_the_did() {
+        use did_btcr2::identifier::{Did, Network};
+        let did: Did = SAMPLE_DID.parse().expect("the sample DID parses");
+        assert_eq!(
+            did.components().network(),
+            Network::Mainnet,
+            "the sample DID is anchored to mainnet"
+        );
+
+        let err = run_resolve(SAMPLE_DID, Some("signet"), None, None, None)
+            .expect_err("signet contradicts a mainnet DID");
+        assert!(
+            matches!(
+                err,
+                CliRunError::Client(did_btcr2_client::Error::NetworkMismatch { .. })
+            ),
+            "got {err:?}"
+        );
+        let mut printed = format!("Error: {err}\n");
+        for source in err.sources().skip(1) {
+            printed.push_str(&format!("  Caused by: {source}\n"));
+        }
+        assert!(
+            printed.contains("--network signet") && printed.contains("anchored to mainnet"),
+            "the printed chain names the flag and the DID's network: {printed}"
+        );
     }
 
     #[test]

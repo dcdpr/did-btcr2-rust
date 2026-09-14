@@ -1,10 +1,44 @@
 //! Esplora base-URL selection.
 //!
 //! Owns the mapping from a `--network` string to a confirmed Esplora base URL,
-//! plus the `--esplora-url` override. Hoisted out of the CLI so the facade — and
-//! any future HTTP front-end — share one source of truth for endpoint selection.
+//! plus the `--esplora-url` override, and the one name <-> [`Network`] table
+//! the flag and the endpoint lookup share. Hoisted out of the CLI so the
+//! facade — and any future HTTP front-end — share one source of truth for
+//! endpoint selection.
+
+use did_btcr2::identifier::Network;
 
 use crate::error::Error;
+
+/// Map a `--network` name to the core [`Network`]. The five names the CLI
+/// accepts (`testnet` is `TestnetV3`); anything else is
+/// [`Error::UnknownNetwork`].
+pub fn network_from_name(name: &str) -> Result<Network, Error> {
+    match name {
+        "testnet" => Ok(Network::TestnetV3),
+        "signet" => Ok(Network::Signet),
+        "mainnet" => Ok(Network::Mainnet),
+        "mutinynet" => Ok(Network::Mutinynet),
+        "regtest" => Ok(Network::Regtest),
+        other => Err(Error::UnknownNetwork(other.to_string())),
+    }
+}
+
+/// The name the `--network` flag and the Esplora table use for a core
+/// [`Network`]. Total: `TestnetV4` is "testnet4" and `Custom(_)` is "custom"
+/// (neither has a hosted endpoint nor a `--network` spelling, so
+/// [`network_from_name`] does not accept them back).
+pub fn network_name(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "mainnet",
+        Network::Signet => "signet",
+        Network::Regtest => "regtest",
+        Network::TestnetV3 => "testnet",
+        Network::TestnetV4 => "testnet4",
+        Network::Mutinynet => "mutinynet",
+        Network::Custom(_) => "custom",
+    }
+}
 
 /// Map a `network` value to its confirmed Esplora base URL (no trailing slash).
 ///
@@ -90,6 +124,36 @@ mod tests {
         match resolve_base_url(Some("bogus"), None) {
             Err(Error::UnknownNetwork(net)) => assert_eq!(net, "bogus"),
             other => panic!("expected UnknownNetwork, got {other:?}"),
+        }
+    }
+
+    /// The five `--network` spellings and the core `Network` variants they
+    /// name round-trip through the one table; the two variants without a
+    /// `--network` spelling still have a name (for error text and the
+    /// endpoint lookup) but are not accepted as flag values.
+    #[test]
+    fn network_names_round_trip() {
+        for (name, net) in [
+            ("mainnet", Network::Mainnet),
+            ("signet", Network::Signet),
+            ("testnet", Network::TestnetV3),
+            ("mutinynet", Network::Mutinynet),
+            ("regtest", Network::Regtest),
+        ] {
+            assert_eq!(
+                network_from_name(name).unwrap(),
+                net,
+                "{name} maps to {net:?}"
+            );
+            assert_eq!(network_name(net), name, "{net:?} is named {name}");
+        }
+        assert_eq!(network_name(Network::TestnetV4), "testnet4");
+        assert_eq!(network_name(Network::Custom(12)), "custom");
+        for name in ["testnet4", "bogus"] {
+            match network_from_name(name) {
+                Err(Error::UnknownNetwork(n)) => assert_eq!(n, name),
+                other => panic!("expected UnknownNetwork for {name}, got {other:?}"),
+            }
         }
     }
 

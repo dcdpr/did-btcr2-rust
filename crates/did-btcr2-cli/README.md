@@ -33,22 +33,30 @@ Run `cargo run -p did-btcr2-cli -- --help` for the authoritative flag list.
 
 ## Networks
 
-`--network` selects a built-in Esplora endpoint; `--esplora-url` overrides it
-verbatim (trailing slash trimmed):
+For `resolve`, `update`, and `deactivate` the Esplora endpoint is derived from
+the network the DID encodes, so `--network` is optional: it may only confirm
+the DID's network, and a flag naming a different chain is refused before any
+request with
+`--network <flag> contradicts the DID, which is anchored to <net>; ...`.
+`create` has no DID yet and defaults to `testnet`. `--esplora-url` overrides
+the endpoint verbatim (trailing slash trimmed) and is not checked against the
+DID:
 
 | `--network` | Esplora base URL |
 |---|---|
-| `testnet` (default) | `https://blockstream.info/testnet/api` |
+| `testnet` | `https://blockstream.info/testnet/api` |
 | `signet` | `https://blockstream.info/signet/api` |
 | `mainnet` | `https://blockstream.info/api` |
 | `mutinynet` | `https://mutinynet.com/api` |
 | `regtest` | *(none — requires `--esplora-url`)* |
 
-`regtest` has no hosted Esplora endpoint, so `did-btcr2 resolve --network regtest`
-requires `--esplora-url http://<your-local-esplora>/api` pointing at your local
-esplora. Omitting it errors with
+`regtest` has no hosted Esplora endpoint, so resolving a regtest DID (or
+`create --network regtest` followed by a resolve of the result) requires
+`--esplora-url http://<your-local-esplora>/api` pointing at your local esplora.
+Omitting it errors with
 `regtest has no default Esplora endpoint; pass --esplora-url`
-rather than falling back to testnet.
+rather than falling back to testnet. A DID anchored to testnet4 likewise needs
+`--esplora-url`.
 
 ## Supplying the secret key (`update` / `deactivate`)
 
@@ -120,12 +128,12 @@ The first line of stdout is exactly (real captured output):
 did:btcr2:k1qvp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqmxnpr4
 ```
 
-### The DID encodes its network — it must match `--network`
+### The DID encodes its network
 
 A `k1...` (key-based) identifier encodes its Bitcoin network in the bech32
 payload, so the same key yields a *different* DID per network:
 
-| `--network` | DID prefix | Fixed-key DID (this demo key) |
+| Network | DID prefix | Fixed-key DID (this demo key) |
 |---|---|---|
 | `mainnet` | `k1qqp...` | `did:btcr2:k1qqp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqhmkf96` |
 | `testnet` | `k1qvp...` | `did:btcr2:k1qvp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqmxnpr4` |
@@ -134,21 +142,24 @@ payload, so the same key yields a *different* DID per network:
 
 A key-based DID resolves deterministically to its **genesis document** when no
 beacon signals are found on-chain, so `resolve` returns the genesis document even
-for a DID that has never been updated — **provided the endpoint's network matches
-the DID's encoded network**. If it does not, Esplora rejects the derived beacon
-address:
+for a DID that has never been updated. The CLI derives the Esplora endpoint from
+the network the DID encodes, so no `--network` flag is needed; one that names a
+different chain is refused before any request is made:
 
 ```
-HTTP 400: Address on invalid network
+$ did-btcr2 resolve --network signet \
+    did:btcr2:k1qqp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqhmkf96
+Error: An error from the `did-btcr2-client` facade (...)
+  Caused by: --network signet contradicts the DID, which is anchored to mainnet; drop the flag or name the DID's network
 ```
 
-Precise mismatch semantics: the failure is specifically about **mainnet-vs-testnet
-address forms**. Resolving the mainnet DID above against a testnet endpoint (or
-vice versa) fails with `HTTP 400: Address on invalid network`. Resolving the
-**testnet** DID against `--network mutinynet` **succeeds**, because mutinynet is
-signet-based and shares the `tb1...`/`m...` testnet address forms. Do not read
-this as "any network mismatch fails" — only the mainnet/testnet address-form
-split does.
+`--esplora-url` is different: a URL does not name a chain, so it is taken as
+given and **not** cross-checked against the DID. Which mismatches the endpoint
+itself catches is a matter of **address forms**: pointing the mainnet DID above
+at a testnet Esplora fails with `HTTP 400: Address on invalid network`, while
+the testnet DID against a mutinynet URL is accepted (mutinynet is signet-based
+and shares the `tb1...`/`m...` address forms) and resolves against the wrong
+chain. Naming a URL that serves the DID's network is the user's responsibility.
 
 ### Help and version
 
@@ -218,16 +229,17 @@ intermediate document, so the resolve-side re-derivation binds the two together.
 
 ### Resolve a DID (read-only)
 
-Resolve the fixed-key **testnet** DID against the default (testnet) endpoint —
-the DID's `k1qvp...` prefix matches, so this returns its genesis document:
+Resolve the fixed-key **testnet** DID — the endpoint follows the DID's network
+(testnet here, from its `k1qvp...` prefix), so no `--network` is needed, and
+this returns its genesis document:
 
 ```bash
-# Default network (testnet)
+# The endpoint is derived from the DID (testnet)
 cargo run -p did-btcr2-cli -- resolve \
   did:btcr2:k1qvp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqmxnpr4
 
-# Same DID resolves against mutinynet too (mutinynet shares testnet address forms)
-cargo run -p did-btcr2-cli -- resolve --network mutinynet \
+# A --network equal to the DID's network is accepted as a confirmation
+cargo run -p did-btcr2-cli -- resolve --network testnet \
   did:btcr2:k1qvp8n0nx0muaewav2ksx99wwsu9swq5mlndjmn3gm9vl9q2mzmup0xqmxnpr4
 
 # Point at a self-hosted Esplora instance (must serve the DID's network)

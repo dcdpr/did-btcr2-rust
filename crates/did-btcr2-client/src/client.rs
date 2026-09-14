@@ -26,7 +26,7 @@ use crate::esplora;
 use crate::funding::{self, Fee};
 use crate::signing::sign_beacon_tx;
 use crate::transport::BtcTransport;
-use crate::url::resolve_base_url;
+use crate::url::{network_base_url, network_from_name, network_name, resolve_base_url};
 
 /// The `did:btcr2` client facade.
 ///
@@ -57,6 +57,43 @@ impl<T: BtcTransport> Client<T> {
     ) -> Result<Self, Error> {
         let base_url = resolve_base_url(Some(network), esplora_url)?;
         Ok(Self::new(base_url, transport))
+    }
+
+    /// Create a client for operating on `did`.
+    ///
+    /// The Esplora endpoint follows the network the DID is anchored to
+    /// (`did.components().network()`); `network_override` (the CLI's
+    /// `--network`) may only confirm that network — a different name is
+    /// [`Error::NetworkMismatch`], an unrecognized one [`Error::UnknownNetwork`].
+    /// An explicit `esplora_url` is used verbatim (trailing slash trimmed) and
+    /// is NOT checked against the DID: a URL does not name a chain. Without
+    /// one, a DID on testnet4, regtest, or a custom network is
+    /// [`Error::NoDefaultEndpoint`].
+    pub fn for_did(
+        did: &Did,
+        network_override: Option<&str>,
+        esplora_url: Option<String>,
+        transport: T,
+    ) -> Result<Self, Error> {
+        let did_network = did.components().network();
+        if let Some(flag) = network_override
+            && network_from_name(flag)? != did_network
+        {
+            return Err(Error::NetworkMismatch {
+                flag: flag.to_string(),
+                did_network: network_name(did_network).to_string(),
+            });
+        }
+        if esplora_url.is_some() {
+            // `resolve_base_url` with no network only trims the URL; the
+            // network default it would otherwise apply is never reached.
+            return Ok(Self::new(resolve_base_url(None, esplora_url)?, transport));
+        }
+        let name = network_name(did_network);
+        match network_base_url(name) {
+            Some(url) => Ok(Self::new(url.to_string(), transport)),
+            None => Err(Error::NoDefaultEndpoint(name)),
+        }
     }
 
     /// Create a key-based singleton DID document from a public key.
@@ -459,6 +496,9 @@ mod tests {
         post_tx_calls: std::cell::Cell<usize>,
         /// Every request path seen by `execute`, in order.
         seen_paths: RefCell<Vec<String>>,
+        /// Every full request URI seen by `execute`, in order (scheme and host
+        /// included, so a test can check which endpoint was addressed).
+        seen_uris: RefCell<Vec<String>>,
         /// Body served for `GET /address/{a}/txs` (a JSON tx array).
         txs_body: Vec<u8>,
         /// Bodies served for `GET /address/{a}/txs/chain/{last_seen_txid}`,
@@ -503,6 +543,7 @@ mod tests {
                 calls: RefCell::new(0),
                 post_tx_calls: std::cell::Cell::new(0),
                 seen_paths: RefCell::new(Vec::new()),
+                seen_uris: RefCell::new(Vec::new()),
                 txs_body: txs_body.as_bytes().to_vec(),
                 chain_pages: HashMap::new(),
                 synthesize_full_pages: false,
@@ -569,6 +610,10 @@ mod tests {
             self.seen_paths.borrow().clone()
         }
 
+        fn seen_uris(&self) -> Vec<String> {
+            self.seen_uris.borrow().clone()
+        }
+
         /// A synthetic confirmed `/utxo` array funding the announce. Serves the
         /// entries of `utxo_values` (each at a distinct outpoint) when set,
         /// otherwise the single `utxo_value`.
@@ -603,6 +648,7 @@ mod tests {
             self.seen_paths
                 .borrow_mut()
                 .push(req.uri().path().to_string());
+            self.seen_uris.borrow_mut().push(req.uri().to_string());
 
             if let Some(status) = self.force_status {
                 return Ok(http::Response::builder()
@@ -865,6 +911,148 @@ mod tests {
             "genesis resolves to version 1",
         );
         assert!(!result.document_metadata.deactivated);
+    }
+
+    /// A key-based DID anchored to `network`, built from its components and
+    /// re-parsed from its string form, exactly as a CLI user would hand it to
+    /// `resolve`. Built directly rather than through `create`, which also
+    /// derives beacon addresses and so cannot mint a DID on testnet4 (no
+    /// `esploda::bitcoin::Network` for it); the DID itself encodes every
+    /// network nibble.
+    fn did_on(network: Network) -> Did {
+        let components =
+            DidComponents::new(DidVersion::One, network, IdType::from(test_public_key()))
+                .expect("the components are valid");
+        Did::try_from(components)
+            .expect("the DID encodes")
+            .encode()
+            .parse()
+            .expect("the encoded DID parses back")
+    }
+
+    /// With no `--network` and no `--esplora-url`, the endpoint follows the
+    /// network encoded in the DID: a mainnet DID is resolved against the
+    /// mainnet Esplora, and every request the resolve issues goes there.
+    #[test]
+    fn for_did_derives_the_endpoint_from_a_mainnet_did() {
+        let did = did_on(Network::Mainnet);
+        let client = Client::for_did(&did, None, None, FakeTransport::new("[]"))
+            .expect("a mainnet DID has a hosted endpoint");
+        assert_eq!(client.base_url, "https://blockstream.info/api");
+
+        client
+            .resolve(&did, ResolutionOptions::default())
+            .expect("a fresh DID resolves to its genesis document");
+        let uris = client.transport.seen_uris();
+        assert!(!uris.is_empty(), "resolve issued requests");
+        assert!(
+            uris.iter()
+                .all(|u| u.starts_with("https://blockstream.info/api/")),
+            "every request goes to the DID's endpoint: {uris:?}"
+        );
+    }
+
+    /// A `--network` naming a chain other than the DID's is refused before
+    /// any request: the DID is authoritative, the flag may only confirm it.
+    /// An unrecognized name is still `UnknownNetwork`.
+    #[test]
+    fn for_did_rejects_an_override_naming_another_chain() {
+        let did = did_on(Network::Mainnet);
+        let transport = FakeTransport::new("[]");
+        let err = Client::for_did(&did, Some("signet"), None, transport)
+            .err()
+            .expect("signet contradicts a mainnet DID");
+        match &err {
+            Error::NetworkMismatch { flag, did_network } => {
+                assert_eq!(flag, "signet");
+                assert_eq!(did_network, "mainnet");
+            }
+            other => panic!("expected NetworkMismatch, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("signet") && msg.contains("mainnet"),
+            "the message names both chains: {msg}"
+        );
+
+        let err = Client::for_did(&did, Some("bogus"), None, FakeTransport::new("[]"))
+            .err()
+            .expect("an unrecognized name is refused");
+        match err {
+            Error::UnknownNetwork(n) => assert_eq!(n, "bogus"),
+            other => panic!("expected UnknownNetwork, got {other:?}"),
+        }
+    }
+
+    /// The fake is consumed by `for_did`, so "zero I/O" is shown structurally
+    /// here: a mismatch is decided from the DID and the flag alone, with the
+    /// transport never called.
+    #[test]
+    fn for_did_mismatch_makes_no_request() {
+        struct Untouchable;
+        impl BtcTransport for Untouchable {
+            fn execute(
+                &self,
+                req: http::Request<Vec<u8>>,
+            ) -> Result<http::Response<Vec<u8>>, TransportError> {
+                panic!(
+                    "no request may be issued for a mismatched network: {}",
+                    req.uri()
+                );
+            }
+        }
+        let did = did_on(Network::Mainnet);
+        assert!(matches!(
+            Client::for_did(&did, Some("mutinynet"), None, Untouchable),
+            Err(Error::NetworkMismatch { .. })
+        ));
+    }
+
+    /// A `--network` equal to the DID's network is accepted and selects the
+    /// same endpoint the DID alone would.
+    #[test]
+    fn for_did_accepts_an_override_equal_to_the_dids_network() {
+        let did = did_on(Network::Signet);
+        let client = Client::for_did(&did, Some("signet"), None, FakeTransport::new("[]"))
+            .expect("signet confirms a signet DID");
+        assert_eq!(client.base_url, "https://blockstream.info/signet/api");
+
+        let did = did_on(Network::TestnetV3);
+        let client = Client::for_did(&did, Some("testnet"), None, FakeTransport::new("[]"))
+            .expect("testnet confirms a testnet DID");
+        assert_eq!(client.base_url, "https://blockstream.info/testnet/api");
+    }
+
+    /// A DID on a network with no hosted Esplora needs an explicit URL; the
+    /// URL is taken verbatim (trailing slash trimmed) and is not checked
+    /// against the DID, because a URL does not name a chain.
+    #[test]
+    fn for_did_without_a_url_has_no_default_endpoint_for_testnet4() {
+        let did = did_on(Network::TestnetV4);
+        let err = Client::for_did(&did, None, None, FakeTransport::new("[]"))
+            .err()
+            .expect("testnet4 has no hosted endpoint");
+        match err {
+            Error::NoDefaultEndpoint(net) => assert_eq!(net, "testnet4"),
+            other => panic!("expected NoDefaultEndpoint, got {other:?}"),
+        }
+        let client = Client::for_did(
+            &did,
+            None,
+            Some("http://localhost:3000/api/".to_string()),
+            FakeTransport::new("[]"),
+        )
+        .expect("an explicit URL serves any network");
+        assert_eq!(client.base_url, "http://localhost:3000/api");
+
+        let did = did_on(Network::Regtest);
+        let err = Client::for_did(&did, None, None, FakeTransport::new("[]"))
+            .err()
+            .expect("regtest has no hosted endpoint");
+        match err {
+            Error::NoDefaultEndpoint(net) => assert_eq!(net, "regtest"),
+            other => panic!("expected NoDefaultEndpoint, got {other:?}"),
+        }
     }
 
     #[test]

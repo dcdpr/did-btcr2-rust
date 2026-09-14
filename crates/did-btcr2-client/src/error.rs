@@ -4,8 +4,9 @@
 //! the HTTP seam (a genuine network failure, an I/O read error, a typed
 //! non-2xx status, or a well-formed response whose body has the wrong shape),
 //! and [`Error`] for the facade as a whole (transport, JSON parsing, the
-//! sans-I/O core's resolver/document errors, and an unknown-network
-//! rejection).
+//! sans-I/O core's resolver/document errors, and the endpoint-selection
+//! rejections: an unknown network name, a network with no hosted endpoint,
+//! or a `--network` that contradicts the DID).
 
 use onlyerror::Error;
 
@@ -72,9 +73,23 @@ pub enum Error {
 
     /// A recognized network that has no hosted Esplora endpoint (regtest), used
     /// without an `--esplora-url` override. Regtest is a known network, so this is
-    /// deliberately distinct from `UnknownNetwork`.
+    /// deliberately distinct from `UnknownNetwork`. Also raised for a DID
+    /// anchored to testnet4 or a custom network when the endpoint is derived
+    /// from the DID and no URL was given.
     #[error("{0} has no default Esplora endpoint; pass --esplora-url")]
     NoDefaultEndpoint(&'static str),
+
+    /// `--network` named a chain other than the one the DID is anchored to.
+    /// The DID's network is authoritative; the flag may only confirm it.
+    #[error(
+        "--network {flag} contradicts the DID, which is anchored to {did_network}; drop the flag or name the DID's network"
+    )]
+    NetworkMismatch {
+        /// The chain the flag named.
+        flag: String,
+        /// The chain encoded in the DID.
+        did_network: String,
+    },
 
     /// An unrecognized `--beacon` type name.
     #[error("unknown beacon type '{0}'; expected P2PKH, P2WPKH, or P2TR")]
