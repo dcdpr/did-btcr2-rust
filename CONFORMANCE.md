@@ -11,8 +11,10 @@ coverage status:
 - **DeferredAggregation** — applies only to CAS / SMT / aggregation beacons; deferred to a future
   milestone (not a Singleton gap).
 - **NotApplicable** — out of scope for this method implementation, with a reason.
+- **Gap** — applies to the Singleton scope and is not implemented; the reason names what is
+  missing.
 
-**Totals:** 79 requirements — 62 Covered, 12 DeferredAggregation, 5 NotApplicable.
+**Totals:** 81 requirements — 61 Covered, 13 DeferredAggregation, 5 NotApplicable, 2 Gap.
 
 ## Requirement Matrix
 
@@ -78,12 +80,13 @@ coverage status:
 | `create.md:genesis-document-hashed` | MUST | Covered | `document::tests::test_from_external_intermediate` |
 | `deactivate.md:add-deactivated-true` | MUST | Covered | `resolver::tests::metadata_deactivated_follows_the_document` |
 | `resolve.md:input-through-decode-and-sidecar` | MUST | Covered | `resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash` |
+| `resolve.md:version-id-parsed-as-integer-invalid-options` | MUST | Gap | `INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / `version_time: Option<DateTime>` values, so there is no path that parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying `versionId` and `versionTime` together is not rejected |
 | `resolve.md:parse-did-with-decoding-algorithm` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
 | `resolve.md:invalid-did-on-decode-error` | MUST | Covered | `identifier::tests::test_invalid_prefix` |
 | `resolve.md:process-genesis-document-placeholder` | MUST | Covered | `document::tests::test_from_external_intermediate` |
 | `resolve.md:render-initial-did-document-bitcoin-uri` | MUST | Covered | `document::tests::beacons_accessor` |
 | `resolve.md:parse-rendered-template-conformant-doc` | MUST | Covered | `document::tests::test_document_parse` |
-| `resolve.md:signal-confirmed-min-conf` | MUST | Covered | `resolver::tests::unconfirmed_needed_signal_returns_err` |
+| `resolve.md:signal-confirmed-min-conf` | MUST | Gap | `minConf` is not implemented — `ResolutionOptions` has no `min_conf` field and the resolver applies any confirmed signal regardless of its confirmation count; only the unconfirmed-mempool half of this MUST is tested (`resolver::tests::unconfirmed_needed_signal_returns_err`) |
 | `resolve.md:late-publishing-raised` | MUST | Covered | `update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing` |
 | `resolve.md:capability-invocation-entry-identifies-proof-vm` | MUST | Covered | `document::tests::apply_update_accepts_embedded_capability_invocation` |
 | `update.md:apply-patch-invalid-did-update-on-failure` | MUST | Covered | `document::tests::construct_signed_update_rejects_failing_patch` |
@@ -96,13 +99,18 @@ coverage status:
 | `terminology.md:must-not-complete-resolution-if-data-missing` | MUST NOT | Covered | `resolver::tests::unknown_signal_hash_raises_missing_update_data` |
 | `terminology.md:history-changes-detected` | MUST | Covered | `document::tests::wrong_target_version_id_fails_round_trip` |
 | `terminology.md:carry-did-document-history` | MUST | Covered | `resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash` |
+| `update-data-distribution.md:cas-retrieval-hash-verified` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `update-data-distribution.md:ipfs-chunking` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 
 ## Gap List
 
-No Singleton-applicable MUST/SHALL is left uncovered: every requirement above is either
-Covered by a test or explicitly justified as DeferredAggregation / NotApplicable. The justified
-non-gaps are:
+2 Singleton-applicable MUST/SHALL row(s) are not implemented and are listed here so
+this matrix does not overstate conformance:
+
+- `resolve.md:version-id-parsed-as-integer-invalid-options` (MUST) — Gap: `INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / `version_time: Option<DateTime>` values, so there is no path that parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying `versionId` and `versionTime` together is not rejected
+- `resolve.md:signal-confirmed-min-conf` (MUST) — Gap: `minConf` is not implemented — `ResolutionOptions` has no `min_conf` field and the resolver applies any confirmed signal regardless of its confirmation count; only the unconfirmed-mempool half of this MUST is tested (`resolver::tests::unconfirmed_needed_signal_returns_err`)
+
+The justified non-gaps are:
 
 - `algorithms.md:smt-proof-fields-decoded-before-hashing` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `optimized-smt.md:smt-proof-fields-decoded-before-hashing` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
@@ -120,6 +128,7 @@ non-gaps are:
 - `data-structures.md:smt-proof-hashes-sibling-nodes` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `data-structures.md:resolver-media-types` (MUST) — NotApplicable: media types are a property of the HTTP DID Resolution binding; this crate returns typed Rust values, not media-typed bytes, so there is no surface to test until the binding exists
 - `update.md:target-version-id-from-fresh-resolution` (MUST) — NotApplicable: a DID-controller operating rule: the library takes the current `versionId` as an explicit argument (`construct_signed_update`, the client's `update`/`deactivate`) and cannot observe whether the caller obtained it from a fresh resolution
+- `update-data-distribution.md:cas-retrieval-hash-verified` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `update-data-distribution.md:ipfs-chunking` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 
 ## Self-Check Scope (residual)

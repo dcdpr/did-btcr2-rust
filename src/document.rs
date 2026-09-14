@@ -509,7 +509,7 @@ pub struct ResolutionResult {
     pub document_metadata: DocumentMetadata,
 }
 
-/// `didResolutionMetadata` per resolve.md:43 ("MAY be empty"). Empty in
+/// `didResolutionMetadata` per resolve.md:50 ("MAY be empty"). Empty in
 /// empty for now; `#[non_exhaustive]` lets later work add
 /// `contentType` and error JSON-LD fields without a breaking change.
 #[non_exhaustive]
@@ -518,9 +518,9 @@ pub struct ResolutionMetadata {}
 
 /// `didDocumentMetadata` per adrs/0004-did-document-metadata-shape.md
 /// UNION resolution:
-/// - `version_id`: REQUIRED per resolve.md:45-50; OPTIONAL per
+/// - `version_id`: REQUIRED per resolve.md:52-57; OPTIONAL per
 ///   data-structures.md:333-341. Always emitted as a UNION.
-/// - `confirmations`: REQUIRED per resolve.md:47; ABSENT in
+/// - `confirmations`: REQUIRED per resolve.md:54; ABSENT in
 ///   data-structures.md. None when caller did not supply chain_tip_height
 ///   (fail-closed).
 /// - `deactivated`: REQUIRED per both sources.
@@ -539,7 +539,7 @@ pub struct DocumentMetadata {
 
     /// Sourced from `contemporary_doc.fields.deactivated` after the
     /// resolver's final apply_update.
-    // Always emitted (no skip_serializing_if): REQUIRED by both resolve.md:48 and data-structures.md.
+    // Always emitted (no skip_serializing_if): REQUIRED by both resolve.md:55 and data-structures.md.
     pub deactivated: bool,
 
     /// ISO-8601 timestamp of the most recent applied update (UNION).
@@ -1393,7 +1393,7 @@ impl InitialDocument {
             .invoking_public_key(&proof.verification_method)?;
 
         // Proof time bounds against the block that confirmed the announcing
-        // beacon signal (resolve.md, "Check update.proof", footnote 3):
+        // beacon signal (resolve.md, "Check update.proof", footnote 6):
         // `created` against the header timestamp, `expires` against
         // `mediantime`. Strict comparisons: an equal timestamp passes. A proof
         // carrying `expires` is rejected when the mediantime is unavailable —
@@ -1429,7 +1429,7 @@ impl InitialDocument {
         }
 
         // Resolve-path apply site: a proof-verification failure MUST surface as
-        // INVALID_DID_UPDATE (resolve.md:200), not the granular ProofVerification
+        // INVALID_DID_UPDATE (resolve.md:242), not the granular ProofVerification
         // code. Every other error apply_update raises is already InvalidDidUpdate,
         // so the whole apply step is spec-uniform. Find-refs confirms apply_update
         // has one production caller — the resolver resolve path — so this collapse
@@ -1452,7 +1452,7 @@ impl InitialDocument {
         })?;
 
         // The document identifier is immutable across an update: the post-patch
-        // document id MUST still equal this DID (resolve.md:187). Rejecting a
+        // document id MUST still equal this DID (resolve.md:209). Rejecting a
         // mismatch stops a patch from re-pointing the document identity.
         if fields.id != self.fields.id {
             return Err(Btcr2Error::InvalidDidUpdate(
@@ -3417,7 +3417,7 @@ mod tests {
         );
     }
 
-    /// resolve.md:198 — apply_update MUST reject an update whose proof
+    /// resolve.md:230 — apply_update MUST reject an update whose proof
     /// verificationMethod is NOT a member of the document's capabilityInvocation
     /// set (an update signed by a key the document never authorized to invoke its
     /// root capability). The same membership rule the construction side enforces
@@ -3469,7 +3469,7 @@ mod tests {
         }
     }
 
-    /// resolve.md:187 — apply_update MUST reject an update whose patch changes the
+    /// resolve.md:209 — apply_update MUST reject an update whose patch changes the
     /// document `id` (a post-patch `id != did`): a patch cannot re-point the
     /// document identity. Mapped to the spec-literal INVALID_DID_UPDATE
     /// (`Btcr2Error::InvalidDidUpdate`).
@@ -4730,7 +4730,7 @@ mod tests {
     /// deeper at BIP340 verification inside `data_integrity_verify_proof`. Prior to
     /// that collapse this surfaced the granular `InvalidUpdateProof` (cryptosuite.rs:228);
     /// the resolve-path `apply_update` site now wraps ANY proof-verification failure
-    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:200), so this security
+    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:242), so this security
     /// regression test asserts `InvalidDidUpdate`. The rejection property (a tampered
     /// signature is refused) is unchanged — only the wire variant is spec-aligned.
     #[test]
@@ -4777,7 +4777,7 @@ mod tests {
         }
     }
 
-    /// resolve.md:200: a proof-verification failure raised on the resolve
+    /// resolve.md:242: a proof-verification failure raised on the resolve
     /// path inside `apply_update` MUST surface as `INVALID_DID_UPDATE`, not the
     /// granular BIP340 `InvalidUpdateProof`. This pins the wire-code collapse at the
     /// `data_integrity_verify_proof` apply site. A find-refs scope check confirmed

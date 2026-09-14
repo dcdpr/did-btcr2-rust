@@ -104,10 +104,10 @@ pub struct Resolver<T = ()> {
     /// `None` => `DocumentMetadata.confirmations` is `None` (fail-closed).
     chain_tip_height: Option<u32>,
     /// Block height of the MOST-RECENTLY-APPLIED unique update, the basis for
-    /// `confirmations` (resolve.md:31,50). Overwritten on each unique apply; under
+    /// `confirmations` (resolve.md:38,57). Overwritten on each unique apply; under
     /// the ascending (target_version_id, block_height) sort this ends as the
     /// highest-version applied update's height. The lower-height dedup fold-in
-    /// (resolve.md:50 footnote 1) survives only as a defensive guard in the
+    /// (resolve.md:57 footnote 2) survives only as a defensive guard in the
     /// duplicate branch. `None` until the first update is applied.
     applied_block_height: Option<u32>,
     rpc_host: String,
@@ -196,14 +196,15 @@ impl Resolver {
                     return Ok(ResolverState::Resolved(self.terminal_state()));
                 }
 
-                // Process Beacon Signals (resolve.md:121-132): build the tuples
+                // Find Beacon Signals (resolve.md:122-146): build the tuples
                 // (raises MISSING_UPDATE_DATA here, before the version_time bound —
-                // resolve.md:131).
+                // resolve.md:145-147).
                 let mut signals = self.process_beacon_signals(next_signals)?;
 
-                // Process updates Array step 1 (resolve.md:151): sort by
+                // Process Next Update step 3 (resolve.md:167): sort by
                 // targetVersionId (ascending) with block_height as a tiebreaker; the
-                // FIRST tuple is what the version_time bound is evaluated against.
+                // spec removes the FIRST tuple, and that is what the version_time
+                // bound is evaluated against.
                 signals.sort_unstable_by_key(|s| (s.update.target_version_id, s.block_height));
 
                 self.apply_signals(signals, true)
@@ -213,8 +214,8 @@ impl Resolver {
         }
     }
 
-    /// Apply a sorted batch of matched signals (resolve.md "Process updates
-    /// Array"), then ask for the next beacon round or resolve.
+    /// Apply a sorted batch of matched signals (resolve.md "Process Next
+    /// Update"), then ask for the next beacon round or resolve.
     ///
     /// `may_request` is `true` on the first pass over a batch: if any proof of
     /// a signal that can still apply carries `expires` and the confirming
@@ -301,7 +302,7 @@ impl Resolver {
                 update.confirm_duplicate(&self.update_hash_history)?;
 
                 // Defensive guard (dedup of the SAME announcement,
-                // resolve.md:50 footnote 1): fold in the lower height when
+                // resolve.md:57 footnote 2): fold in the lower height when
                 // this duplicate targets the most-recently-applied update.
                 // Under the ascending (target_version_id, block_height) sort
                 // in `resolve` the lowest-height announcement is ALWAYS
@@ -323,18 +324,24 @@ impl Resolver {
                 .checked_add(1)
                 .expect("version_id overflow requires 2^64 updates to a single DID");
             if update.target_version_id == next_update_version_id {
-                // Process updates §step 3 (resolve.md:153): the versionTime
-                // bound is per UNIQUE applied tuple, evaluated against THIS
-                // tuple's block_time. It sits inside the apply branch (not
-                // the duplicate branch, not once per batch): under the
-                // ascending (target_version_id, block_height) sort a
-                // duplicate announcement is processed before a later-version
-                // unique update, so a high-block_time DUPLICATE must never
-                // abort the loop and suppress a later low-block_time unique
-                // update announced within versionTime. If this unique update
-                // is more recent than the requested time, resolve the
+                // Process Next Update step 4 (resolve.md:168-177): the
+                // versionTime bound applies only to a tuple whose
+                // targetVersionId is more than current_version_id, i.e. a
+                // UNIQUE update, evaluated against THIS tuple's block. That
+                // is why it sits inside the apply branch (not the duplicate
+                // branch, not once per batch): footnote 4 gives the reason —
+                // under the ascending (target_version_id, block_height) sort
+                // a duplicate announcement is processed before a later-version
+                // unique update, so a DUPLICATE whose block is after
+                // versionTime must never abort the loop and suppress a later
+                // unique update announced within versionTime. If this unique
+                // update is more recent than the requested time, resolve the
                 // document in effect so far (the earlier version) and apply
                 // no further.
+                //
+                // Known divergence: the spec compares the block's `mediantime`
+                // (footnote 5: equal applies, no tolerance) while this
+                // comparison still uses the block header `block_time`.
                 if let TargetCondition::Time(time) = &self.target_condition
                     && block_time > *time
                 {
@@ -365,22 +372,24 @@ impl Resolver {
                 self.current_version_id = next_update_version_id;
 
                 // confirmations = block of the most-recently-applied UNIQUE
-                // update (resolve.md:31,50): overwrite here, so after the
+                // update (resolve.md:38,57): overwrite here, so after the
                 // ascending-version loop this holds the highest-version (most
                 // recent) applied update's height.
                 self.applied_block_height = Some(block_height);
                 most_recent_applied_version = Some(update.target_version_id);
 
-                // resolve.md §"Process updates Array" step 7
+                // resolve.md §"Process Next Update" step 2 (resolve.md:164-166)
                 // — once the document is deactivated, resolve it as the
                 // final didDocument and process no further beacon
-                // signals.
+                // signals. (The spec raises NOT_FOUND here when a versionId
+                // was requested; this resolver still returns the document.)
                 if self.contemporary_doc.fields.deactivated {
                     return Ok(ResolverState::Resolved(self.terminal_state()));
                 }
 
-                // Step 13.
-                // Yes, we need to do 13 here: the spec does not early exit.
+                // resolve.md §"Process Next Update" step 1 (resolve.md:163):
+                // the spec re-checks the requested versionId at the top of
+                // every iteration, so the check has to run after each apply.
                 if let TargetCondition::VersionId(version_id) = self.target_condition
                     && version_id == self.current_version_id
                 {
@@ -429,7 +438,7 @@ impl Resolver {
         let mut signals = Vec::new();
         for (beacon_type, txs) in transactions {
             for tx in txs {
-                // Spec MANDATES the last output (resolve.md:117 + terminology.md:221: Signal
+                // Spec MANDATES the last output (resolve.md:126 + terminology.md:221: Signal
                 // Bytes live in the LAST output). Do not scan all outputs — that would be
                 // non-conformant. Real-world OP_RETURN+change handling is tracked as a
                 // potential upstream spec-amendment.
@@ -2162,7 +2171,7 @@ mod tests {
     /// `update_lookup_table` contains one entry per spec-form update, keyed by
     /// the JSON Document Hash (`Update::hash()`).
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md §Process Sidecar Data lines 62-67
+    /// Spec: did-btcr2/src/operations/resolve.md §Process Sidecar Data lines 69-74
     /// (build a map from hash to update).
     #[test]
     fn sidecar_lookup_table_keyed_by_jcs_hash() {
@@ -2186,7 +2195,7 @@ mod tests {
 
     /// Spec-authority ordering: the
     /// version_time bound must be evaluated against the FIRST tuple AFTER the
-    /// (targetVersionId, block_height) sort (resolve.md:151-153), and that choice
+    /// (targetVersionId, block_height) sort (resolve.md:167-171), and that choice
     /// must be deterministic regardless of the order in which beacon signals were
     /// discovered (HashMap iteration order is non-deterministic).
     ///
@@ -2283,7 +2292,7 @@ mod tests {
     /// `ResolverState::Resolved(ResolutionResult { resolution_metadata, document,
     /// document_metadata })` — the spec resolution triple.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md lines 42-48 (return signature).
+    /// Spec: did-btcr2/src/operations/resolve.md lines 48-57 (return signature).
     #[test]
     fn resolve_returns_the_resolution_triple() {
         let Some(resolver) = resolver_with(SidecarData::default(), None) else {
@@ -2336,7 +2345,7 @@ mod tests {
     /// `confirmations_use_the_most_recently_applied_update` and
     /// `later_duplicate_does_not_raise_confirmations`.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:31,50.
+    /// Spec: did-btcr2/src/operations/resolve.md:38,57.
     #[test]
     fn metadata_confirmations_saturate_against_chain_tip() {
         // terminal_state computes confirmations from chain_tip_height +
@@ -3152,7 +3161,7 @@ mod tests {
     /// per-tuple versionTime check inside the apply branch aborts before applying
     /// v3.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:153.
+    /// Spec: did-btcr2/src/operations/resolve.md:168-171.
     #[test]
     fn version_time_mid_batch_returns_the_version_in_effect() {
         let (initial, update1, update2) = chained_two_updates();
@@ -3187,7 +3196,7 @@ mod tests {
     /// branch, never on a duplicate tuple — a naive per-every-tuple check would
     /// abort at the high-block_time duplicate and wrongly return v2.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:153.
+    /// Spec: did-btcr2/src/operations/resolve.md:168-171.
     #[test]
     fn version_time_cutoff_ignores_duplicate_tuples() {
         let (initial, update1, update2) = chained_two_updates();
@@ -3223,7 +3232,7 @@ mod tests {
     /// 300, confirmations = 300 - 200 + 1 = 101 (from v3's height), NOT
     /// 300 - 100 + 1 = 201 (the old running-min bug).
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:31,50.
+    /// Spec: did-btcr2/src/operations/resolve.md:38,57.
     #[test]
     fn confirmations_use_the_most_recently_applied_update() {
         let (initial, update1, update2) = chained_two_updates();
@@ -3264,7 +3273,7 @@ mod tests {
     /// This asserts the SORT-guaranteed lowest-height-first outcome, not a
     /// synthetic lower-than-applied duplicate (which cannot arise under the sort).
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:50 footnote 1.
+    /// Spec: did-btcr2/src/operations/resolve.md:57 footnote 2.
     #[test]
     fn later_duplicate_does_not_raise_confirmations() {
         let (initial, update1, _update2) = chained_two_updates();
@@ -3383,8 +3392,8 @@ mod tests {
     /// Unconditional: the fixture lives in this repository, not in the
     /// `test-suite/` submodule, so there is nothing to skip on.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md — "Process updates Array"
-    /// steps 1, 3, 7 and step 13.
+    /// Spec: did-btcr2/src/operations/resolve.md — "Process Next Update"
+    /// steps 1, 2, 3 and 4 (resolve.md:163-171).
     #[test]
     fn minted_chain_sequences_updates_across_rotating_beacons() {
         use crate::identifier::Did;
@@ -3666,7 +3675,7 @@ mod tests {
     /// The chain is read from the fixture, so this test covers whichever chain
     /// the scenario was last minted on.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:169 (`LATE_PUBLISHING` MUST).
+    /// Spec: did-btcr2/src/operations/resolve.md:189 (`LATE_PUBLISHING` MUST).
     #[test]
     fn minted_fork_raises_late_publishing() {
         use crate::error::ProblemDetails as _;
@@ -3793,7 +3802,7 @@ mod tests {
     /// `contemporary_doc.fields.deactivated`. An initial document carries
     /// `false`; flipping the field surfaces `true` in the metadata.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:48 (deactivated REQUIRED in metadata).
+    /// Spec: did-btcr2/src/operations/resolve.md:55 (deactivated REQUIRED in metadata).
     #[test]
     fn metadata_deactivated_follows_the_document() {
         // Un-deactivated initial document → metadata.deactivated == false.
@@ -3815,7 +3824,7 @@ mod tests {
     /// short-circuits — no further beacon signals mutate the document. The
     /// terminal state reflects `deactivated: true`.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md §"Process updates Array" step 7
+    /// Spec: did-btcr2/src/operations/resolve.md §"Process Next Update" step 2 (resolve.md:164-166)
     /// (if current_document.deactivated, resolve current_document as didDocument).
     #[test]
     fn deactivated_document_short_circuits_the_walk() {

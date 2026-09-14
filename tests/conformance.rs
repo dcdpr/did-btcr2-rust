@@ -348,6 +348,10 @@ enum Status {
     DeferredAggregation,
     /// Out of scope for this method implementation, with a reason.
     NotApplicable(&'static str),
+    /// Applies to the Singleton scope and is NOT implemented by the crate.
+    /// Listed so the matrix cannot claim conformance it does not have; the
+    /// string names concretely what is missing.
+    Gap(&'static str),
 }
 
 /// One curated conformance row.
@@ -368,7 +372,7 @@ struct ConformanceRow {
 
 /// The curated Singleton conformance table.
 ///
-/// One row per method-spec MUST/SHALL line in the vendored snapshot (79 rows).
+/// One row per method-spec MUST/SHALL line in the vendored snapshot (81 rows).
 /// `prefix` values are the normalized 80-char join keys; they MUST match the
 /// INDEX guard's `normalize_prefix` output for the corresponding snippet (the
 /// `index_guard` + `curated_len_matches_parsed_must_rows` tests enforce this).
@@ -823,6 +827,18 @@ const CURATED: &[ConformanceRow] = &[
         status: Status::Covered("resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"),
     },
     ConformanceRow {
+        id: "resolve.md:version-id-parsed-as-integer-invalid-options",
+        file: "did-btcr2/src/operations/resolve.md",
+        keyword: "MUST",
+        prefix: "when provided, `resolutionoptions.versionid` must be parsed as an integer and `r",
+        status: Status::Gap(
+            "`INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / \
+             `version_time: Option<DateTime>` values, so there is no path that parses a string \
+             `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying \
+             `versionId` and `versionTime` together is not rejected",
+        ),
+    },
+    ConformanceRow {
         id: "resolve.md:parse-did-with-decoding-algorithm",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
@@ -862,7 +878,12 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "a transaction must be included in a bitcoin block and have at least `resolutiono",
-        status: Status::Covered("resolver::tests::unconfirmed_needed_signal_returns_err"),
+        status: Status::Gap(
+            "`minConf` is not implemented — `ResolutionOptions` has no `min_conf` field and the \
+             resolver applies any confirmed signal regardless of its confirmation count; only the \
+             unconfirmed-mempool half of this MUST is tested \
+             (`resolver::tests::unconfirmed_needed_signal_returns_err`)",
+        ),
     },
     ConformanceRow {
         id: "resolve.md:late-publishing-raised",
@@ -961,6 +982,13 @@ const CURATED: &[ConformanceRow] = &[
         status: Status::Covered("resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"),
     },
     // ---- update-data-distribution.md (CAS/IPFS, deferred) -----------------
+    ConformanceRow {
+        id: "update-data-distribution.md:cas-retrieval-hash-verified",
+        file: "did-btcr2/src/update-data-distribution.md",
+        keyword: "MUST",
+        prefix: "for each retrieval from [cas], the resolver must compute the sha-256 hash of the",
+        status: Status::DeferredAggregation,
+    },
     ConformanceRow {
         id: "update-data-distribution.md:ipfs-chunking",
         file: "did-btcr2/src/update-data-distribution.md",
@@ -1115,24 +1143,28 @@ fn render_matrix() -> String {
         "- **Covered** — exercised by a named, currently-asserting `#[test]` in the suite.\n\
          - **DeferredAggregation** — applies only to CAS / SMT / aggregation beacons; deferred to a future\n  \
          milestone (not a Singleton gap).\n\
-         - **NotApplicable** — out of scope for this method implementation, with a reason.\n\n",
+         - **NotApplicable** — out of scope for this method implementation, with a reason.\n\
+         - **Gap** — applies to the Singleton scope and is not implemented; the reason names what is\n  \
+         missing.\n\n",
     );
 
     // Counts
-    let (mut covered, mut deferred, mut na) = (0usize, 0usize, 0usize);
+    let (mut covered, mut deferred, mut na, mut gap) = (0usize, 0usize, 0usize, 0usize);
     for row in CURATED {
         match row.status {
             Status::Covered(_) => covered += 1,
             Status::DeferredAggregation => deferred += 1,
             Status::NotApplicable(_) => na += 1,
+            Status::Gap(_) => gap += 1,
         }
     }
     out.push_str(&format!(
-        "**Totals:** {} requirements — {} Covered, {} DeferredAggregation, {} NotApplicable.\n\n",
+        "**Totals:** {} requirements — {} Covered, {} DeferredAggregation, {} NotApplicable, {} Gap.\n\n",
         CURATED.len(),
         covered,
         deferred,
         na,
+        gap,
     ));
 
     // Matrix table
@@ -1147,6 +1179,7 @@ fn render_matrix() -> String {
                 String::from("CAS/SMT/aggregation — future milestone"),
             ),
             Status::NotApplicable(r) => ("NotApplicable", r.to_string()),
+            Status::Gap(r) => ("Gap", r.to_string()),
         };
         out.push_str(&format!(
             "| `{}` | {} | {} | {} |\n",
@@ -1155,16 +1188,29 @@ fn render_matrix() -> String {
     }
     out.push('\n');
 
-    // Gap list: Covered rows are not gaps; DeferredAggregation/NotApplicable are
-    // explicitly-justified non-gaps. A genuine gap would be a MUST that is
-    // neither Covered nor justified — by construction there are none (every row
-    // carries a status), so this section lists the deferred/NA justifications.
+    // Gap list: Gap rows are the genuine gaps — Singleton-applicable MUSTs the
+    // crate does not implement — and are listed first so the matrix cannot
+    // overstate conformance. DeferredAggregation/NotApplicable rows are
+    // explicitly-justified non-gaps and follow under their own sentence.
     out.push_str("## Gap List\n\n");
-    out.push_str(
-        "No Singleton-applicable MUST/SHALL is left uncovered: every requirement above is either\n\
-         Covered by a test or explicitly justified as DeferredAggregation / NotApplicable. The justified\n\
-         non-gaps are:\n\n",
-    );
+    if gap == 0 {
+        out.push_str(
+            "No Singleton-applicable MUST/SHALL is left uncovered: every requirement above is either\n\
+             Covered by a test or explicitly justified as DeferredAggregation / NotApplicable.\n\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "{gap} Singleton-applicable MUST/SHALL row(s) are not implemented and are listed here so\n\
+             this matrix does not overstate conformance:\n\n",
+        ));
+        for row in CURATED {
+            if let Status::Gap(r) = row.status {
+                out.push_str(&format!("- `{}` ({}) — Gap: {}\n", row.id, row.keyword, r));
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("The justified non-gaps are:\n\n");
     for row in CURATED {
         match row.status {
             Status::DeferredAggregation => {
@@ -1179,7 +1225,7 @@ fn render_matrix() -> String {
                     row.id, row.keyword, r,
                 ));
             }
-            Status::Covered(_) => {}
+            Status::Covered(_) | Status::Gap(_) => {}
         }
     }
     out.push('\n');
