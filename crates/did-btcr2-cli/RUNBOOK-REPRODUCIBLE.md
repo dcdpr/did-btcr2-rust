@@ -145,7 +145,9 @@ cargo run -p did-btcr2-cli -- resolve --sidecar ./sidecar.json <the-x1-did>
 `--intermediate-document` is mutually exclusive with `--generate` and every key
 source (`--key-file`/`--key-stdin`/`DIDBTCR2_KEY`); combining them is an error and
 no key is read. With no sidecar at all, resolving an `x1` DID errors (its genesis
-document cannot be retrieved — the genesis-CAS path is not yet implemented).
+document cannot be retrieved: the resolver raises `NOT_FOUND`, problem-details
+type `https://www.w3.org/ns/did#NOT_FOUND`, because no sidecar `genesisDocument`
+was supplied and this resolver has no CAS fetcher).
 
 #### `x1` on `regtest` — create → resolve round-trip against a local esplora
 

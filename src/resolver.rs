@@ -1991,7 +1991,7 @@ mod tests {
         );
     }
 
-    /// D-09c (strict wire-signal boundary): a beacon tx whose LAST output is a
+    /// Strict wire-signal boundary: a beacon tx whose LAST output is a
     /// malformed/over-long OP_RETURN tail — `[OP_RETURN, <32-byte push>,
     /// <unparseable trailing push opcode>]` — must NOT be matched as a 32-byte
     /// signal. The trailing lone `OP_PUSHBYTES_32` (0x20) with no following data

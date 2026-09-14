@@ -1823,7 +1823,7 @@ mod tests {
         assert_eq!(doc.fields.verification_method.len(), 1);
     }
 
-    /// D-09a (#170): a document carrying a non-beacon `service`
+    /// A document carrying a non-beacon `service`
     /// (`LinkedDomains`) alongside its beacons parses successfully — the
     /// non-beacon service is retain-and-ignored (excluded from the typed beacon
     /// vec / `beacons()`, but retained in `json_data`) rather than failing the
@@ -3635,7 +3635,7 @@ mod tests {
     }
 
     /// A relationship entry that is neither a string nor an object is a typed
-    /// JSON error naming the field (T-18-13: no panic on odd JSON), for both a
+    /// JSON error naming the field (no panic on odd JSON), for both a
     /// plain `Vec` array and the `NonEmpty` `capabilityInvocation` array.
     #[test]
     fn relationship_entry_rejects_non_string_non_object() {
@@ -3824,7 +3824,7 @@ mod tests {
         );
     }
 
-    /// T-18-11: an embedded object identifies the proof only by its own `id`.
+    /// An embedded object identifies the proof only by its own `id`.
     /// An object under a different id does not identify `<did>#initialKey`
     /// even though its key material would verify, so the update is rejected
     /// by the capabilityInvocation lookup.

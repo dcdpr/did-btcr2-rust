@@ -29,10 +29,12 @@ above. Always name crates with `-p`.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 268 lib + 4 conformance + 1 doctest |
-| `did-btcr2-client` | 36 + 1 e2e |
+| `did-btcr2` | 306 lib + 9 conformance + 1 doctest |
+| `did-btcr2-client` | 44 + 1 e2e |
 | `did-btcr2-cli` | 42 + 2 broken-pipe |
-| `chain-capture` | 170 |
+| `chain-capture` | 173 |
+
+Counts are copied from `cargo test` output; re-measure before editing them.
 
 No live-network test ships. There is no HTTP client anywhere in `src/` —
 `grep -rn 'ureq\|reqwest\|TcpStream\|std::net' src/` returns nothing. Everything
@@ -186,6 +188,13 @@ Resolve rows parked here would still pass; the skip lands before the reject so
 that no commit is red, and the label becomes literally true once the reject
 lands.
 
+While those rows are parked,
+`cryptosuite::tests::stale_vectors_foreign_proofs_verify_under_this_cryptosuite`
+verifies every update-step `proofValue` of the 17 vectors as shipped in
+`output.json` (the key read from `sourceDocument`), so at least 17 proofs
+produced by another implementation are still checked by this crate's BIP340
+path; a flipped-byte control proves the assertion bites.
+
 ## 4. The 22 upstream vectors
 
 Measured from each vector's own files: `ver` / `conf` / `deact` from
@@ -225,11 +234,12 @@ skipped only until the regenerated suite is absorbed.
 
 Skip reasons below are the derived ones, in the rule's own terms.
 
-- **mutinynet/k1/q5p6w9su** — the only *driven* vector that ends deactivated;
-  exercises the deactivation short-circuit against a captured chain.
-- **mutinynet/k1/q5pgeu9z** — the only driven vector whose resolved document
-  adds a DIDComm endpoint alongside its beacons: a non-beacon service does not
-  disturb the beacon walk.
+- **mutinynet/k1/q5p6w9su** — the only vector that ends deactivated (parked
+  under `StaleContext` until the regeneration lands); its deactivation
+  short-circuit is exercised against a captured chain once driven.
+- **mutinynet/k1/q5pgeu9z** — the only vector whose resolved document adds a
+  DIDComm endpoint alongside its beacons (parked under `StaleContext` until the
+  regeneration lands): a non-beacon service does not disturb the beacon walk.
 - **mutinynet/k1/q5puld7y** — the only key-based mutinynet vector that stays at
   version 1; genesis derived from the key, no update step, no sidecar.
 - **mutinynet/x1/q425c5wf** — SMT beacon plus a web-node service, sidecar
@@ -257,9 +267,10 @@ Skip reasons below are the derived ones, in the rule's own terms.
 - **mutinynet/x1/q5m2fh36** — reaches version 3 through two numbered update steps
   and ends deactivated; one of only three skipped rows with no unsupported beacon
   type — it is skipped for pending updates and a CAS-delivered genesis only.
-- **mutinynet/x1/q5ugrf3w** — the only driven vector whose resolved document
-  carries a web-node service, and the only driven mutinynet vector that combines
-  a sidecar genesis with an on-chain update.
+- **mutinynet/x1/q5ugrf3w** — the only vector whose resolved document carries a
+  web-node service, and the only mutinynet vector that combines a sidecar
+  genesis with an on-chain update (parked under `StaleContext` until the
+  regeneration lands).
 - **mutinynet/x1/qh66uy2s** — the only vector whose resolved document declares no
   services at all, and the only row with exactly one skip reason: its genesis is
   CAS-delivered by recipe, with no beacon in the document to say so.
@@ -348,8 +359,9 @@ submodule is not checked out.
 
 ## 6. Chain fixtures
 
-`fixtures/chain/` holds 9 captures: 7 vendor captures, one per past-genesis
-driven vector, plus the 2 minted scenarios. `addrs` is the number of beacon
+`fixtures/chain/` holds 9 captures: 7 vendor captures,
+one per anchored past-genesis vector (all seven parked under `StaleContext`
+until the regeneration lands), plus the 2 minted scenarios. `addrs` is the number of beacon
 addresses captured; `signals` is the number of OP_RETURN announcements found.
 
 | Fixture | network | endpoint | tip | addrs | signals | signal heights |
@@ -396,9 +408,10 @@ build fails rather than a test failing.
 
 `golden-signed-update.json` is the exception that proves the rule. It is
 `include_str!`'d at three assertion sites, but `bless_or_assert` also opens it
-at runtime through `CARGO_MANIFEST_DIR` (`src/document.rs:3426`), because a
-blessed file has to be read back the same way it was written for `BLESS=1` to
-round-trip. That constraint is spelled out at `tests/conformance.rs:770`.
+at runtime through `CARGO_MANIFEST_DIR` (`bless_or_assert` in `src/document.rs`),
+because a blessed file has to be read back the same way it was written for
+`BLESS=1` to round-trip. That constraint is spelled out in the `bless_or_assert`
+doc comment in `tests/conformance.rs`.
 
 | Fixture | Shape | What it pins |
 |---|---|---|
@@ -415,9 +428,9 @@ Three files sit at `fixtures/` directly.
 
 | Fixture | Read by | How |
 |---|---|---|
-| `singleton-beacon-signal-txs.json` | `src/resolver.rs:1791`, as `UNCONFIRMED_FIXTURE` | `include_str!` |
-| `k1qypa5t...l0mgs4-transactions.json` | `src/document.rs:1873`, in `test_document_from_did_components` | `include_str!`, and the test is gated behind the `old-spec-fixtures` feature |
-| `initialDidDoc-missing-verificationMethod-id.json` | `src/document.rs:1809` | runtime `InitialDocument::from_file`, so a missing file fails the test rather than the build |
+| `singleton-beacon-signal-txs.json` | `src/resolver.rs`, as `UNCONFIRMED_FIXTURE` | `include_str!` |
+| `k1qypa5t...l0mgs4-transactions.json` | `src/document.rs`, in `test_document_from_did_components` | `include_str!`, and the test is gated behind the `old-spec-fixtures` feature |
+| `initialDidDoc-missing-verificationMethod-id.json` | `src/document.rs`, in `test_document_validation_missing_elements` | runtime `InitialDocument::from_file`, so a missing file fails the test rather than the build |
 
 The first two are compile-time inputs like the spec-form set. The third is the
 only fixture in the crate opened at runtime by path; it pins that a verification
@@ -447,6 +460,13 @@ Lives in `src/test_vectors.rs` and the test module of `src/resolver.rs`.
 - **No HTTP client is in the loop.**
   `grep -rn 'ureq\|reqwest\|TcpStream\|std::net' src/` returns nothing.
 
+A resolver step may also return `ResolverState::BlockRequests` — one
+`GET /block/{hash}` per block whose `mediantime` a proof's `expires` check
+needs. The harness serves those from the fixture's optional `blocks` map (key:
+the hash; value: the `/block/{hash}` body) and fails by name with a re-capture
+hint if the map lacks the block. No committed fixture carries the key today: no
+vector or minted proof carries `created` or `expires`.
+
 Tests worth grepping for:
 
 | Test | What it guards |
@@ -457,7 +477,7 @@ Tests worth grepping for:
 | `capture_pump_*` (`src/resolver.rs`) | replay routing and its fail-loud behaviour |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 42 `#[test]` functions; `src/test_vectors.rs` holds 57.
+`src/resolver.rs` holds 46 `#[test]` functions; `src/test_vectors.rs` holds 60.
 
 ## 8. When `test-suite/` is absent
 
