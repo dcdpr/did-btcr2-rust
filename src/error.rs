@@ -101,8 +101,11 @@ impl ProblemDetails for Btcr2Error {
             | Self::InvalidDidDocument(_)
             | Self::NotFound(_)
             | Self::InvalidOptions(_) => "https://www.w3.org/ns/did",
-            // TODO: Is this the right error namespace?
-            // From: https://github.com/dcdpr/did-btcr2/issues/71#issuecomment-3179550385
+            // The method's own namespace, the same one the document
+            // `@context` uses (`https://btcr2.dev/context/v1`). The spec's
+            // error registry (did-btcr2/src/errors.md) names the codes but
+            // defines no `type` URI for them; this is the crate's choice
+            // until it does, and is raised with the spec editors.
             Self::InvalidSidecarData(_)
             | Self::LatePublishingError(_)
             | Self::MissingUpdateData { .. }
@@ -111,7 +114,7 @@ impl ProblemDetails for Btcr2Error {
             | Self::ProofVerification(_)
             | Self::ProofTransformation(_)
             | Self::ProofGeneration(_)
-            | Self::Unsupported(_) => "https://btc1.dev/context/v1",
+            | Self::Unsupported(_) => "https://btcr2.dev/context/v1",
         };
 
         let name = match self {
@@ -173,7 +176,7 @@ mod tests {
 
         assert_eq!(
             details["type"],
-            "https://btc1.dev/context/v1#UNSUPPORTED_BEACON",
+            "https://btcr2.dev/context/v1#UNSUPPORTED_BEACON",
         );
         assert_eq!(details["detail"], message);
     }
@@ -235,8 +238,8 @@ mod tests {
         assert_eq!(d["detail"], "bad doc");
     }
 
-    /// `MissingUpdateData` covers the second namespace prefix (btc1.dev) and the
-    /// non-trivial formatted-detail arm (hex of the 32-byte update hash).
+    /// `MissingUpdateData` covers the method namespace prefix (btcr2.dev) and
+    /// the non-trivial formatted-detail arm (hex of the 32-byte update hash).
     #[test]
     fn missing_update_data_problem_details_shape() {
         let err = Btcr2Error::MissingUpdateData {
@@ -245,11 +248,12 @@ mod tests {
         let d = err
             .details()
             .expect("MissingUpdateData yields problem details");
-        // NOTE: this pins the current `btc1.dev` namespace prefix. The
-        // btc1.dev -> btcr2.dev namespace rename is still outstanding; this
-        // assertion is a deliberate re-bless site and MUST be updated to
-        // `btcr2.dev` when that rename lands.
-        assert_eq!(d["type"], "https://btc1.dev/context/v1#MISSING_UPDATE_DATA");
+        // Pins the method namespace: the same host the document `@context`
+        // uses, so nothing on the wire still says `btc1`.
+        assert_eq!(
+            d["type"],
+            "https://btcr2.dev/context/v1#MISSING_UPDATE_DATA"
+        );
         assert_eq!(d["title"], err.to_string());
         // detail is the formatted hex of the 32-byte hash (all-zero here).
         assert_eq!(
@@ -263,24 +267,24 @@ mod tests {
     /// the empty-service-genesis `InvalidDidDocument`. Asserting the FULL string
     /// tripwires both a wrong namespace prefix AND a drifted code name — in
     /// particular this is what fails if `LATE_PUBLISHING` ever regresses to the
-    /// old `LATE_PUBLISHING_ERROR` string. (The `btc1.dev` prefix is a tracked
-    /// future rename; these assertions must be re-blessed to `btcr2.dev` then.)
+    /// old `LATE_PUBLISHING_ERROR` string, or if any method code slips back to
+    /// the retired `btc1.dev` host.
     #[test]
     fn error_wire_codes_match_spec_registry() {
         let cases: [(Btcr2Error, &str); 4] = [
             (
                 Btcr2Error::InvalidDidUpdate("bad update".into()),
-                "https://btc1.dev/context/v1#INVALID_DID_UPDATE",
+                "https://btcr2.dev/context/v1#INVALID_DID_UPDATE",
             ),
             (
                 Btcr2Error::LatePublishingError("late".into()),
-                "https://btc1.dev/context/v1#LATE_PUBLISHING",
+                "https://btcr2.dev/context/v1#LATE_PUBLISHING",
             ),
             (
                 Btcr2Error::MissingUpdateData {
                     update_hash: Sha256Hash::from([0u8; 32]),
                 },
-                "https://btc1.dev/context/v1#MISSING_UPDATE_DATA",
+                "https://btcr2.dev/context/v1#MISSING_UPDATE_DATA",
             ),
             (
                 Btcr2Error::InvalidDidDocument("bad genesis".into()),
@@ -293,6 +297,40 @@ mod tests {
                 .details()
                 .expect("registry error yields problem details");
             assert_eq!(d["type"], expected_type, "wire type mismatch for {err:?}");
+        }
+    }
+
+    /// No variant's `type` names the retired `btc1.dev` host: every method
+    /// code is on `btcr2.dev`, every DID Resolution code on `www.w3.org`.
+    #[test]
+    fn no_problem_details_type_names_the_retired_host() {
+        let all = [
+            Btcr2Error::InvalidDid("x".into()),
+            Btcr2Error::InvalidDidDocument("x".into()),
+            Btcr2Error::NotFound("x".into()),
+            Btcr2Error::InvalidOptions("x".into()),
+            Btcr2Error::InvalidSidecarData("x".into()),
+            Btcr2Error::LatePublishingError("x".into()),
+            Btcr2Error::MissingUpdateData {
+                update_hash: Sha256Hash::from([0u8; 32]),
+            },
+            Btcr2Error::InvalidUpdateProof("x".into()),
+            Btcr2Error::InvalidDidUpdate("x".into()),
+            Btcr2Error::ProofVerification("x".into()),
+            Btcr2Error::ProofTransformation("x".into()),
+            Btcr2Error::ProofGeneration("x".into()),
+            Btcr2Error::Unsupported("x".into()),
+        ];
+        for err in all {
+            let ty = err.details().expect("every variant has a body")["type"]
+                .as_str()
+                .expect("type is a string")
+                .to_string();
+            assert!(
+                ty.starts_with("https://btcr2.dev/context/v1#")
+                    || ty.starts_with("https://www.w3.org/ns/did#"),
+                "{err:?} emits {ty}"
+            );
         }
     }
 
