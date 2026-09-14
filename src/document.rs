@@ -1325,13 +1325,25 @@ impl InitialDocument {
         {
             doc.sidecar_initial_validation(hash)?
         } else if let Some(genesis) = sidecar.and_then(|data| data.genesis_document.as_ref()) {
-            // Build the initial document from the genesis (intermediate) document
-            // using this DID's own network — NOT a hardcoded network. Structural
-            // errors in the genesis document propagate as typed errors (no unwrap).
+            // resolve.md "Process Sidecar Data": hash `sidecar.genesisDocument`
+            // AS SHIPPED and compare it to `genesis_bytes` — before any
+            // substitution, so a genesis document that legitimately spells
+            // its own full DID somewhere is judged on the bytes the
+            // identifier committed to, not on a reverse-substituted copy.
+            // Structural errors in the genesis document propagate as typed
+            // errors (no unwrap); the network is this DID's own.
             let intermediate =
                 IntermediateDocument::from_json_value(genesis.clone(), did.components().network())?;
-            let initial = intermediate.into_initial(did)?;
-            initial.sidecar_initial_validation(hash)?
+            if intermediate.hash() != hash {
+                return Err(Btcr2Error::InvalidDid(
+                    "sidecar genesisDocument does not match the DID's genesis hash: the \
+                     document's JCS SHA-256 differs from the hash committed in the identifier"
+                        .to_string(),
+                ))?;
+            }
+            // Then "Establish current_document": the placeholder replaced
+            // with the DID by a simple string replacement.
+            intermediate.into_initial(did)?
         } else {
             return Err(Btcr2Error::NotFound(
                 "no sidecar genesisDocument was supplied and this resolver has no CAS fetcher; \
@@ -1347,9 +1359,12 @@ impl InitialDocument {
         Ok(initial_document)
     }
 
-    // Spec section 7.2.1.2.1
+    /// The in-memory `initial_document` sidecar shortcut's check: recover the
+    /// genesis document by reversing the placeholder substitution and require
+    /// its hash to be the DID's genesis bytes. The spec-form `genesisDocument`
+    /// path hashes the shipped document itself in `resolve_external`.
     fn sidecar_initial_validation(&self, hash: Sha256Hash) -> Result<Self, Error> {
-        let intermediate_doc = IntermediateDocument::from_initial(self);
+        let intermediate_doc = IntermediateDocument::from_initial(self)?;
 
         // Canonicalize the JSON doc to get a hash
         let hash_bytes = intermediate_doc.hash();
@@ -1567,7 +1582,17 @@ impl IntermediateDocument {
 
     /// Build the Initial DID Document from this genesis (intermediate)
     /// document by replacing every `did:btcr2:_` placeholder with `did`
-    /// (`did-btcr2/src/operations/resolve.md`, Process Sidecar Data).
+    /// (`did-btcr2/src/operations/resolve.md`, "Establish current_document":
+    /// "A simple string replacement is sufficient").
+    ///
+    /// Literal, on the serialized document: every occurrence of the
+    /// placeholder text is replaced — as a whole value, as a `#fragment`
+    /// prefix, inside a longer string such as a service endpoint URL, and in
+    /// an object key alike — because that is what every other implementation
+    /// does, and the first update's `sourceHash` is the hash of the result.
+    /// A narrower substitution would yield a different initial document, a
+    /// different `sourceHash`, and an `INVALID_DID_UPDATE` here for an update
+    /// that applies everywhere else.
     ///
     /// This substitution is where an external DID's `sourceHash` is anchored.
     /// The first update's `sourceHash` is the JCS-then-SHA-256 hash of the
@@ -1579,9 +1604,7 @@ impl IntermediateDocument {
     /// external vector with updates by
     /// `external_source_hash_is_the_initial_document_after_placeholder_substitution`.
     pub(crate) fn into_initial(self, did: &Did) -> Result<InitialDocument, Btcr2Error> {
-        // Find and replace all DID placeholder strings with the DID.
-        let mut json_data = self.json_data.clone();
-        find_and_replace(&mut json_data, DID_PLACEHOLDER, did.encode());
+        let json_data = replace_text(&self.json_data, DID_PLACEHOLDER, did.encode())?;
 
         // A nonconforming genesis (e.g. empty service/capabilityInvocation on an
         // x1 sidecar) is structurally invalid as an initial document — surface a
@@ -1590,50 +1613,38 @@ impl IntermediateDocument {
             .map_err(|e| Btcr2Error::InvalidDidDocument(e.to_string()))
     }
 
-    pub(crate) fn from_initial(initial_doc: &InitialDocument) -> Self {
-        // Find and replace all DIDs with the DID placeholder string.
+    /// The inverse of [`IntermediateDocument::into_initial`]: every occurrence
+    /// of the document's DID replaced with the `did:btcr2:_` placeholder, by
+    /// the same literal text replacement. Used by the in-memory
+    /// `initial_document` sidecar shortcut to recover the genesis document it
+    /// was bound from; the spec-form `genesisDocument` path hashes the
+    /// shipped document directly and never needs this.
+    pub(crate) fn from_initial(initial_doc: &InitialDocument) -> Result<Self, Btcr2Error> {
         let did = &initial_doc.fields.id;
-        let mut json_data = initial_doc.json_data.clone();
-        find_and_replace(&mut json_data, did.encode(), DID_PLACEHOLDER);
+        let json_data = replace_text(&initial_doc.json_data, did.encode(), DID_PLACEHOLDER)?;
 
         // `DocumentFields<Did>::service` is `NonEmpty<Beacon>`; the
         // intermediate-document field stays `Vec<Beacon>`.
         let service: Vec<Beacon> = initial_doc.fields.service.iter().cloned().collect();
 
-        Self { service, json_data }
+        Ok(Self { service, json_data })
     }
 }
 
-fn find_and_replace(value: &mut Value, from: &str, to: &str) {
-    match value {
-        Value::String(s) => {
-            // replace only whole DID strings (`s == from`) or DID-fragment
-            // strings (`from` followed by `#…`, e.g. a verification-method or
-            // service id `did:btcr2:…#key-0`). This rewrites every legitimate DID
-            // occurrence — `id`, `controller`, verification-method/service ids —
-            // while removing the substring-collision risk of the old
-            // unconditional substring substitution (a `from` that merely appeared
-            // inside an unrelated field value would no longer be rewritten).
-            if s == from {
-                *s = to.to_owned();
-            } else if let Some(fragment) = s.strip_prefix(from)
-                && fragment.starts_with('#')
-            {
-                *s = format!("{to}{fragment}");
-            }
-        }
-        Value::Array(array) => {
-            for item in array {
-                find_and_replace(item, from, to);
-            }
-        }
-        Value::Object(obj) => {
-            for (_, value) in obj {
-                find_and_replace(value, from, to);
-            }
-        }
-        _ => (),
-    }
+/// The spec's "simple string replacement": serialize `value`, replace every
+/// occurrence of `from` with `to` in the text, and parse the result back.
+/// Neither a DID nor the placeholder contains a character JSON escapes, so
+/// the text form is the document itself and the result re-parses; a failure
+/// to would mean the replacement produced a document that is not JSON, which
+/// is reported rather than assumed away.
+fn replace_text(value: &Value, from: &str, to: &str) -> Result<Value, Btcr2Error> {
+    let text = serde_json::to_string(value)
+        .map_err(|e| Btcr2Error::InvalidDidDocument(format!("document does not serialize: {e}")))?;
+    serde_json::from_str(&text.replace(from, to)).map_err(|e| {
+        Btcr2Error::InvalidDidDocument(format!(
+            "document is not JSON after replacing `{from}` with `{to}`: {e}"
+        ))
+    })
 }
 
 /// Resolve a DID URL reference against the document's DID.
@@ -1777,31 +1788,41 @@ mod tests {
         }
     }
 
-    /// `find_and_replace` rewrites a whole-DID string and a `did#fragment`
-    /// string, but leaves the DID untouched when it merely appears mid-text or
-    /// is immediately followed by a non-`#` character — the substring-collision
-    /// guard the function was written to add. The `list` field exercises the
-    /// `Value::Array` recursion arm (document.rs Array branch), not just
-    /// top-level object fields.
+    /// The spec's "simple string replacement": every occurrence of the
+    /// placeholder text is rewritten — a whole value, a `#fragment` id, a
+    /// `/path` or `?query` DID URL, text inside a longer string such as a
+    /// service endpoint URL, an array element, and an object key — and the
+    /// result is a document again. Nothing is left for a narrower rule to
+    /// miss, because the first update's `sourceHash` is the hash of exactly
+    /// this document.
     #[test]
-    fn find_and_replace_only_touches_whole_did_and_fragment_ids() {
-        let mut v = json!({
-            "id": "did:btcr2:x1abc",                   // whole DID  -> replaced
-            "vm": "did:btcr2:x1abc#key-0",             // DID#frag   -> replaced
-            "note": "see did:btcr2:x1abc in the log",  // mid-text   -> untouched
-            "sibling": "did:btcr2:x1abcXYZ",           // prefix+non-'#' -> untouched
-            "list": [
-                "did:btcr2:x1abc",                     // array elem, whole DID -> replaced
-                "did:btcr2:x1abc#svc"                  // array elem, DID#frag  -> replaced
-            ]
+    fn replace_text_rewrites_every_occurrence_of_the_placeholder() {
+        let v = json!({
+            "id": "did:btcr2:_",
+            "vm": "did:btcr2:_#key-0",
+            "path": "did:btcr2:_/path",
+            "query": "did:btcr2:_?service=x",
+            "endpoint": "https://hub.example/did:btcr2:_",
+            "note": "see did:btcr2:_ in the log",
+            "list": ["did:btcr2:_", "did:btcr2:_#svc"],
+            "did:btcr2:_": "a key",
+            "untouched": "did:btcr2:x1other",
         });
-        find_and_replace(&mut v, "did:btcr2:x1abc", "did:btcr2:_");
-        assert_eq!(v["id"], "did:btcr2:_");
-        assert_eq!(v["vm"], "did:btcr2:_#key-0");
-        assert_eq!(v["note"], "see did:btcr2:x1abc in the log");
-        assert_eq!(v["sibling"], "did:btcr2:x1abcXYZ");
-        assert_eq!(v["list"][0], "did:btcr2:_"); // exercises Array recursion arm
-        assert_eq!(v["list"][1], "did:btcr2:_#svc");
+        let out = replace_text(&v, "did:btcr2:_", "did:btcr2:x1abc").expect("replaces");
+        assert_eq!(out["id"], "did:btcr2:x1abc");
+        assert_eq!(out["vm"], "did:btcr2:x1abc#key-0");
+        assert_eq!(out["path"], "did:btcr2:x1abc/path");
+        assert_eq!(out["query"], "did:btcr2:x1abc?service=x");
+        assert_eq!(out["endpoint"], "https://hub.example/did:btcr2:x1abc");
+        assert_eq!(out["note"], "see did:btcr2:x1abc in the log");
+        assert_eq!(out["list"][0], "did:btcr2:x1abc");
+        assert_eq!(out["list"][1], "did:btcr2:x1abc#svc");
+        assert_eq!(out["did:btcr2:x1abc"], "a key");
+        assert_eq!(out["untouched"], "did:btcr2:x1other");
+
+        // And the reverse replacement is the exact inverse on this document.
+        let back = replace_text(&out, "did:btcr2:x1abc", "did:btcr2:_").expect("replaces");
+        assert_eq!(back, v);
     }
 
     /// DID Core 1.1 §3.2.1 / RFC 3986 §5.2 with the DID as the base: fragment
@@ -2032,6 +2053,132 @@ mod tests {
         assert_eq!(initial_doc.fields.id, did);
     }
 
+    /// A self-contained external (placeholder-DID) genesis document with the
+    /// placeholder in every position the literal replacement must reach: the
+    /// id, a `#fragment` id, a controller, and INSIDE a non-beacon service's
+    /// endpoint URL.
+    fn genesis_with_placeholder_in_an_endpoint() -> Value {
+        json!({
+            "id": "did:btcr2:_",
+            "@context": [
+                "https://www.w3.org/ns/did/v1.1",
+                "https://btcr2.dev/context/v1"
+            ],
+            "verificationMethod": [{
+                "id": "did:btcr2:_#key-0",
+                "type": "Multikey",
+                "controller": "did:btcr2:_",
+                "publicKeyMultibase": "zQ3shTHn9hZ1BHtoZayz4VmPAZT97p2v8swmuPEUwBKHCanTL"
+            }],
+            "authentication": ["did:btcr2:_#key-0"],
+            "assertionMethod": ["did:btcr2:_#key-0"],
+            "capabilityInvocation": ["did:btcr2:_#key-0"],
+            "capabilityDelegation": ["did:btcr2:_#key-0"],
+            "service": [
+                {
+                    "id": "did:btcr2:_#service-0",
+                    "serviceEndpoint": "bitcoin:mnDXvNsFTf9cs4hWigPkENCBDp9eJpfyxF",
+                    "type": "SingletonBeacon"
+                },
+                {
+                    "id": "did:btcr2:_#hub",
+                    "type": "LinkedDomains",
+                    "serviceEndpoint": "https://hub.example/did:btcr2:_"
+                }
+            ]
+        })
+    }
+
+    /// The spec-form path judges `sidecar.genesisDocument` AS SHIPPED — its
+    /// hash is the DID's genesis bytes — and then builds the initial document
+    /// by the literal replacement, so a placeholder INSIDE a service endpoint
+    /// URL is rewritten too. The create path (`from_external_intermediate`)
+    /// and the resolve path (`resolve_external`) produce the same initial
+    /// document, which is what anchors the first update's `sourceHash`.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Sidecar Data" and
+    /// "Establish current_document" ("A simple string replacement is
+    /// sufficient").
+    #[test]
+    fn resolve_external_hashes_the_shipped_genesis_and_replaces_every_placeholder() {
+        let genesis = genesis_with_placeholder_in_an_endpoint();
+        let intermediate = IntermediateDocument::from_json_value(genesis.clone(), Network::Regtest)
+            .expect("the genesis document is structurally valid");
+        let shipped_hash = intermediate.hash();
+        let (did, created) =
+            InitialDocument::from_external_intermediate(intermediate, None, Some(Network::Regtest))
+                .expect("the genesis document mints an x1 DID");
+        assert_eq!(
+            did.hash_unchecked(),
+            shipped_hash,
+            "the DID commits to the hash of the genesis document as shipped"
+        );
+
+        let sidecar = SidecarData::from_json_value(json!({ "genesisDocument": genesis }))
+            .expect("the sidecar deserializes");
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolved =
+            InitialDocument::resolve_external(&did, did.hash_unchecked(), &resolution_options)
+                .expect("the shipped genesis document hashes to the DID's genesis bytes");
+
+        assert_eq!(resolved.fields.id, did);
+        assert_eq!(
+            resolved.as_ref()["service"][1]["serviceEndpoint"],
+            format!("https://hub.example/{}", did.encode()),
+            "the placeholder inside the endpoint URL is replaced too"
+        );
+        assert_eq!(
+            resolved.as_ref()["service"][1]["id"],
+            format!("{}#hub", did.encode())
+        );
+        assert_eq!(
+            resolved, created,
+            "create and resolve build the same initial document from one genesis document"
+        );
+        assert_ne!(
+            resolved.hash(),
+            shipped_hash,
+            "the initial document is not the genesis document: its hash is what the first \
+             update's sourceHash names"
+        );
+    }
+
+    /// A `genesisDocument` whose content is not what the DID committed to is
+    /// `INVALID_DID`, judged before any substitution: here the endpoint URL
+    /// differs by one character.
+    #[test]
+    fn resolve_external_rejects_a_genesis_document_the_did_did_not_commit_to() {
+        let genesis = genesis_with_placeholder_in_an_endpoint();
+        let intermediate = IntermediateDocument::from_json_value(genesis.clone(), Network::Regtest)
+            .expect("the genesis document is structurally valid");
+        let (did, _) =
+            InitialDocument::from_external_intermediate(intermediate, None, Some(Network::Regtest))
+                .expect("the genesis document mints an x1 DID");
+
+        let mut tampered = genesis;
+        tampered["service"][1]["serviceEndpoint"] = json!("https://hub.example/did:btcr2:_/x");
+        let sidecar = SidecarData::from_json_value(json!({ "genesisDocument": tampered }))
+            .expect("the sidecar deserializes");
+        let resolution_options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let result =
+            InitialDocument::resolve_external(&did, did.hash_unchecked(), &resolution_options);
+        let Err(Error::Btcr2Error(Btcr2Error::InvalidDid(detail))) = result else {
+            panic!(
+                "a genesis document the DID did not commit to must be InvalidDid, got {result:?}"
+            );
+        };
+        assert!(
+            detail.contains("genesisDocument"),
+            "the detail names the sidecar field: {detail}"
+        );
+    }
+
     // `sidecar_initial_validation` recomputes the intermediate-document hash from
     // the supplied initial document and rejects it when that hash does not equal
     // the External `genesisBytes`. Here the bound initial document is correct; the
@@ -2083,6 +2230,7 @@ mod tests {
         // The genuine intermediate hash of `initial`; flip one byte so the only
         // divergence is the hash argument and the mismatch branch is exercised.
         let mut wrong_bytes = *IntermediateDocument::from_initial(&initial)
+            .expect("the initial document reverses to its genesis document")
             .hash()
             .as_bytes();
         wrong_bytes[0] ^= 0xff;
@@ -2205,10 +2353,6 @@ mod tests {
         let raw = include_str!("../fixtures/spec-form/sidecar-empty-service-genesis.json");
         let value: Value = serde_json::from_str(raw).unwrap();
 
-        let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
-            .parse()
-            .unwrap();
-
         // Fold-in 9 staging check: the empty-service genesis MUST parse as an
         // intermediate document, so the failure below is isolated to `into_initial`
         // (the panic site) — NOT an earlier, wrong-stage parse rejection. If this
@@ -2222,6 +2366,17 @@ mod tests {
             "empty-service genesis must parse as an intermediate document so the test \
              reaches into_initial, got: {intermediate:?}"
         );
+        // The DID that commits to THIS genesis document, so the shipped-hash
+        // check `resolve_external` runs first passes and the failure below is
+        // isolated to the initial-document invariant.
+        let did: Did = DidComponents::new(
+            DidVersion::One,
+            Network::Regtest,
+            IdType::External(intermediate.expect("parsed above").hash()),
+        )
+        .expect("regtest is a valid network")
+        .try_into()
+        .expect("an external id type encodes to a valid DID");
 
         // Drive the production serde/CLI sidecar path: a `SidecarData` deserialized
         // from the wire form leaves `initial_document` None and fills
@@ -2521,7 +2676,8 @@ mod tests {
 
         // Reversing the binding and re-hashing the intermediate must reproduce the
         // External genesisBytes encoded in the DID — the identity round-trip.
-        let rebuilt = IntermediateDocument::from_initial(&initial_doc);
+        let rebuilt = IntermediateDocument::from_initial(&initial_doc)
+            .expect("the initial document reverses to its genesis document");
         assert_eq!(rebuilt.hash(), did.hash_unchecked());
     }
 
