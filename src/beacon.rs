@@ -152,7 +152,6 @@ impl Beacon {
             "id": self.id,
             "type": self.ty.to_string(),
             "serviceEndpoint": format!("bitcoin:{}", self.descriptor),
-            // "minimumConfirmationsRequired": self.min_confirmations_required,
         })
     }
 }

@@ -304,12 +304,15 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
         });
     }
 
-    // One recording, two transports over it: the client consumes its transport
-    // by value and never gives it back, and the announcements' blocks are
-    // fetched after the resolve through the second.
+    // One recording, one agent, two handles over both: the client consumes
+    // its transport by value and never gives it back, and the announcements'
+    // blocks are fetched after the resolve through the second handle.
     let recording = Rc::new(RefCell::new(Recording::default()));
-    let transport = RecordingTransport::sharing(UreqTransport::new(), Rc::clone(&recording));
-    let client = Client::new(base_url.to_string(), transport);
+    let transport = UreqTransport::new();
+    let client = Client::new(
+        base_url.to_string(),
+        RecordingTransport::sharing(transport.clone(), Rc::clone(&recording)),
+    );
 
     // `chain_tip_height` is None on purpose: the client fetches
     // `/blocks/tip/height` and defaults it, and the recorder captures that value
@@ -373,7 +376,7 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     // asked for it: a replay under a `versionTime` bound reads its
     // `mediantime`, and a capture without it cannot host that probe.
     let addresses = recording.borrow().addresses.clone();
-    let blocks_transport = RecordingTransport::sharing(UreqTransport::new(), Rc::clone(&recording));
+    let blocks_transport = RecordingTransport::sharing(transport, Rc::clone(&recording));
     record::capture_announcement_blocks(&blocks_transport, base_url, &addresses).map_err(
         |source| CaptureError::ResolveFailed {
             vector: target.id.clone(),
