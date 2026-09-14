@@ -5,6 +5,8 @@
 //! endpoints this plan needs live here; `/address/{a}/utxo`, `/fee-estimates`,
 //! and `POST /tx` land in a later plan.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use esploda::bitcoin::{BlockHash, Txid};
 use esploda::esplora::{Status, Transaction};
@@ -18,6 +20,12 @@ use crate::transport::BtcTransport;
 /// `GET /address/{a}/txs/chain/{last_seen_txid}` returns the next 25
 /// confirmed ones.
 pub const ESPLORA_PAGE_SIZE: usize = 25;
+
+/// Upper bound on the pages one address-history walk will fetch
+/// (`ESPLORA_PAGE_SIZE * MAX_ADDRESS_PAGES` = 25 000 confirmed transactions on
+/// a single beacon address). A server that keeps answering with full pages
+/// past this is reported as a malformed history, not walked forever.
+pub const MAX_ADDRESS_PAGES: usize = 1_000;
 
 /// Execute a `GET` for a JSON transaction list, mapping a non-2xx status to
 /// [`TransportError::Status`].
@@ -50,8 +58,9 @@ fn fetch_txs<T: BtcTransport>(
 /// page until a page carries fewer than [`ESPLORA_PAGE_SIZE`] confirmed
 /// transactions. Mempool entries (first page only) are carried through
 /// unchanged; the core skips them itself. A continuation whose oldest
-/// confirmed transaction is the very txid it was keyed on re-serves its own
-/// page: that is a malformed history, reported as
+/// confirmed txid was ALREADY used as a continuation key — its own page, or
+/// any earlier page: a cycle of any length — is a malformed history; so is a
+/// walk that would exceed [`MAX_ADDRESS_PAGES`]. Both are reported as
 /// [`TransportError::Malformed`], not an infinite walk.
 pub fn address_history<T: BtcTransport>(
     transport: &T,
@@ -60,7 +69,8 @@ pub fn address_history<T: BtcTransport>(
     let txs_uri = first.uri().to_string();
     let mut page = fetch_txs(transport, first)?;
     let mut history = Vec::new();
-    let mut previous_last_seen: Option<Txid> = None;
+    // Every continuation key used so far; one per fetched full page.
+    let mut seen: HashSet<Txid> = HashSet::new();
     loop {
         let confirmed = page
             .iter()
@@ -72,17 +82,21 @@ pub fn address_history<T: BtcTransport>(
             .find(|tx| matches!(tx.status, Status::Confirmed { .. }))
             .map(|tx| tx.txid);
         if let Some(txid) = last_seen
-            && Some(txid) == previous_last_seen
+            && !seen.insert(txid)
         {
             return Err(Error::Transport(TransportError::Malformed(format!(
-                "address history continuation from {txid} returned the same page again"
+                "address history continuation from {txid} was already served"
             ))));
         }
         history.append(&mut page);
         let (Some(last_seen), true) = (last_seen, confirmed >= ESPLORA_PAGE_SIZE) else {
             return Ok(history);
         };
-        previous_last_seen = Some(last_seen);
+        if seen.len() >= MAX_ADDRESS_PAGES {
+            return Err(Error::Transport(TransportError::Malformed(format!(
+                "address history exceeded {MAX_ADDRESS_PAGES} pages"
+            ))));
+        }
         let next = http::Request::get(format!("{txs_uri}/chain/{last_seen}"))
             .body(Vec::new())
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;

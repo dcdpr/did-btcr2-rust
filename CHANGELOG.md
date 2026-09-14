@@ -87,8 +87,10 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   before later updates from the original beacons are judged. Previously such a
   history raised `LATE_PUBLISHING`. A round can now arrive mid-batch; the
   driver's contract is unchanged.
-- `did-btcr2-client`: address-history paging stops with
-  `TransportError::Malformed` when a continuation page repeats the page it was
-  keyed on, instead of looping on a server that re-serves the same page.
+- `did-btcr2-client`: the Esplora address-history pager rejects any repeated
+  continuation key (a cycle of any length, not only an immediate self-repeat)
+  and stops after `MAX_ADDRESS_PAGES` (1 000) pages; both are
+  `TransportError::Malformed`, instead of looping on a server that re-serves
+  pages or never ends its history.
 
 ### Security

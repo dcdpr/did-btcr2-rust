@@ -462,8 +462,13 @@ mod tests {
         /// Body served for `GET /address/{a}/txs` (a JSON tx array).
         txs_body: Vec<u8>,
         /// Bodies served for `GET /address/{a}/txs/chain/{last_seen_txid}`,
-        /// keyed by `last_seen_txid`. Absent keys serve an empty page.
+        /// keyed by `last_seen_txid`. Absent keys serve an empty page, unless
+        /// `synthesize_full_pages` is set.
         chain_pages: HashMap<String, Vec<u8>>,
+        /// If set, a `/txs/chain/{key}` request with no `chain_pages` entry is
+        /// answered with a fresh full page of distinct confirmed transactions
+        /// (a server whose history never ends), instead of an empty page.
+        synthesize_full_pages: bool,
         /// Chain-tip height served as a bare integer. Two hundred: every
         /// served announcement sits at height 100, so under the resolver's
         /// default `minConf` of six it is long settled.
@@ -500,6 +505,7 @@ mod tests {
                 seen_paths: RefCell::new(Vec::new()),
                 txs_body: txs_body.as_bytes().to_vec(),
                 chain_pages: HashMap::new(),
+                synthesize_full_pages: false,
                 tip: 200,
                 utxo_value: 100_000,
                 utxo_values: Vec::new(),
@@ -653,10 +659,19 @@ mod tests {
                 .split_once("/txs/chain/")
                 .filter(|(head, _)| head.contains("/address/"))
             {
-                self.chain_pages
-                    .get(last_seen)
-                    .cloned()
-                    .unwrap_or_else(|| b"[]".to_vec())
+                match self.chain_pages.get(last_seen) {
+                    Some(body) => body.clone(),
+                    None if self.synthesize_full_pages => {
+                        // Seed from the request ordinal so every synthesized
+                        // page carries txids distinct from every other page's.
+                        let calls = *self.calls.borrow() as u32;
+                        let page: Vec<serde_json::Value> = (0..esplora::ESPLORA_PAGE_SIZE as u32)
+                            .map(|i| filler_tx_json(0x10_0000 + calls * 0x100 + i, 100))
+                            .collect();
+                        serde_json::Value::Array(page).to_string().into_bytes()
+                    }
+                    None => b"[]".to_vec(),
+                }
             } else if path.contains("/address/") && path.ends_with("/utxo") {
                 self.utxo_body()
             } else if path.ends_with("/fee-estimates") {
@@ -1200,6 +1215,101 @@ mod tests {
         assert!(
             paths[1].ends_with(&format!("/txs/chain/{last_seen}")),
             "one continuation keyed on the first page's oldest confirmed txid: {paths:?}"
+        );
+    }
+
+    /// A continuation that leads back to an EARLIER page — not the one it was
+    /// keyed on — is a cycle of length two: A's oldest txid keys B, B's oldest
+    /// txid keys A again. The pager remembers every continuation key it has
+    /// used, so the walk stops on the third request with a `Malformed` error
+    /// naming the txid that came around again, instead of alternating forever.
+    #[test]
+    fn address_history_rejects_a_continuation_cycle() {
+        let page_a: Vec<serde_json::Value> = (0..esplora::ESPLORA_PAGE_SIZE as u32)
+            .map(|i| filler_tx_json(0x4000 + i, 150 - i))
+            .collect();
+        let page_b: Vec<serde_json::Value> = (0..esplora::ESPLORA_PAGE_SIZE as u32)
+            .map(|i| filler_tx_json(0x5000 + i, 120 - i))
+            .collect();
+        let oldest = |page: &[serde_json::Value]| {
+            page.last()
+                .and_then(|tx| tx["txid"].as_str())
+                .expect("the page's oldest transaction has a txid")
+                .to_string()
+        };
+        let (a, b) = (oldest(&page_a), oldest(&page_b));
+        assert_ne!(a, b, "the two pages carry distinct txids");
+        let body_a = serde_json::Value::Array(page_a).to_string();
+        let body_b = serde_json::Value::Array(page_b).to_string();
+
+        let transport = FakeTransport {
+            chain_pages: HashMap::from([
+                (a.clone(), body_b.into_bytes()),
+                (b.clone(), body_a.clone().into_bytes()),
+            ]),
+            ..FakeTransport::new(&body_a)
+        };
+        let req = http::Request::get("http://fake/address/tb1qtest/txs")
+            .body(Vec::new())
+            .expect("a static URI builds");
+
+        let err = esplora::address_history(&transport, req)
+            .expect_err("a continuation that revisits an earlier page is malformed");
+        assert!(
+            matches!(&err, Error::Transport(TransportError::Malformed(msg)) if msg.contains(&a)),
+            "the error names the continuation key that came around again: {err:?}"
+        );
+
+        let paths = transport.seen_paths();
+        assert_eq!(
+            paths.len(),
+            3,
+            "the walk stops when page A is served a second time: {paths:?}"
+        );
+        assert!(paths[0].ends_with("/txs"), "first page: {paths:?}");
+        assert!(
+            paths[1].ends_with(&format!("/txs/chain/{a}")),
+            "second request keyed on A's oldest txid: {paths:?}"
+        );
+        assert!(
+            paths[2].ends_with(&format!("/txs/chain/{b}")),
+            "third request keyed on B's oldest txid: {paths:?}"
+        );
+    }
+
+    /// A server that answers every continuation with another full page of
+    /// never-before-seen transactions defeats the cycle guard. The walk is
+    /// bounded by [`esplora::MAX_ADDRESS_PAGES`]: having fetched that many
+    /// pages it refuses to ask for one more and reports the history as
+    /// malformed, naming the cap.
+    #[test]
+    fn address_history_stops_at_the_page_cap() {
+        let first_page: Vec<serde_json::Value> = (0..esplora::ESPLORA_PAGE_SIZE as u32)
+            .map(|i| filler_tx_json(0x6000 + i, 150 - i))
+            .collect();
+        let transport = FakeTransport {
+            synthesize_full_pages: true,
+            ..FakeTransport::new(&serde_json::Value::Array(first_page).to_string())
+        };
+        let req = http::Request::get("http://fake/address/tb1qtest/txs")
+            .body(Vec::new())
+            .expect("a static URI builds");
+
+        let err =
+            esplora::address_history(&transport, req).expect_err("an endless history is malformed");
+        assert!(
+            matches!(
+                &err,
+                Error::Transport(TransportError::Malformed(msg))
+                    if msg.contains(&esplora::MAX_ADDRESS_PAGES.to_string())
+            ),
+            "the error names the page cap: {err:?}"
+        );
+        assert_eq!(
+            transport.call_count(),
+            esplora::MAX_ADDRESS_PAGES,
+            "the first page plus {} continuations were fetched; the next was refused",
+            esplora::MAX_ADDRESS_PAGES - 1
         );
     }
 
