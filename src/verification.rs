@@ -1,7 +1,7 @@
 //! Verification methods: the public keys a DID document authorizes for
 //! signing updates.
 
-use crate::key::PublicKey;
+use crate::key::{PublicKey, PublicKeyExt as _};
 use std::{cmp::PartialEq, str::FromStr};
 
 /// Verification method ID
@@ -18,9 +18,18 @@ impl FromStr for VerificationMethodId {
     }
 }
 
-/// Represents a verification method for cryptographic proofs
+/// One entry of the top-level `verificationMethod` array.
+///
+/// Entries are retained as opaque DID Core 1.1 §5.2 objects: any registered
+/// verification method type, any controller DID, any key encoding. A
+/// document may carry an Ed25519 key with a `did:key` controller or a JWK
+/// with no `publicKeyMultibase` next to its secp256k1 key, and it still
+/// parses. Nothing is decoded here because did-btcr2/src/operations/resolve.md
+/// ("Check `update.proof`") reads `publicKeyMultibase` only from the entry a
+/// proof invokes; the key is decoded at that point
+/// (`DocumentFields<Did>::invoking_public_key`), never at parse time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerificationMethod<T> {
+pub struct VerificationMethod {
     /// Identifier for the verification method
     pub id: VerificationMethodId,
 
@@ -30,11 +39,12 @@ pub struct VerificationMethod<T> {
     /// cryptosuite regardless of the declared type.
     pub type_: String,
 
-    /// The controller of this verification method
-    pub controller: T,
+    /// The controller DID, verbatim; not parsed as a did:btcr2 identifier (a
+    /// foreign method may name a `did:key`).
+    pub controller: String,
 
-    /// Public key
-    pub public_key: PublicKey,
+    /// The object's `publicKeyMultibase`, verbatim, when it has one.
+    pub public_key_multibase: Option<String>,
 }
 
 /// A verification method object carried inside a relationship array
@@ -65,31 +75,38 @@ pub enum VerificationRelationship {
     Embedded(EmbeddedVerificationMethod),
 }
 
-impl<T> VerificationMethod<T> {
-    /// Create a new Multikey verification method.
+impl VerificationMethod {
+    /// Create a new Multikey verification method for a secp256k1 key.
     ///
-    /// Sets `type_` to `"Multikey"` — the only type this crate signs with.
-    /// To carry a type parsed from a foreign document (which may be
-    /// non-Multikey), use [`Self::with_type`].
-    pub fn new(id: VerificationMethodId, controller: T, public_key: PublicKey) -> Self {
-        Self::with_type(id, controller, public_key, "Multikey".to_string())
+    /// Sets `type_` to `"Multikey"` — the only type this crate signs with —
+    /// and `public_key_multibase` to the key's Multikey encoding. To carry
+    /// an entry parsed from a document (which may be of any type and key
+    /// encoding), use [`Self::with_type`].
+    pub fn new(id: VerificationMethodId, controller: String, public_key: PublicKey) -> Self {
+        Self::with_type(
+            id,
+            controller,
+            Some(public_key.to_multikey()),
+            "Multikey".to_string(),
+        )
     }
 
-    /// Create a verification method carrying its parsed `type` string.
+    /// Create a verification method from its parsed fields, verbatim.
     ///
-    /// Used by the document parser to retain a method's declared type
-    /// verbatim. The type string does not affect whether the key is used.
+    /// Used by the document parser to retain an entry's declared type,
+    /// controller and `publicKeyMultibase` as they appear. The type string
+    /// does not affect whether the key is used.
     pub fn with_type(
         id: VerificationMethodId,
-        controller: T,
-        public_key: PublicKey,
+        controller: String,
+        public_key_multibase: Option<String>,
         type_: String,
     ) -> Self {
         Self {
             id,
             type_,
             controller,
-            public_key,
+            public_key_multibase,
         }
     }
 }
@@ -99,25 +116,37 @@ mod tests {
     use super::*;
     use crate::key::KeyPair;
 
-    /// `with_type` carries the declared type string verbatim and `new`
-    /// defaults it to `"Multikey"`; the key is reachable either way.
+    /// `with_type` carries the declared type, controller and
+    /// `publicKeyMultibase` verbatim — a foreign method with a `did:key`
+    /// controller is retained as-is — and `new` defaults the type to
+    /// `"Multikey"` with the secp256k1 key's Multikey encoding.
     #[test]
     fn with_type_keeps_the_declared_type_string() {
         let id = VerificationMethodId("did:btcr2:x1abc#key-0".to_string());
-        let controller = "did:btcr2:x1abc".to_string();
-        let public_key = KeyPair::generate().public_key;
+        let ed25519 = "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 
         let vm = VerificationMethod::with_type(
             id.clone(),
-            controller.clone(),
-            public_key,
+            format!("did:key:{ed25519}"),
+            Some(ed25519.to_string()),
             "Ed25519VerificationKey2020".to_string(),
         );
         assert_eq!(vm.type_, "Ed25519VerificationKey2020");
-        assert_eq!(vm.public_key, public_key);
+        assert_eq!(vm.controller, format!("did:key:{ed25519}"));
+        assert_eq!(vm.public_key_multibase.as_deref(), Some(ed25519));
 
-        let via_new = VerificationMethod::new(id, controller, public_key);
+        let keyless = VerificationMethod::with_type(
+            id.clone(),
+            "did:example:other".to_string(),
+            None,
+            "JsonWebKey2020".to_string(),
+        );
+        assert_eq!(keyless.public_key_multibase, None);
+
+        let public_key = KeyPair::generate().public_key;
+        let via_new = VerificationMethod::new(id, "did:btcr2:x1abc".to_string(), public_key);
         assert_eq!(via_new.type_, "Multikey");
-        assert_eq!(via_new.public_key, public_key);
+        assert_eq!(via_new.controller, "did:btcr2:x1abc");
+        assert_eq!(via_new.public_key_multibase, Some(public_key.to_multikey()));
     }
 }
