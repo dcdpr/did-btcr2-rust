@@ -67,5 +67,10 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - `SecretKey`: the `Vec<u8>` a key is parsed from and the signing keypair are
   scrubbed after use; the type documents a best-effort scrub rather than a
   guarantee.
+- Resolver: the `versionTime` bound is evaluated on any tuple whose
+  `targetVersionId` exceeds the current version (resolve.md "Process Next
+  Update" step 4), not only on the next version. A skipped version announced
+  after `versionTime` now resolves the document in effect instead of raising
+  `LATE_PUBLISHING`.
 
 ### Security

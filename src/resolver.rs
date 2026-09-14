@@ -263,10 +263,11 @@ impl Resolver {
         // compares it against `versionTime`. Ask for every block still
         // missing, once; a second pass without it is the caller's error.
         //
-        // The mediantime is only read in the apply branch of the loop below.
-        // A signal whose targetVersionId is already at or below the current
-        // version at loop entry goes through `confirm_duplicate` only and
-        // never reaches it, so its block is not requested. Every
+        // The mediantime is read in the loop below for any tuple above the
+        // current version: the step-4 gate and, on apply, the `expires`
+        // check. A signal whose targetVersionId is already at or below the
+        // current version at loop entry goes through `confirm_duplicate` only
+        // and never reaches either, so its block is not requested. Every
         // higher-version signal is kept: under the ascending version sort it
         // may still apply later in this same batch once the lower versions
         // have. Version is the only exclusion; no time-based cutoff, because a
@@ -343,45 +344,48 @@ impl Resolver {
                 }
             }
 
+            // Process Next Update step 4 (resolve.md:168-177): the
+            // versionTime bound applies to ANY tuple whose targetVersionId is
+            // more than current_version_id (first bullet), evaluated against
+            // THIS tuple's block. The duplicate branch above (`<= current`)
+            // runs first and never reaches this, which is footnote 4: under
+            // the ascending (target_version_id, block_height) sort a duplicate
+            // announcement is processed before a later-version unique update,
+            // so a DUPLICATE whose block is after versionTime must never abort
+            // the loop and suppress a later unique update announced within
+            // versionTime. The gate deliberately runs BEFORE the version-gap
+            // check (step 10.3): step 4 precedes step 6 in the spec, so a
+            // skipped version announced after versionTime resolves the
+            // document in effect so far rather than raising LATE_PUBLISHING.
+            // A tuple within versionTime falls through to the apply branch
+            // or, with a gap, to the gap check.
+            //
+            // "More recent" is the block's `mediantime` (footnote 5): an
+            // equal mediantime applies, there is no tolerance, and every
+            // resolver reads the same value off the chain, so every
+            // resolver selects the same version — the header timestamp,
+            // which a single miner sets, is not used for this. The
+            // mediantime was requested above; a hole here is the
+            // caller's, never an apply that skipped the bound.
+            if update.target_version_id > self.current_version_id
+                && let TargetCondition::Time(time) = &self.target_condition
+            {
+                let mediantime = self
+                    .block_mediantimes
+                    .get(&block_hash)
+                    .copied()
+                    .ok_or(Error::MissingBlockMediantime { block_hash })?;
+                if mediantime > *time {
+                    return Ok(ResolverState::Resolved(self.terminal_state()));
+                }
+            }
+
             // Step 10.2.
             let next_update_version_id = self
                 .current_version_id
                 .checked_add(1)
                 .expect("version_id overflow requires 2^64 updates to a single DID");
             if update.target_version_id == next_update_version_id {
-                // Process Next Update step 4 (resolve.md:168-177): the
-                // versionTime bound applies only to a tuple whose
-                // targetVersionId is more than current_version_id, i.e. a
-                // UNIQUE update, evaluated against THIS tuple's block. That
-                // is why it sits inside the apply branch (not the duplicate
-                // branch, not once per batch): footnote 4 gives the reason —
-                // under the ascending (target_version_id, block_height) sort
-                // a duplicate announcement is processed before a later-version
-                // unique update, so a DUPLICATE whose block is after
-                // versionTime must never abort the loop and suppress a later
-                // unique update announced within versionTime. If this unique
-                // update is more recent than the requested time, resolve the
-                // document in effect so far (the earlier version) and apply
-                // no further.
-                //
-                // "More recent" is the block's `mediantime` (footnote 5): an
-                // equal mediantime applies, there is no tolerance, and every
-                // resolver reads the same value off the chain, so every
-                // resolver selects the same version — the header timestamp,
-                // which a single miner sets, is not used for this. The
-                // mediantime was requested above; a hole here is the
-                // caller's, never an apply that skipped the bound.
-                if let TargetCondition::Time(time) = &self.target_condition {
-                    let mediantime = self
-                        .block_mediantimes
-                        .get(&block_hash)
-                        .copied()
-                        .ok_or(Error::MissingBlockMediantime { block_hash })?;
-                    if mediantime > *time {
-                        return Ok(ResolverState::Resolved(self.terminal_state()));
-                    }
-                }
-
                 // resolve.md "Apply update" step 1: a sourceHash that does not
                 // match the contemporary document is INVALID_DID_UPDATE, not
                 // LATE_PUBLISHING (which is reserved for the two
@@ -3665,8 +3669,8 @@ mod tests {
     /// in EFFECT at that time, not the batch's final version. Two chained
     /// updates arrive (v2 in block `aa`, v3 in block `bb`) with `mediantime(aa)
     /// < versionTime < mediantime(bb)`; the resolved document is v2, NOT v3.
-    /// The per-tuple versionTime check inside the apply branch aborts before
-    /// applying v3.
+    /// The per-tuple versionTime check on every tuple above the current
+    /// version aborts before applying v3.
     ///
     /// The header timestamps are set the OTHER way round — `aa` after
     /// versionTime, `bb` before it — so a comparison against the header time
@@ -3807,10 +3811,10 @@ mod tests {
     /// mediantime is AFTER versionTime, processed under the ascending
     /// (target_version_id, block_height) sort BEFORE the UNIQUE v3 in a block
     /// whose mediantime is BEFORE versionTime, must NOT abort the loop. v3 IS
-    /// still applied. This pins that the versionTime cutoff lives ONLY in the
-    /// unique-apply branch, never on a duplicate tuple — a naive
-    /// per-every-tuple check would abort at the late duplicate and wrongly
-    /// return v2.
+    /// still applied. This pins that the versionTime cutoff never fires on a
+    /// duplicate tuple (`targetVersionId <= current_version_id`), only on a
+    /// tuple above the current version — a naive per-every-tuple check would
+    /// abort at the late duplicate and wrongly return v2.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4,
     /// footnote 4.
@@ -3870,6 +3874,87 @@ mod tests {
             3,
             "a late-mediantime duplicate must not suppress the later within-versionTime unique v3"
         );
+    }
+
+    /// The versionTime bound gates ANY tuple whose targetVersionId is more
+    /// than current_version_id, not only the next version. Genesis (v1) plus
+    /// a lone v3 announcement — no v2 anywhere — with `versionTime` before
+    /// v3's block mediantime resolves v1: the walk stops at the bound before
+    /// the version-gap check, so the missing v2 is never a LATE_PUBLISHING.
+    /// A gate confined to the `== current + 1` apply branch would fall
+    /// through to the gap check and raise LATE_PUBLISHING instead.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
+    /// (first bullet: `targetVersionId` more than `current_version_id`),
+    /// evaluated before step 6.
+    #[test]
+    fn version_time_bound_gates_a_tuple_beyond_the_next_version() {
+        let (initial, _update1, update2) = chained_two_updates();
+        let mediantime_cc = 1_700_000_100i64;
+
+        // v3 @ height 300, block cc (mediantime > T); v2 is announced nowhere.
+        let tx_v3 = confirmed_signal_tx_in_block(
+            update2.hash(),
+            300,
+            1_700_000_050,
+            &"cc".repeat(32),
+            0xc3,
+        );
+        let mediantimes = HashMap::from([(block_hash_of(0xcc), ts(mediantime_cc))]);
+
+        let sidecar = SidecarData::new(None, vec![update2.clone()], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(mediantime_cc - 50)),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, requested) = try_drive_serving_blocks(resolver, vec![tx_v3], &mediantimes);
+
+        let result = result.expect("a skipped version announced after versionTime resolves v1");
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            1,
+            "the document in effect at versionTime is the genesis document"
+        );
+        assert!(
+            requested.contains(&block_hash_of(0xcc)),
+            "the bound is evaluated against the tuple's own block mediantime, got {requested:?}"
+        );
+    }
+
+    /// Control for the test above: the same lone v3 announcement with
+    /// `versionTime` AFTER its block mediantime passes the step-4 gate and
+    /// reaches the version-gap check, which raises LATE_PUBLISHING because
+    /// v2 was never announced.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
+    /// (no condition holds) then step 6, "Check update.targetVersionId".
+    #[test]
+    fn version_time_after_a_skipped_version_is_late_publishing() {
+        let (initial, _update1, update2) = chained_two_updates();
+        let mediantime_cc = 1_700_000_100i64;
+
+        let tx_v3 = confirmed_signal_tx_in_block(
+            update2.hash(),
+            300,
+            1_700_000_050,
+            &"cc".repeat(32),
+            0xc3,
+        );
+        let mediantimes = HashMap::from([(block_hash_of(0xcc), ts(mediantime_cc))]);
+
+        let sidecar = SidecarData::new(None, vec![update2.clone()], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(mediantime_cc + 50)),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, _) = try_drive_serving_blocks(resolver, vec![tx_v3], &mediantimes);
+
+        let err = result.expect_err("a version gap within versionTime is late publishing");
+        assert!(matches!(err, Error::LatePublishingError), "got {err:?}");
     }
 
     /// With neither `versionId` nor `versionTime` requested there is no time

@@ -29,7 +29,7 @@ above. Always name crates with `-p`.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 313 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 342 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 48 + 1 e2e |
 | `did-btcr2-cli` | 42 + 2 broken-pipe |
 | `chain-capture` | 175 |
