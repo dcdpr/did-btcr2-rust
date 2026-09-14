@@ -1048,6 +1048,7 @@ const KNOWN_TESTS: &[&str] = &[
     "resolver::tests::resolver_never_requests_blocks_without_expires",
     "resolver::tests::resolver_rejects_expires_before_the_fetched_mediantime",
     "resolver::tests::resolver_requests_block_mediantime_when_a_proof_carries_expires",
+    "resolver::tests::source_hash_mismatch_raises_invalid_did_update",
     "resolver::tests::unconfirmed_needed_signal_returns_err",
     "resolver::tests::unknown_signal_hash_raises_missing_update_data",
     "update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing",

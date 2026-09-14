@@ -29,7 +29,7 @@ above. Always name crates with `-p`.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 306 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 307 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 44 + 1 e2e |
 | `did-btcr2-cli` | 42 + 2 broken-pipe |
 | `chain-capture` | 173 |
@@ -477,7 +477,7 @@ Tests worth grepping for:
 | `capture_pump_*` (`src/resolver.rs`) | replay routing and its fail-loud behaviour |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 46 `#[test]` functions; `src/test_vectors.rs` holds 60.
+`src/resolver.rs` holds 47 `#[test]` functions; `src/test_vectors.rs` holds 60.
 
 ## 8. When `test-suite/` is absent
 

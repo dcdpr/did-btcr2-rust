@@ -326,12 +326,16 @@ impl Resolver {
                     return Ok(ResolverState::Resolved(self.terminal_state()));
                 }
 
-                // Step 10.2.1.
+                // resolve.md "Apply update" step 1: a sourceHash that does not
+                // match the contemporary document is INVALID_DID_UPDATE, not
+                // LATE_PUBLISHING (which is reserved for the two
+                // version-ordering cases in "Check update.targetVersionId").
                 if update.source_hash != contemporary_hash {
-                    return Err(Btcr2Error::late_publishing(
-                        update.source_hash,
-                        contemporary_hash,
-                    ))?;
+                    return Err(Btcr2Error::InvalidDidUpdate(format!(
+                        "update sourceHash `{}` does not match the contemporary document hash `{}`",
+                        hex::encode(update.source_hash.as_bytes()),
+                        hex::encode(contemporary_hash.as_bytes()),
+                    )))?;
                 }
 
                 // Step 10.2.2 - 10.2.3.
@@ -2858,28 +2862,22 @@ mod tests {
 
     /// Drive a resolver FSM to its terminal state over a single batch of
     /// Singleton-beacon transactions, mirroring `resolve_with_no_signals`'s
-    /// drive-to-terminal shape.
-    fn drive_to_resolved(resolver: Resolver, txs: Vec<Transaction>) -> ResolutionResult {
-        let ResolverState::Requests(next_state, _requests) = resolver
-            .resolve()
-            .expect("Init step yields beacon requests")
-        else {
+    /// drive-to-terminal shape and surfacing any FSM error to the caller.
+    fn try_drive_to_resolved(
+        resolver: Resolver,
+        txs: Vec<Transaction>,
+    ) -> Result<ResolutionResult, Error> {
+        let ResolverState::Requests(next_state, _requests) = resolver.resolve()? else {
             panic!("expected Requests from Init step");
         };
         let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
         transactions.insert(BeaconType::Singleton, txs);
-        let mut state = next_state
-            .process_responses(transactions)
-            .resolve()
-            .expect("processing the beacon signals resolves a step");
+        let mut state = next_state.process_responses(transactions).resolve()?;
         loop {
             match state {
-                ResolverState::Resolved(result) => break result,
+                ResolverState::Resolved(result) => break Ok(result),
                 ResolverState::Requests(next, _requests) => {
-                    state = next
-                        .process_responses(HashMap::new())
-                        .resolve()
-                        .expect("empty-signal step resolves");
+                    state = next.process_responses(HashMap::new()).resolve()?;
                 }
                 ResolverState::BlockRequests(..) => {
                     panic!("unexpected block request: no update in this test carries proof.expires")
@@ -2888,10 +2886,16 @@ mod tests {
         }
     }
 
+    /// [`try_drive_to_resolved`] for the callers that expect success.
+    fn drive_to_resolved(resolver: Resolver, txs: Vec<Transaction>) -> ResolutionResult {
+        try_drive_to_resolved(resolver, txs)
+            .expect("the resolver reaches a terminal state without error")
+    }
+
     /// Guard (Task 1 anti-vacuity): the in-memory chain's FIRST update's
     /// `source_hash` equals the locally-constructed initial document's `hash()`.
     /// This is what makes the apply loop actually APPLY update1 rather than
-    /// reject it at the sourceHash check (resolver.rs step 10.2.1) — the
+    /// reject it at the sourceHash check (resolve.md "Apply update" step 1) — the
     /// precondition for every full-drive test below to be
     /// non-vacuous.
     #[test]
@@ -3064,6 +3068,60 @@ mod tests {
             "confirmations must derive from the lowest-height (first-applied) announcement (100), \
              not raised by the later higher-height duplicate (200)"
         );
+    }
+
+    /// A sourceHash that does not match the contemporary document is
+    /// INVALID_DID_UPDATE (resolve.md "Apply update" step 1), not
+    /// LATE_PUBLISHING. The update's proof verifies and its targetHash is
+    /// correct for the initial document, so the sourceHash check is the ONLY
+    /// thing that can reject it: with the check removed, this update applies
+    /// and the resolver reaches version 2.
+    #[test]
+    fn source_hash_mismatch_raises_invalid_did_update() {
+        let (did, initial) = chain_initial_document();
+        let document = Document::from(initial.clone());
+        let vm_id = format!("{}#initialKey", did.encode());
+        let patch = chain_benign_patch(&vm_id);
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // Real targetHash for this patch over the initial document; the
+        // sourceHash is deliberately not the initial document's hash.
+        let (_, _, target_hash) = document
+            .construct_unsigned_update(&patch, v2)
+            .expect("v2 update constructs against the initial document");
+        let wrong_source_hash = Sha256Hash::from([0xab; 32]);
+        assert_ne!(
+            wrong_source_hash,
+            initial.hash(),
+            "the deliberately wrong sourceHash must differ from the initial document hash"
+        );
+        let unsigned = UnsecuredUpdate::construct(&patch, wrong_source_hash, target_hash, v2);
+        let update = crate::test_signing::sign_unsigned_update_for_test(
+            &unsigned,
+            &did,
+            &vm_id,
+            &chain_secret_key(),
+            None,
+            None,
+        );
+
+        let tx = confirmed_signal_tx(update.hash(), 100, 1_700_000_000, 0xd1);
+        let sidecar = SidecarData::new(None, vec![update], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: Some(300),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        let err = try_drive_to_resolved(resolver, vec![tx])
+            .expect_err("a sourceHash mismatch must reject the update");
+        match err {
+            Error::Btcr2Error(Btcr2Error::InvalidDidUpdate(msg)) => assert!(
+                msg.contains("sourceHash"),
+                "unexpected rejection message: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
     }
 
     /// The minted multi-update chain, replayed from the snapshot taken of the
