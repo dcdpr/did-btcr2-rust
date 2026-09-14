@@ -742,19 +742,32 @@ struct NextSignal {
     block_hash: BlockHash,
 }
 
+/// Where the walk stops, from `resolutionOptions` (resolve.md "Process Next
+/// Update" steps 1 and 4).
 #[derive(Debug)]
 enum TargetCondition {
+    /// `versionId`: stop once `current_version_id` reaches it.
     VersionId(NonZeroU64),
 
+    /// `versionTime`: stop before the first unique update whose block is
+    /// after it.
     Time(DateTime<Utc>),
+
+    /// Neither option: apply every confirmed update. There is no implicit
+    /// "now" bound — a block whose timestamp is ahead of this resolver's
+    /// clock (consensus allows up to two hours) still counts.
+    Latest,
 }
 
 impl From<&ResolutionOptions> for TargetCondition {
     fn from(resolution_options: &ResolutionOptions) -> Self {
-        if let Some(version) = resolution_options.version_id {
-            Self::VersionId(version)
-        } else {
-            Self::Time(resolution_options.version_time.unwrap_or_else(Utc::now))
+        match (
+            resolution_options.version_id,
+            resolution_options.version_time,
+        ) {
+            (Some(version), _) => Self::VersionId(version),
+            (None, Some(time)) => Self::Time(time),
+            (None, None) => Self::Latest,
         }
     }
 }
@@ -3223,6 +3236,42 @@ mod tests {
             u64::from(result.document_metadata.version_id),
             3,
             "a high-block_time duplicate must not suppress the later within-versionTime unique v3"
+        );
+    }
+
+    /// With neither `versionId` nor `versionTime` requested there is no time
+    /// cutoff at all: an update confirmed in a block whose header timestamp is
+    /// ahead of this resolver's clock (Bitcoin consensus allows up to two
+    /// hours) is still applied. A resolver that silently bounded the walk at
+    /// "now" would return version 1 here and a different answer minutes later.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
+    /// (the cutoff applies only "if `resolutionOptions.versionTime` is
+    /// provided").
+    #[test]
+    fn no_version_bound_applies_a_block_timestamped_in_the_future() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let ninety_minutes_ahead = (Utc::now() + chrono::Duration::minutes(90)).timestamp();
+        let tx = confirmed_signal_tx(update1.hash(), 100, ninety_minutes_ahead, 0xb4);
+
+        let sidecar = SidecarData::new(None, vec![update1], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_id: None,
+            version_time: None,
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        assert!(
+            matches!(resolver.target_condition, TargetCondition::Latest),
+            "no versionId and no versionTime is the unbounded walk"
+        );
+        let result = drive_to_resolved(resolver, vec![tx]);
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            2,
+            "an update in a block timestamped ahead of the resolver's clock must still apply"
         );
     }
 
