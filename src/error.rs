@@ -51,9 +51,6 @@ pub enum Btcr2Error {
     /// Invalid Update Proof
     InvalidUpdateProof(String),
 
-    /// ZCAP (Authorization Capabilities) related errors
-    Zcap(String),
-
     /// Problems when creating or applying a DID Update
     InvalidDidUpdate(String),
 
@@ -103,7 +100,6 @@ impl ProblemDetails for Btcr2Error {
             | Self::LatePublishingError(_)
             | Self::MissingUpdateData { .. }
             | Self::InvalidUpdateProof(_)
-            | Self::Zcap(_)
             | Self::InvalidDidUpdate(_)
             | Self::ProofVerification(_)
             | Self::ProofTransformation(_)
@@ -119,7 +115,6 @@ impl ProblemDetails for Btcr2Error {
             Self::LatePublishingError(_) => "LATE_PUBLISHING",
             Self::MissingUpdateData { .. } => "MISSING_UPDATE_DATA",
             Self::InvalidUpdateProof(_) => "INVALID_UPDATE_PROOF",
-            Self::Zcap(_) => "ZCAP",
             Self::InvalidDidUpdate(_) => "INVALID_DID_UPDATE",
             Self::ProofVerification(_) => "PROOF_VERIFICATION_ERROR",
             Self::ProofTransformation(_) => "PROOF_TRANSFORMATION_ERROR",
@@ -143,7 +138,6 @@ impl ProblemDetails for Btcr2Error {
                     format!("update_hash={}", hex::encode(update_hash.as_bytes()))
                 }
                 Self::InvalidUpdateProof(detail) => detail.clone(),
-                Self::Zcap(detail) => detail.clone(),
                 Self::InvalidDidUpdate(detail) => detail.clone(),
                 Self::ProofVerification(detail) => detail.clone(),
                 Self::ProofTransformation(detail) => detail.clone(),
@@ -296,7 +290,6 @@ mod tests {
             "PROVISIONAL",
             "ProofTransformation",
             "ProofGeneration",
-            "Zcap",
         ] {
             assert!(
                 !missing.contains(banned),
