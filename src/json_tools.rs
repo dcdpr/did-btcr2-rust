@@ -3,7 +3,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use onlyerror::Error;
 use serde_json::Value;
-use std::{fmt::Display, str::FromStr};
+use std::fmt::Display;
 
 #[derive(Error, Debug)]
 pub enum JsonError {
@@ -21,6 +21,11 @@ pub enum JsonError {
 
     /// Expected a JSON string
     ExpectedJsonStr,
+
+    /// A `controller` entry that does not conform to DID syntax (DID Core 1.1
+    /// §3.1: `did:` + a method name + `:` + a method-specific id).
+    #[error("controller `{0}` does not conform to DID syntax")]
+    InvalidControllerDid(String),
 
     /// Invalid Base58 encoding
     // retained pending a later error-vocabulary cleanup
@@ -50,6 +55,9 @@ pub enum ExpectedType {
     /// Either a JSON string or a JSON object — the two shapes a
     /// verification-relationship entry may take.
     StringOrObject,
+    /// Either a JSON string or a JSON array of strings — the two shapes
+    /// `controller` may take.
+    StringOrArray,
 }
 
 impl Display for ExpectedType {
@@ -61,6 +69,7 @@ impl Display for ExpectedType {
             ExpectedType::Array => write!(f, "Array"),
             ExpectedType::Object => write!(f, "Object"),
             ExpectedType::StringOrObject => write!(f, "string or object"),
+            ExpectedType::StringOrArray => write!(f, "string or array of strings"),
         }
     }
 }
@@ -147,11 +156,151 @@ pub(crate) fn string_from_value(value: &Value) -> Result<&str, JsonError> {
     value.as_str().ok_or(JsonError::ExpectedJsonStr)
 }
 
-/// Create a vector of any type from `value[key]` if it can be parsed from a string.
-pub(crate) fn vec_from_value<T>(value: &Value, key: &str) -> Result<Vec<T>, JsonError>
-where
-    T: FromStr,
-    JsonError: From<<T as FromStr>::Err>,
-{
-    vec_from_object(value, key, |v| Ok(string_from_value(v)?.parse()?))
+/// `value["controller"]` per DID Core 1.1 §5.1.2: absent, a string, or a set
+/// of strings, each of which conforms to DID syntax (§3.1) — any DID method,
+/// not only `did:btcr2`. A `did:btcr2:_` placeholder passes (`_` is an
+/// `idchar`), so intermediate documents parse with the same rule.
+pub(crate) fn controllers_from_object(value: &Value) -> Result<Vec<String>, JsonError> {
+    let entry = |item: &Value| -> Result<String, JsonError> {
+        let s = item.as_str().ok_or_else(|| {
+            JsonError::UnexpectedJsonType("controller".into(), ExpectedType::String)
+        })?;
+        if is_did_syntax(s) {
+            Ok(s.to_owned())
+        } else {
+            Err(JsonError::InvalidControllerDid(s.to_owned()))
+        }
+    };
+    match value.get("controller") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(item @ Value::String(_)) => Ok(vec![entry(item)?]),
+        Some(Value::Array(items)) => items.iter().map(entry).collect(),
+        Some(_) => Err(JsonError::UnexpectedJsonType(
+            "controller".into(),
+            ExpectedType::StringOrArray,
+        )),
+    }
+}
+
+/// DID Core 1.1 §3.1 DID syntax: `did:` `method-name` `:` `method-specific-id`,
+/// where `method-name` is one or more of `[a-z0-9]`, and `method-specific-id`
+/// is `*( *idchar ":" ) 1*idchar` with `idchar` = ALPHA / DIGIT / `.` / `-` /
+/// `_` / pct-encoded.
+pub(crate) fn is_did_syntax(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("did:") else {
+        return false;
+    };
+    let Some((method, id)) = rest.split_once(':') else {
+        return false;
+    };
+    if method.is_empty()
+        || !method
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return false;
+    }
+    // Every colon-separated segment may be empty except the last.
+    let Some(last) = id.rsplit(':').next() else {
+        return false;
+    };
+    !last.is_empty() && id.split(':').all(is_idchars)
+}
+
+/// `*idchar`: ALPHA / DIGIT / `.` / `-` / `_` / pct-encoded (`%` + two hex).
+fn is_idchars(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_' => i += 1,
+            b'%' => match bytes.get(i + 1..i + 3) {
+                Some([high, low]) if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() => {
+                    i += 3;
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// DID Core 1.1 §3.1: the method name is lowercase alphanumeric, the
+    /// method-specific id is colon-separated `idchar` runs whose last run is
+    /// non-empty, and `%HH` is the only escape.
+    #[test]
+    fn did_syntax_accepts_any_method_and_rejects_malformed_identifiers() {
+        for ok in [
+            "did:btcr2:k1qgpakaw4lwemekywf0lyth9hf6j8r2td7gqtrs4aztqfky50jnx7s8gfapup6",
+            "did:btcr2:_",
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "did:example:123456789abcdefghi",
+            "did:web:example.com:user:alice",
+            "did:example:a::b",
+            "did:example:%E2%9C%93",
+            "did:ex4mple:a-b.c_d",
+        ] {
+            assert!(is_did_syntax(ok), "{ok} is a DID");
+        }
+        for bad in [
+            "",
+            "did:",
+            "did:example",
+            "did:example:",
+            "did:Example:abc",
+            "did:ex ample:abc",
+            "did:example:abc:",
+            "did:example:ab c",
+            "did:example:ab#c",
+            "did:example:ab/c",
+            "did:example:ab?c",
+            "did:example:%G1",
+            "did:example:%4",
+            "https://example.com",
+            "btcr2:abc",
+        ] {
+            assert!(!is_did_syntax(bad), "{bad} is not a DID");
+        }
+    }
+
+    /// `controller` is absent, a string, or an array of strings, each a DID of
+    /// any method; anything else is a typed error naming the field.
+    #[test]
+    fn controllers_accept_a_string_or_an_array_of_dids() {
+        assert_eq!(
+            controllers_from_object(&json!({})).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            controllers_from_object(&json!({ "controller": null })).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            controllers_from_object(&json!({ "controller": "did:example:one" })).unwrap(),
+            vec!["did:example:one"]
+        );
+        assert_eq!(
+            controllers_from_object(&json!({ "controller": ["did:btcr2:_", "did:key:z6Mk"] }))
+                .unwrap(),
+            vec!["did:btcr2:_", "did:key:z6Mk"]
+        );
+        assert!(matches!(
+            controllers_from_object(&json!({ "controller": "not a did" })),
+            Err(JsonError::InvalidControllerDid(s)) if s == "not a did"
+        ));
+        assert!(matches!(
+            controllers_from_object(&json!({ "controller": ["did:example:one", 7] })),
+            Err(JsonError::UnexpectedJsonType(field, ExpectedType::String)) if field == "controller"
+        ));
+        assert!(matches!(
+            controllers_from_object(&json!({ "controller": { "id": "did:example:one" } })),
+            Err(JsonError::UnexpectedJsonType(field, ExpectedType::StringOrArray)) if field == "controller"
+        ));
+    }
 }

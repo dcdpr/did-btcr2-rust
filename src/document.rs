@@ -223,8 +223,11 @@ pub(crate) struct DocumentFields<T: DocumentMode> {
     /// Document context
     pub(crate) context: Vec<String>,
 
-    /// Document controller
-    controller: Vec<T>,
+    /// Document controller (DID Core 1.1 §5.1.2): a string or a set of
+    /// strings, each a DID of any method — not only `did:btcr2` — kept as
+    /// text because nothing in resolution reads it. Parsed by
+    /// `json_tools::controllers_from_object`.
+    controller: Vec<String>,
 
     pub(crate) verification_method: Vec<VerificationMethod>,
 
@@ -281,7 +284,7 @@ where
             string_from_value(id).map(ToString::to_string)
         })?;
 
-        let controller = vec_from_value(value, "controller")?;
+        let controller = controllers_from_object(value)?;
         // A verification method's declared `type` is carried verbatim.
         let verification_method =
             vec_from_object(value, "verificationMethod", verification_method_from_value)?;
@@ -2436,6 +2439,87 @@ mod tests {
             ),
             "empty-service genesis must surface a typed InvalidDidDocument (no panic), got: {:?}",
             result.map(|(did, _)| did)
+        );
+    }
+
+    /// `controller` per DID Core 1.1 §5.1.2 on a resolved (`T = Did`)
+    /// document: a single string, an array, and a foreign-method DID all
+    /// parse; a string that is not a DID and a non-string entry are typed
+    /// errors. On the resolve path this is what decides whether an update
+    /// that sets `controller` applies or is rejected as non-conformant.
+    #[test]
+    fn controller_accepts_a_string_or_a_set_of_any_method_dids() {
+        let (did, _vm_id, _initial, document) = source_documents();
+        let with_controller = |controller: Value| {
+            let mut json = document.as_ref().clone();
+            json["controller"] = controller;
+            Document::from_json_value(json)
+        };
+
+        with_controller(json!(did.encode())).expect("a string-form did:btcr2 controller parses");
+        with_controller(json!([did.encode()])).expect("an array-form controller parses");
+        with_controller(json!([
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        ]))
+        .expect("a foreign-method controller parses");
+        with_controller(json!("did:web:example.com:alice"))
+            .expect("a string-form foreign-method controller parses");
+
+        let err = with_controller(json!("alice")).expect_err("not a DID");
+        assert!(
+            matches!(&err, Error::JsonValue(json_tools::JsonError::InvalidControllerDid(s)) if s == "alice"),
+            "got {err:?}"
+        );
+        let err = with_controller(json!([did.encode(), 7])).expect_err("not a string");
+        assert!(
+            matches!(&err, Error::JsonValue(json_tools::JsonError::UnexpectedJsonType(f, _)) if f == "controller"),
+            "got {err:?}"
+        );
+    }
+
+    /// An update that sets a string-form or foreign-method `controller`
+    /// applies on the resolve path (`apply_update` re-parses the patched
+    /// document with the same rule), rather than failing as a non-conformant
+    /// document.
+    #[test]
+    fn apply_update_accepts_a_controller_patch() {
+        let (_did, vm_id, initial, document) = source_documents();
+        for controller in [
+            json!("did:web:example.com:alice"),
+            json!(["did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"]),
+        ] {
+            let patch: Patch = serde_json::from_value(json!([
+                { "op": "add", "path": "/controller", "value": controller }
+            ]))
+            .expect("a valid patch");
+            let update = document
+                .construct_signed_update(
+                    patch,
+                    NonZeroU64::new(2).expect("2 is non-zero"),
+                    &vm_id,
+                    source_secret_key(),
+                )
+                .expect("the controller patch constructs");
+            let mut target = initial.clone();
+            target
+                .apply_update(&update, &AnnouncingBlock::fixed())
+                .expect("the controller patch applies on the resolve path");
+            assert_eq!(target.as_ref()["controller"], controller);
+        }
+    }
+
+    /// `@context` stays an array: data-structures.md requires the array form
+    /// for a did:btcr2 document, and the method spec wins over DID Core's
+    /// allowance of a bare string.
+    #[test]
+    fn context_as_a_bare_string_is_still_rejected() {
+        let (_did, _vm_id, _initial, document) = source_documents();
+        let mut json = document.as_ref().clone();
+        json["@context"] = json!("https://www.w3.org/ns/did/v1.1");
+        let err = Document::from_json_value(json).expect_err("a string @context is rejected");
+        assert!(
+            matches!(&err, Error::JsonValue(json_tools::JsonError::UnexpectedJsonType(f, _)) if f == "@context"),
+            "got {err:?}"
         );
     }
 
