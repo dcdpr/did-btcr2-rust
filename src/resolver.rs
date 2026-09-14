@@ -6,8 +6,9 @@ use crate::canonical_hash::CanonicalHash as _;
 use crate::document::{
     AnnouncingBlock, InitialDocument, ResolutionOptions, ResolutionResult, SidecarData,
 };
+use crate::error::{Btcr2Error, ProblemDetails};
 use crate::update::UnsecuredUpdate;
-use crate::{error::Btcr2Error, identifier::Sha256Hash, update::Update};
+use crate::{identifier::Sha256Hash, update::Update};
 use chrono::{DateTime, Utc};
 use esploda::bitcoin::{BlockHash, opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
@@ -16,8 +17,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU64;
 
 /// Errors raised while the resolver FSM walks beacon signals and applies
-/// updates. A module-local sentinel enum; spec-conformant errors are produced
-/// via the [`From<Error>`] conversion into [`Btcr2Error`].
+/// updates.
+///
+/// Two kinds live here. Spec errors — the [`Btcr2Error`] pass-through and the
+/// two sentinels the walk raises itself — carry a problem-details body via
+/// [`ProblemDetails`]. Driver preconditions (`MissingBlockMediantime`) do not:
+/// they mean the caller driving the sans-I/O loop did not supply what a
+/// request asked for, which is a bug in the driver and not a statement about
+/// the DID, so they are deliberately not folded into the spec vocabulary.
 #[derive(Error, Debug)]
 pub enum Error {
     /// Update hash does not match
@@ -32,7 +39,8 @@ pub enum Error {
     /// The resolver asked for the `mediantime` of the block that confirmed a
     /// beacon signal (the update's proof carries `expires`) and the caller's
     /// answer did not include it. The check cannot run, so resolution stops
-    /// rather than applying an update it could not check.
+    /// rather than applying an update it could not check. A driver
+    /// precondition, not a spec error: the update has not been judged.
     #[error("mediantime of block {block_hash} was requested but not supplied")]
     MissingBlockMediantime {
         /// Hash of the block whose mediantime is missing.
@@ -40,32 +48,28 @@ pub enum Error {
     },
 }
 
-/// Boundary conversion from the module-local resolver [`enum@Error`] to the
-/// spec-error vocabulary [`Btcr2Error`]. This lets the resolver hot path
-/// surface spec-conformant Problem Details to callers without leaking the
-/// internal sentinel enum.
+/// Problem details for the spec-level outcomes of a walk; `None` for a driver
+/// precondition, which has no spec code because it is not a resolution
+/// result.
 ///
 /// Note: `MISSING_UPDATE_DATA` is NOT produced here. The sidecar-miss site in
 /// `Resolver::process_beacon_signals` raises
 /// `Btcr2Error::MissingUpdateData { update_hash }` directly, because only the
-/// call site has the missed `update_hash` (the beacon signal bytes) in scope
-/// Routing it through this `From` impl would lose the hash.
-impl From<Error> for Btcr2Error {
-    fn from(err: Error) -> Self {
-        match err {
+/// call site has the missed `update_hash` (the beacon signal bytes) in scope.
+impl ProblemDetails for Error {
+    fn details(&self) -> Option<serde_json::Value> {
+        match self {
             Error::UpdateHashMismatch => Btcr2Error::InvalidDidUpdate(
                 "update hash does not match the expected beacon-signal hash".into(),
-            ),
+            )
+            .details(),
             Error::LatePublishingError => Btcr2Error::LatePublishingError(
                 "late publishing detected at update sort step".into(),
-            ),
+            )
+            .details(),
             // Pass-through: the inner spec error is already authoritative.
-            Error::Btcr2Error(e) => e,
-            // The same fail-closed disposition `apply_update` takes when a
-            // proof carries `expires` and the mediantime is unavailable.
-            Error::MissingBlockMediantime { block_hash } => Btcr2Error::InvalidDidUpdate(format!(
-                "proof expires could not be checked: mediantime of block {block_hash} was not supplied"
-            )),
+            Error::Btcr2Error(e) => e.details(),
+            Error::MissingBlockMediantime { .. } => None,
         }
     }
 }
@@ -532,8 +536,7 @@ impl Resolver {
                         //
                         // raise the spec error directly here,
                         // where `signal_bytes` (the missed update hash) is in
-                        // scope — NOT via `From<resolver::Error>`, which would
-                        // lose the hash.
+                        // scope — a sentinel mapped later would lose the hash.
                         self.update_lookup_table
                             .get(&beacon_signal.signal_bytes)
                             .cloned()
@@ -3116,9 +3119,40 @@ mod tests {
             }
             other => panic!("expected MissingBlockMediantime, got {other:?}"),
         }
+        // A driver precondition, not a judgement of the update: it carries no
+        // spec problem-details body, so it can never be reported as
+        // INVALID_DID_UPDATE.
         assert!(
-            matches!(Btcr2Error::from(err), Btcr2Error::InvalidDidUpdate(_)),
-            "the spec-error mapping is INVALID_DID_UPDATE"
+            err.details().is_none(),
+            "a missing mediantime is a driver error with no spec code, got {:?}",
+            err.details()
+        );
+        assert!(
+            err.to_string().contains(&zero_block_hash().to_string()),
+            "the message names the block that was not supplied: {err}"
+        );
+    }
+
+    /// The spec-level outcomes of a walk keep their problem-details bodies:
+    /// the pass-through and the late-publishing sentinel both render the
+    /// registered `LATE_PUBLISHING` type.
+    #[test]
+    fn walk_errors_carry_their_spec_problem_details() {
+        let sentinel = Error::LatePublishingError;
+        assert_eq!(
+            sentinel.details().expect("late publishing has a body")["type"]
+                .as_str()
+                .and_then(|t| t.rsplit('#').next()),
+            Some("LATE_PUBLISHING")
+        );
+        let passthrough = Error::Btcr2Error(Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash::from([0u8; 32]),
+        });
+        assert_eq!(
+            passthrough.details().expect("a spec error has a body")["type"]
+                .as_str()
+                .and_then(|t| t.rsplit('#').next()),
+            Some("MISSING_UPDATE_DATA")
         );
     }
 
