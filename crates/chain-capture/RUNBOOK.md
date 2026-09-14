@@ -516,11 +516,12 @@ Record them here after the session, so anyone who encounters them knows what
 they are:
 
 - `clean-rotating-beacons`:
-  `did:btcr2:k1qgp08t8dgqtnrtw22uchlm5lqkjr06kxttuvq2lnztn53w9vsv04t6sf422fm`
+  `did:btcr2:k1qgp74wu5cs4lq3vzxsgez4hjl9g23kf88gzl4lu2wpttv4y225zzk5sz2xa24`
   — minted on the disposable Polar regtest chain at blocks 760 / 762 / 764,
-  captured at tip 769, resolves to version 4 and is deactivated.
+  captured at tip 769, resolves to version 4 and is deactivated. The version 3
+  announcement (block 762) is on the P2WPKH beacon the version 2 update added.
 - `late-publishing-fork`:
-  `did:btcr2:k1qgp8yf8ekephjva0atcepjn9ym2fks0dnxje3385sjdhfpx6vtywpzcw922ye`
+  `did:btcr2:k1qgph42l3n43ktt53mp7tnaty6wkddyy34caxkmgzkrw7zt0ee7pmp8sxx05pd`
   — minted on the same chain at blocks 771 / 773, captured at tip 778, two
   conflicting version 2 announcements from one beacon.
 

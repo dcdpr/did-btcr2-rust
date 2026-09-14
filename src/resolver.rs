@@ -4571,50 +4571,6 @@ mod tests {
             f.tip_height
         );
 
-        // --- The mid-walk re-scan and the deactivation short-circuit, observed
-        // --- by what WAS and was NOT asked -----------------------------------
-        //
-        // The v2 update adds a FOURTH beacon service. The beacon set is
-        // re-checked after every applied update, so the walk asks for that
-        // beacon's history right after v2 applies (round 2), before v3 is
-        // taken. The deactivating v4 then resolves the document immediately:
-        // no round follows it. Round 2's address is read off the capture — it
-        // is the one captured key the genesis round did not ask for — so a
-        // re-mint does not touch this test. A resolver that did not stop at
-        // `deactivated` would issue a third round and be caught here.
-        assert_eq!(
-            rounds.len(),
-            2,
-            "{id}: the beacon v2 adds is scanned after v2 applies, and applying the \
-             deactivating update must resolve immediately and process no further beacon \
-             signals — rounds: {rounds:?}"
-        );
-        let mut requested = rounds[0].clone();
-        requested.sort();
-        let announced: Vec<String> = addresses.iter().map(|a| (*a).to_string()).collect();
-        assert_eq!(
-            requested, announced,
-            "{id}: the first round must request exactly the genesis beacon addresses the \
-             three updates were announced from"
-        );
-        let added: Vec<String> = f
-            .addresses
-            .keys()
-            .filter(|address| !rounds[0].contains(address))
-            .cloned()
-            .collect();
-        assert_eq!(
-            added.len(),
-            1,
-            "{id}: the capture holds exactly one address beyond the genesis beacons — the \
-             beacon v2 adds; captured keys: {:?}",
-            f.addresses.keys().collect::<Vec<_>>()
-        );
-        assert_eq!(
-            rounds[1], added,
-            "{id}: the second round must request exactly the beacon the v2 update added"
-        );
-
         // --- The genesis reference ------------------------------------------
         //
         // An independent producer of the pre-walk state: same DID, same options,
@@ -4625,6 +4581,73 @@ mod tests {
             genesis.document_metadata.version_id.get(),
             1,
             "{id}: a resolve with no signals fed is the genesis state"
+        );
+        let genesis_beacons: BTreeSet<String> = genesis
+            .document
+            .beacons()
+            .map(|beacon| beacon.descriptor.to_string())
+            .collect();
+
+        // --- The mid-walk re-scan and the deactivation short-circuit, observed
+        // --- by what WAS and was NOT asked -----------------------------------
+        //
+        // The v2 update adds a FOURTH beacon service and v3 is announced from
+        // it, between two announcements from genesis beacons. The beacon set
+        // is re-checked after every applied update, so the walk asks for the
+        // added beacon's history right after v2 applies (round 2) and takes
+        // v3 from that answer before v4. The deactivating v4 then resolves
+        // the document immediately: no round follows it. Everything is read
+        // off the capture — the genesis beacons off the no-signal resolve, the
+        // added one as the announcing address the genesis document does not
+        // carry — so a re-mint does not touch this test. A resolver that did
+        // not re-scan would meet v4 with version 2 in force and raise
+        // LATE_PUBLISHING above; one that did not stop at `deactivated` would
+        // issue a third round and be caught here.
+        assert_eq!(
+            rounds.len(),
+            2,
+            "{id}: the beacon v2 adds is scanned after v2 applies, and applying the \
+             deactivating update must resolve immediately and process no further beacon \
+             signals — rounds: {rounds:?}"
+        );
+        let requested: BTreeSet<String> = rounds[0].iter().cloned().collect();
+        assert_eq!(
+            requested, genesis_beacons,
+            "{id}: the first round must request exactly the genesis document's beacon \
+             addresses"
+        );
+        let added: Vec<&str> = addresses
+            .iter()
+            .copied()
+            .filter(|address| !genesis_beacons.contains(*address))
+            .collect();
+        assert_eq!(
+            added.len(),
+            1,
+            "{id}: exactly one announcement must come from a beacon the genesis document \
+             does not carry — the one v2 adds; announcing addresses: {addresses:?}"
+        );
+        let added = added[0];
+        assert_eq!(
+            rounds[1],
+            vec![added.to_string()],
+            "{id}: the second round must request exactly the beacon the v2 update added"
+        );
+        let added_height = f
+            .signals
+            .iter()
+            .find(|s| s.address == added)
+            .map(|s| s.block_height)
+            .expect("the added beacon announces exactly one signal");
+        let (first, last) = (
+            *heights.iter().next().expect("three heights"),
+            *heights.iter().next_back().expect("three heights"),
+        );
+        assert!(
+            first < added_height && added_height < last,
+            "{id}: the announcement from the added beacon must sit BETWEEN the two \
+             announcements from genesis beacons, or the re-scan is not what sequences \
+             this history — added at {added_height}, genesis at {first} and {last}"
         );
 
         // --- versionId = 1: the documented Init-time short-circuit -----------

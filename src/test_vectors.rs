@@ -1834,6 +1834,7 @@ pub(crate) const MINTED_SCENARIOS: &[MintedScenario] = &[
         test: "minted_chain_sequences_updates_across_rotating_beacons",
         covers: &[
             "multi-update sequencing across rotating beacons",
+            "an update announced from a beacon an earlier update added, scanned mid-walk",
             "on-chain deactivation short-circuit",
             "mid-walk version bounds on a four-version chain",
         ],
@@ -3279,21 +3280,26 @@ fn chain_fixture_minted_only_fields_are_absent_on_a_vendor_capture() {
 /// all signals. Both scan every entry rather than trusting the capture's order.
 #[test]
 fn chain_fixture_latest_signal_and_earliest_block_time_scan_every_signal() {
-    let fixture = read_chain_fixture("minted/clean-rotating-beacons");
+    let mut fixture = read_chain_fixture("minted/clean-rotating-beacons");
     assert!(
         fixture.signals.len() >= 3,
         "the clean scenario announces three updates"
     );
 
-    // The capture is not in height order, so a `latest_signal` that trusted the
-    // recorded order would pick the wrong one.
+    // The capture writes signals in address order, which may or may not agree
+    // with height order on any given mint. Put them out of height order HERE,
+    // so a `latest_signal` that trusted the recorded order would pick the
+    // wrong one no matter what the capture happened to produce.
+    fixture
+        .signals
+        .sort_by_key(|s| std::cmp::Reverse(s.block_height));
     let heights: Vec<u32> = fixture.signals.iter().map(|s| s.block_height).collect();
     let mut sorted = heights.clone();
     sorted.sort_unstable();
     assert_ne!(
         heights, sorted,
-        "this fixture's signals are deliberately not in height order, which is what \
-         makes the scan load-bearing: {heights:?}"
+        "the signals under test are not in height order, which is what makes the scan \
+         load-bearing: {heights:?}"
     );
 
     let applied = fixture

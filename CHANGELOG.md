@@ -58,7 +58,9 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - The two minted chain fixtures are re-minted with settled tips (six
   confirmations on the last announcement) and carry their announcements'
   blocks; their replay tests run under the default `minConf` and their
-  `versionTime` probes run.
+  `versionTime` probes run. The clean scenario's third update is announced
+  from the beacon its second update added, so its replay exercises the
+  mid-walk beacon re-scan on real transactions.
 
 ### Deprecated
 

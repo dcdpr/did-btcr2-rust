@@ -32,7 +32,7 @@ above. Always name crates with `-p`.
 | `did-btcr2` | 347 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 54 + 1 e2e |
 | `did-btcr2-cli` | 43 + 2 broken-pipe |
-| `chain-capture` | 184 |
+| `chain-capture` | 185 |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 
@@ -82,6 +82,7 @@ minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counte
   minted/clean-rotating-beacons (minted on regtest)
     driven by minted_chain_sequences_updates_across_rotating_beacons
     covers: multi-update sequencing across rotating beacons
+    covers: an update announced from a beacon an earlier update added, scanned mid-walk
     covers: on-chain deactivation short-circuit
     covers: mid-walk version bounds on a four-version chain
   minted/late-publishing-fork (minted on regtest)
@@ -354,7 +355,7 @@ submodule is not checked out.
 
 | Scenario | Driver test | Covers | Expected |
 |---|---|---|---|
-| `minted/clean-rotating-beacons` | `minted_chain_sequences_updates_across_rotating_beacons` | multi-update sequencing across rotating beacons; on-chain deactivation short-circuit; mid-walk version bounds on a four-version chain | `didDocumentMetadata` `{versionId: "4", deactivated: true}` |
+| `minted/clean-rotating-beacons` | `minted_chain_sequences_updates_across_rotating_beacons` | multi-update sequencing across rotating beacons; an update announced from a beacon an earlier update added, scanned mid-walk; on-chain deactivation short-circuit; mid-walk version bounds on a four-version chain | `didDocumentMetadata` `{versionId: "4", deactivated: true}` |
 | `minted/late-publishing-fork` | `minted_fork_raises_late_publishing` | late publishing detected against a real on-chain fork | `{"error": "LATE_PUBLISHING"}` |
 
 ## 6. Chain fixtures
