@@ -9,7 +9,9 @@ use crate::cryptosuite::CryptoSuite;
 use crate::error::{Btcr2Error, ProblemDetails};
 use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network, Sha256Hash};
 use crate::key::{PublicKey, PublicKeyExt as _};
-use crate::verification::{VerificationMethod, VerificationMethodId, VerificationRelationship};
+use crate::verification::{
+    EmbeddedVerificationMethod, VerificationMethod, VerificationMethodId, VerificationRelationship,
+};
 use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofType};
 use crate::zcap::{derive_root_capability, proof::ProofPurpose};
 use crate::{
@@ -135,8 +137,8 @@ mod document_mode {
 /// `Vec<U>` — unconstrained.
 ///
 /// The supertraits are what `Sequence<U>` demands of its element type, so a
-/// relationship entry parameterised over the mode (`VerificationRelationship<T>`)
-/// can itself be a sequence element.
+/// relationship entry (`VerificationRelationship`) can itself be a sequence
+/// element.
 pub(crate) trait DocumentMode:
     document_mode::Sealed + Clone + std::fmt::Debug + PartialEq + Eq
 {
@@ -224,10 +226,10 @@ pub(crate) struct DocumentFields<T: DocumentMode> {
     // reference into `verification_method` or an embedded verification method
     // (DID Core 1.1 §5.3.1); only `capability_invocation` is consulted when an
     // update proof is checked, see `DocumentFields<Did>::invoking_public_key`.
-    authentication: Vec<VerificationRelationship<T>>,
-    assertion_method: Vec<VerificationRelationship<T>>,
-    capability_invocation: <T as DocumentMode>::Sequence<VerificationRelationship<T>>,
-    capability_delegation: Vec<VerificationRelationship<T>>,
+    authentication: Vec<VerificationRelationship>,
+    assertion_method: Vec<VerificationRelationship>,
+    capability_invocation: <T as DocumentMode>::Sequence<VerificationRelationship>,
+    capability_delegation: Vec<VerificationRelationship>,
 
     pub(crate) service: <T as DocumentMode>::Sequence<Beacon>,
 
@@ -250,7 +252,7 @@ where
     T: FromStr
         + TryNetworkExt
         + DocumentMode
-        + SequenceFromVec<VerificationRelationship<T>>
+        + SequenceFromVec<VerificationRelationship>
         + SequenceFromVec<Beacon>,
     Error: From<<T as FromStr>::Err>,
     json_tools::JsonError: From<<T as FromStr>::Err> + From<<VerificationMethodId as FromStr>::Err>,
@@ -273,13 +275,10 @@ where
             string_from_value(id).map(ToString::to_string)
         })?;
 
-        // TODO: All of these are optional. Only `vec_from_value` has been fixed
         let controller = vec_from_value(value, "controller")?;
-        // Lenient envelope: carry the method's declared `type` verbatim rather
-        // than hard-coding "Multikey". A present, well-formed publicKeyMultibase
-        // is retained regardless of the declared type; strictness is deferred to
-        // VerificationMethod::public_key (which rejects non-Multikey at the
-        // crypto-trust boundary). D-09b.
+        // A verification method's declared `type` is carried verbatim and never
+        // gates key use: the resolve path reads `publicKeyMultibase` (resolve.md,
+        // "Check update.proof").
         let verification_method =
             vec_from_object(value, "verificationMethod", verification_method_from_value)?;
         let authentication = vec_from_object(value, "authentication", |entry| {
@@ -332,7 +331,7 @@ where
         // NonEmpty (returning Btcr2Error::InvalidDidDocument on empty);
         // for T = String this is a no-op pass-through.
         let capability_invocation =
-            <T as SequenceFromVec<VerificationRelationship<T>>>::sequence_from_vec(
+            <T as SequenceFromVec<VerificationRelationship>>::sequence_from_vec(
                 capability_invocation_vec,
                 "capabilityInvocation",
             )?;
@@ -371,15 +370,13 @@ where
     }
 }
 
-/// Parse one verification method object (`id`, `type`, `controller`,
-/// `publicKeyMultibase`), whether it sits in `verificationMethod` or is
-/// embedded in a relationship array.
+/// Parse one entry of the top-level `verificationMethod` array (`id`, `type`,
+/// `controller`, `publicKeyMultibase`).
 ///
-/// Lenient envelope: the declared `type` is carried verbatim rather than
-/// hard-coded to "Multikey". A present, well-formed `publicKeyMultibase` is
-/// retained regardless of the declared type; strictness is deferred to
-/// `VerificationMethod::public_key`, which rejects non-Multikey at the
-/// crypto-trust boundary.
+/// Entries of the top-level `verificationMethod` array are decoded eagerly as
+/// secp256k1 keys with a `T` controller; relationship-array objects go through
+/// `relationship_from_value` instead. The declared `type` is carried verbatim
+/// and does not gate key use.
 fn verification_method_from_value<T>(
     method: &Value,
 ) -> Result<VerificationMethod<T>, json_tools::JsonError>
@@ -401,22 +398,39 @@ where
 /// reference (possibly a relative DID URL), a JSON object is an embedded
 /// verification method (DID Core 1.1 §5.3.1). Any other JSON type is a typed
 /// error naming `field`, never a panic.
-fn relationship_from_value<T>(
+///
+/// An embedded object is retained by its `id` and its raw `publicKeyMultibase`
+/// only: DID Core allows any verification method type there (an Ed25519 key,
+/// a `publicKeyJwk` with no multibase form, a foreign controller), and none
+/// of that is inspected unless a proof invokes the entry — see
+/// `DocumentFields<Did>::invoking_public_key`. A present `publicKeyMultibase`
+/// must be a JSON string.
+fn relationship_from_value(
     entry: &Value,
     field: &str,
-) -> Result<VerificationRelationship<T>, json_tools::JsonError>
-where
-    T: FromStr,
-    json_tools::JsonError: From<<T as FromStr>::Err> + From<<VerificationMethodId as FromStr>::Err>,
-{
+) -> Result<VerificationRelationship, json_tools::JsonError> {
+    use json_tools::{ExpectedType, JsonError, string_from_object};
+
     match entry {
         Value::String(reference) => Ok(VerificationRelationship::Reference(reference.parse()?)),
         Value::Object(_) => Ok(VerificationRelationship::Embedded(
-            verification_method_from_value(entry)?,
+            EmbeddedVerificationMethod {
+                id: string_from_object(entry, "id")?.parse()?,
+                public_key_multibase: match entry.get("publicKeyMultibase") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(_) => {
+                        return Err(JsonError::UnexpectedJsonType(
+                            format!("{field}.publicKeyMultibase"),
+                            ExpectedType::String,
+                        ));
+                    }
+                },
+            },
         )),
-        _ => Err(json_tools::JsonError::UnexpectedJsonType(
+        _ => Err(JsonError::UnexpectedJsonType(
             field.into(),
-            json_tools::ExpectedType::StringOrObject,
+            ExpectedType::StringOrObject,
         )),
     }
 }
@@ -732,11 +746,13 @@ impl DocumentFields<Did> {
     /// its absolute form. The first entry in `capabilityInvocation` order that
     /// identifies the id wins, and the key is read from that entry only.
     ///
-    /// For an embedded object the key is the object's `publicKeyMultibase`;
-    /// for a reference it is the `publicKeyMultibase` of the
-    /// `verificationMethod` entry whose (absolutized) `id` equals the reference.
-    /// Both read the parsed `public_key` field directly, as the resolve path
-    /// always has — not the strict `VerificationMethod::public_key` accessor.
+    /// For an embedded object the key is decoded from the object's
+    /// `publicKeyMultibase` here, at the point of use, so an embedded method
+    /// of another key type elsewhere in the document never blocks parsing and
+    /// is rejected as `INVALID_DID_UPDATE` only when a proof invokes it. For a
+    /// reference it is the already-decoded key of the `verificationMethod`
+    /// entry whose (absolutized) `id` equals the reference. The declared
+    /// `type` is not consulted (resolve.md reads `publicKeyMultibase`).
     ///
     /// Rejected with the spec-literal INVALID_DID_UPDATE
     /// (`Btcr2Error::InvalidDidUpdate`) when no entry identifies the id, or
@@ -767,7 +783,19 @@ impl DocumentFields<Did> {
             })?;
 
         match entry {
-            VerificationRelationship::Embedded(method) => Ok(method.public_key),
+            VerificationRelationship::Embedded(method) => {
+                let multikey = method.public_key_multibase.as_deref().ok_or_else(|| {
+                    Btcr2Error::InvalidDidUpdate(
+                        "the invoking capabilityInvocation entry has no publicKeyMultibase".into(),
+                    )
+                })?;
+                PublicKey::from_multikey(multikey).map_err(|e| {
+                    Btcr2Error::InvalidDidUpdate(format!(
+                        "the invoking capabilityInvocation entry's publicKeyMultibase is not a \
+                         secp256k1 Multikey: {e}"
+                    ))
+                })
+            }
             VerificationRelationship::Reference(_) => self
                 .verification_method
                 .iter()
@@ -889,6 +917,11 @@ impl Document {
     /// project correctness guard that prevents emitting a signed update nobody
     /// could verify (see adrs/0006).
     ///
+    /// The proof's `verificationMethod` is the id resolved against the
+    /// document `id` (an absolute DID URL), whatever form the caller passed,
+    /// so any verifier — literal-comparing or resolving — identifies the same
+    /// entry.
+    ///
     /// Spec: did-btcr2/src/operations/update.md — the capabilityInvocation
     /// lookup and the Data Integrity Config shape.
     pub fn construct_signed_update(
@@ -936,7 +969,7 @@ impl Document {
             id: None,
             proof_type: ProofType::DataIntegrityProof,
             proof_purpose: ProofPurpose::CapabilityInvocation,
-            verification_method: verification_method_id.to_string(),
+            verification_method: absolutize_did_url(verification_method_id, &self.fields.id),
             cryptosuite: CryptoSuiteName::Jcs,
             created: None,
             expires: None,
@@ -1838,30 +1871,6 @@ mod tests {
         service.as_object_mut().unwrap().remove("type");
 
         assert!(Document::from_json_value(did_document).is_err());
-    }
-
-    /// D-09b: a verification method whose `type` is not `"Multikey"` is retained
-    /// in the parsed document (lenient envelope), but its key cannot be
-    /// extracted for proof verification (strict crypto-trust boundary).
-    #[test]
-    fn non_multikey_vm_is_retained_but_key_extraction_fails() {
-        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
-        else {
-            return;
-        };
-        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
-        let mut did_document = resolve_output["didDocument"].clone();
-
-        did_document["verificationMethod"].as_array_mut().unwrap()[0]["type"] =
-            json!("Ed25519VerificationKey2020");
-
-        let doc = Document::from_json_value(did_document).expect("parse must succeed");
-        let vm = &doc.fields.verification_method[0];
-        assert_eq!(vm.type_, "Ed25519VerificationKey2020");
-        assert!(matches!(
-            vm.public_key(),
-            Err(crate::verification::Error::UnsupportedVerificationMethod)
-        ));
     }
 
     // Drives the EXTERNAL x1 q26jeds9 vector. The vector's
@@ -3599,7 +3608,7 @@ mod tests {
 
         let parsed = InitialDocument::from_json_value(json)
             .expect("a document with embedded relationship entries parses");
-        let arrays: [&[VerificationRelationship<Did>]; 4] = [
+        let arrays: [&[VerificationRelationship]; 4] = [
             &parsed.fields.authentication,
             &parsed.fields.assertion_method,
             &parsed
@@ -3755,9 +3764,11 @@ mod tests {
     }
 
     /// data-structures.md: a relative DID URL in capabilityInvocation is
-    /// resolved against the document id before comparison, so `#initialKey`
-    /// identifies a proof whose verificationMethod is also `#initialKey`, and
-    /// the referenced entry (absolute `<did>#initialKey`) supplies the key.
+    /// resolved against the document id before comparison. The document's
+    /// entry stays the relative `#initialKey` while the produced proof carries
+    /// the absolute `<did>#initialKey`, so the resolve-side lookup matches an
+    /// absolute proof id against a relative document entry, and the referenced
+    /// verification method (absolute `<did>#initialKey`) supplies the key.
     #[test]
     fn apply_update_resolves_relative_did_url() {
         let (did, vm_id, _initial, _document) = source_documents();
@@ -3774,20 +3785,24 @@ mod tests {
                 source_secret_key(),
             )
             .expect("construction with a relative verificationMethod id succeeds");
-        assert_eq!(update.proof.inner.verification_method, "#initialKey");
+        assert_eq!(
+            update.proof.inner.verification_method,
+            format!("{}#initialKey", did.encode())
+        );
 
         let mut target =
             InitialDocument::from_json_value(json).expect("the apply target is conformant");
         target
             .apply_update(&update, &AnnouncingBlock::fixed())
-            .expect("a relative proof verificationMethod resolves against the document id");
+            .expect("an absolute proof verificationMethod matches a relative document entry");
         assert_eq!(target.hash(), update.target_hash);
     }
 
     /// update.md: the construction side applies the same relative-URL
     /// resolution — `#initialKey` on the call site matches the absolute
-    /// `<did>#initialKey` reference the document carries, and the proof
-    /// carries the caller's string verbatim.
+    /// `<did>#initialKey` reference the document carries — and the proof
+    /// carries the absolutized id, never the caller's relative string, so a
+    /// literal-comparing verifier identifies the same entry.
     #[test]
     fn construct_signed_update_resolves_relative_did_url() {
         let (did, vm_id, _initial, _document) = source_documents();
@@ -3803,7 +3818,10 @@ mod tests {
                 source_secret_key(),
             )
             .expect("a relative verificationMethod id resolves against the document id");
-        assert_eq!(update.proof.inner.verification_method, "#initialKey");
+        assert_eq!(
+            update.proof.inner.verification_method,
+            format!("{}#initialKey", did.encode())
+        );
     }
 
     /// T-18-11: an embedded object identifies the proof only by its own `id`.
@@ -3833,6 +3851,235 @@ mod tests {
                 "rejection must be the capabilityInvocation lookup; got: {msg}"
             ),
             other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// An Ed25519 Multikey (prefix `0xed01`, 32-byte key): a valid DID Core
+    /// verification method that is not a secp256k1 key.
+    const ED25519_MULTIKEY: &str = "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+
+    /// An embedded Ed25519 verification method with a `did:key` controller —
+    /// the ordinary DIDComm `authentication` shape.
+    fn ed25519_method_json(did: &Did) -> Value {
+        serde_json::json!({
+            "id": format!("{}#ed", did.encode()),
+            "type": "Ed25519VerificationKey2020",
+            "controller": format!("did:key:{ED25519_MULTIKEY}"),
+            "publicKeyMultibase": ED25519_MULTIKEY,
+        })
+    }
+
+    /// An embedded JWK verification method with no `publicKeyMultibase` at all
+    /// and a foreign controller.
+    fn jwk_method_json(did: &Did) -> Value {
+        serde_json::json!({
+            "id": format!("{}#jwk", did.encode()),
+            "type": "JsonWebKey2020",
+            "controller": "did:example:other",
+            "publicKeyJwk": {"kty": "OKP", "crv": "Ed25519", "x": "AAAA"},
+        })
+    }
+
+    /// DID Core 1.1 §5.3.1: `authentication`, `assertionMethod` and
+    /// `capabilityDelegation` may embed any verification method — an Ed25519
+    /// key with a `did:key` controller, a JWK with no `publicKeyMultibase` —
+    /// and the document still parses and resolves. The objects are retained
+    /// by id and raw `publicKeyMultibase`; nothing about them is decoded
+    /// because no proof invokes them.
+    #[test]
+    fn relationship_arrays_accept_foreign_embedded_methods() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let ed_id = format!("{}#ed", did.encode());
+        let jwk_id = format!("{}#jwk", did.encode());
+        let mut json = document_json(&did, &vm_id);
+        for field in ["authentication", "assertionMethod", "capabilityDelegation"] {
+            json[field] =
+                serde_json::json!([vm_id, ed25519_method_json(&did), jwk_method_json(&did)]);
+        }
+
+        let parsed = InitialDocument::from_json_value(json.clone())
+            .expect("a document with foreign embedded relationship entries parses");
+        let arrays: [(&str, &[VerificationRelationship]); 3] = [
+            ("authentication", &parsed.fields.authentication),
+            ("assertionMethod", &parsed.fields.assertion_method),
+            ("capabilityDelegation", &parsed.fields.capability_delegation),
+        ];
+        for (field, entries) in arrays {
+            assert_eq!(entries.len(), 3, "{field}");
+            assert!(
+                matches!(entries[0], VerificationRelationship::Reference(_)),
+                "{field}[0]"
+            );
+            assert_eq!(
+                entries[1],
+                VerificationRelationship::Embedded(EmbeddedVerificationMethod {
+                    id: VerificationMethodId(ed_id.clone()),
+                    public_key_multibase: Some(ED25519_MULTIKEY.to_string()),
+                }),
+                "{field}[1]"
+            );
+            assert_eq!(
+                entries[2],
+                VerificationRelationship::Embedded(EmbeddedVerificationMethod {
+                    id: VerificationMethodId(jwk_id.clone()),
+                    public_key_multibase: None,
+                }),
+                "{field}[2]"
+            );
+        }
+
+        // The resolve path is unaffected: an update invoking the secp256k1
+        // entry constructs and applies over the same document.
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let document = Document::from_json_value(json.clone()).expect("document is conformant");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction alongside foreign embedded methods succeeds");
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target is conformant");
+        target
+            .apply_update(&update, &AnnouncingBlock::fixed())
+            .expect("an update applies over a document carrying foreign embedded methods");
+        assert_eq!(target.hash(), update.target_hash);
+    }
+
+    /// resolve.md "Check update.proof" reads `publicKeyMultibase` from the
+    /// invoking entry and hands it to the BIP340 cryptosuite, so the invoking
+    /// entry's key must decode as a secp256k1 Multikey. An embedded
+    /// `capabilityInvocation` object of another key type parses (the document
+    /// is still a valid DID document) but is INVALID_DID_UPDATE the moment a
+    /// proof names it as the invoker — on both the construct and the apply
+    /// path — and so is an object with no `publicKeyMultibase` at all.
+    #[test]
+    fn capability_invocation_embedded_foreign_key_is_rejected_as_invoker() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let ed_id = format!("{}#ed", did.encode());
+        let jwk_id = format!("{}#jwk", did.encode());
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        // Construct path: the Ed25519 object is the sole invoker.
+        let mut json = document_json(&did, &vm_id);
+        json["capabilityInvocation"] = serde_json::json!([ed25519_method_json(&did)]);
+        let foreign =
+            Document::from_json_value(json.clone()).expect("the document parses as a whole");
+        let err = foreign
+            .construct_signed_update(benign_patch(&vm_id), version, &ed_id, source_secret_key())
+            .expect_err("an Ed25519 invoker must be rejected before signing");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("not a secp256k1 Multikey"),
+                "rejection must be the invoker key decode; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+
+        // Apply path: a valid update whose proof is re-pointed at the Ed25519
+        // object, applied to a target whose sole invoker is that object.
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("a valid signed update is produced");
+        let mut update_json = update.as_ref().clone();
+        update_json["proof"]["verificationMethod"] = Value::String(ed_id.clone());
+        let repointed = Update::from_json_value(update_json)
+            .expect("a verificationMethod swap still re-parses");
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target parses as a whole");
+        let err = target
+            .apply_update(&repointed, &AnnouncingBlock::fixed())
+            .expect_err("an Ed25519 invoker must be rejected on apply");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("not a secp256k1 Multikey"),
+                "rejection must be the invoker key decode; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+
+        // An invoker with no publicKeyMultibase at all.
+        let mut json = document_json(&did, &vm_id);
+        json["capabilityInvocation"] = serde_json::json!([jwk_method_json(&did)]);
+        let keyless =
+            Document::from_json_value(json.clone()).expect("the document parses as a whole");
+        let err = keyless
+            .construct_signed_update(benign_patch(&vm_id), version, &jwk_id, source_secret_key())
+            .expect_err("a keyless invoker must be rejected before signing");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("has no publicKeyMultibase"),
+                "rejection must be the missing-key check; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+        let mut update_json = update.as_ref().clone();
+        update_json["proof"]["verificationMethod"] = Value::String(jwk_id);
+        let repointed = Update::from_json_value(update_json)
+            .expect("a verificationMethod swap still re-parses");
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target parses as a whole");
+        let err = target
+            .apply_update(&repointed, &AnnouncingBlock::fixed())
+            .expect_err("a keyless invoker must be rejected on apply");
+        match err {
+            Btcr2Error::InvalidDidUpdate(msg) => assert!(
+                msg.contains("has no publicKeyMultibase"),
+                "rejection must be the missing-key check; got: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// The declared `type` of the invoking verification method is not
+    /// consulted. resolve.md "Check update.proof" says "Read
+    /// `publicKeyMultibase` from that entry" and "Use a BIP340 Cryptosuite
+    /// instance with `publicKeyMultibase`"; the BIP340 cryptosuite's Multikey
+    /// section constrains only the `publicKeyMultibase` encoding (a `0xe701`
+    /// secp256k1 Multikey). A `verificationMethod` entry typed
+    /// `Ed25519VerificationKey2020` whose `publicKeyMultibase` is a secp256k1
+    /// Multikey therefore signs and verifies like any other, as it does in
+    /// resolvers that read `publicKeyMultibase`.
+    #[test]
+    fn invoking_entry_type_string_is_not_gated() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json["verificationMethod"][0]["type"] = serde_json::json!("Ed25519VerificationKey2020");
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let document = Document::from_json_value(json.clone()).expect("document is conformant");
+        assert_eq!(
+            document.fields.verification_method[0].type_,
+            "Ed25519VerificationKey2020"
+        );
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("the declared type does not block signing");
+
+        let mut target =
+            InitialDocument::from_json_value(json).expect("the apply target is conformant");
+        target
+            .apply_update(&update, &AnnouncingBlock::fixed())
+            .expect("the declared type does not block verification");
+        assert_eq!(target.hash(), update.target_hash);
+    }
+
+    /// An embedded relationship object whose `publicKeyMultibase` is present
+    /// but not a string is a typed JSON error, never a panic (only `id` and
+    /// `publicKeyMultibase` are read from the object).
+    #[test]
+    fn relationship_entry_rejects_non_string_public_key_multibase() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        json["authentication"] = serde_json::json!([{
+            "id": format!("{}#x", did.encode()),
+            "publicKeyMultibase": 42,
+        }]);
+        let err = InitialDocument::from_json_value(json)
+            .expect_err("a numeric publicKeyMultibase must be rejected");
+        match err {
+            Error::JsonValue(json_tools::JsonError::UnexpectedJsonType(
+                field,
+                json_tools::ExpectedType::String,
+            )) => assert_eq!(field, "authentication.publicKeyMultibase"),
+            other => panic!("expected UnexpectedJsonType(_, String), got {other:?}"),
         }
     }
 

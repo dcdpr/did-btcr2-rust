@@ -33,9 +33,6 @@ pub enum JsonError {
     /// DID Encoding error
     DidEncoding(#[from] crate::identifier::Error),
 
-    /// Verification Error
-    Verification(#[from] crate::verification::Error),
-
     /// Document beacon endpoints error
     Beacon(#[from] crate::beacon::Error),
 

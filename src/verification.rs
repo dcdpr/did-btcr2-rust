@@ -2,15 +2,7 @@
 //! signing updates.
 
 use crate::key::PublicKey;
-use onlyerror::Error;
 use std::{cmp::PartialEq, str::FromStr};
-
-/// Errors arising while parsing or resolving a verification method.
-#[derive(Error, Debug)]
-pub enum Error {
-    /// Unsupported verification method type
-    UnsupportedVerificationMethod,
-}
 
 /// Verification method ID
 ///
@@ -19,7 +11,7 @@ pub enum Error {
 pub struct VerificationMethodId(pub(crate) String);
 
 impl FromStr for VerificationMethodId {
-    type Err = Error;
+    type Err = std::convert::Infallible;
 
     fn from_str(method_id: &str) -> Result<Self, Self::Err> {
         Ok(Self(method_id.to_string()))
@@ -33,9 +25,9 @@ pub struct VerificationMethod<T> {
     pub id: VerificationMethodId,
 
     /// Type of verification method, carried as the raw parsed `type` string
-    /// (e.g. `"Multikey"`). The two-tier leniency policy keeps a non-Multikey
-    /// method in the parsed document (lenient envelope) but rejects it at key
-    /// extraction (strict crypto-trust boundary); see [`Self::public_key`].
+    /// (e.g. `"Multikey"`). It is not used to select or reject a key: the
+    /// resolve path reads `publicKeyMultibase` and verifies with the BIP340
+    /// cryptosuite regardless of the declared type.
     pub type_: String,
 
     /// The controller of this verification method
@@ -45,17 +37,32 @@ pub struct VerificationMethod<T> {
     pub public_key: PublicKey,
 }
 
+/// A verification method object carried inside a relationship array
+/// (DID Core 1.1 §5.3.1). Any DID Core verification method may appear
+/// here — any `type`, any `controller`, any key encoding — so the
+/// object is retained by its `id` and its raw `publicKeyMultibase`, if
+/// present. Only the entry that a proof invokes is read as a key, and
+/// it is decoded at that point (did-btcr2/src/operations/resolve.md,
+/// "Check update.proof").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedVerificationMethod {
+    /// The object's `id`; may be a relative DID URL.
+    pub id: VerificationMethodId,
+    /// The object's `publicKeyMultibase`, verbatim, when it has one.
+    pub public_key_multibase: Option<String>,
+}
+
 /// One entry of a verification-relationship array (`authentication`,
 /// `assertionMethod`, `capabilityInvocation`, `capabilityDelegation`):
 /// either a reference to an entry of `verificationMethod`, or a
 /// verification method embedded in place (DID Core 1.1 §5.3.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerificationRelationship<T> {
+pub enum VerificationRelationship {
     /// A DID URL naming an entry of `verificationMethod`; may be relative to
     /// the document `id`.
     Reference(VerificationMethodId),
     /// A verification method carried in the relationship array itself.
-    Embedded(VerificationMethod<T>),
+    Embedded(EmbeddedVerificationMethod),
 }
 
 impl<T> VerificationMethod<T> {
@@ -70,9 +77,8 @@ impl<T> VerificationMethod<T> {
 
     /// Create a verification method carrying its parsed `type` string.
     ///
-    /// Used by the document parser to retain a method's declared type verbatim
-    /// (lenient envelope). A non-Multikey type is retained here but rejected at
-    /// [`Self::public_key`] (strict crypto-trust boundary).
+    /// Used by the document parser to retain a method's declared type
+    /// verbatim. The type string does not affect whether the key is used.
     pub fn with_type(
         id: VerificationMethodId,
         controller: T,
@@ -86,20 +92,6 @@ impl<T> VerificationMethod<T> {
             public_key,
         }
     }
-
-    /// Get the public key from this verification method.
-    ///
-    /// Fails with [`Error::UnsupportedVerificationMethod`] unless the method's
-    /// declared `type` is exactly `"Multikey"` — the strict side of the
-    /// two-tier leniency policy: a non-Multikey method may be retained in the
-    /// parsed document, but its key MUST NOT be used to verify a proof.
-    pub fn public_key(&self) -> Result<&PublicKey, Error> {
-        if self.type_ != "Multikey" {
-            return Err(Error::UnsupportedVerificationMethod);
-        }
-
-        Ok(&self.public_key)
-    }
 }
 
 #[cfg(test)]
@@ -107,45 +99,25 @@ mod tests {
     use super::*;
     use crate::key::KeyPair;
 
-    fn vm_with_type(type_: &str) -> VerificationMethod<String> {
-        VerificationMethod::with_type(
-            VerificationMethodId("did:btcr2:x1abc#key-0".to_string()),
-            "did:btcr2:x1abc".to_string(),
-            KeyPair::generate().public_key,
-            type_.to_string(),
-        )
-    }
-
-    /// Strict crypto-trust boundary: a retained non-Multikey verification
-    /// method fails at key extraction rather than silently coercing to Multikey.
+    /// `with_type` carries the declared type string verbatim and `new`
+    /// defaults it to `"Multikey"`; the key is reachable either way.
     #[test]
-    fn public_key_rejects_non_multikey_type() {
-        let vm = vm_with_type("Ed25519VerificationKey2020");
-        assert!(matches!(
-            vm.public_key(),
-            Err(Error::UnsupportedVerificationMethod)
-        ));
-    }
+    fn with_type_keeps_the_declared_type_string() {
+        let id = VerificationMethodId("did:btcr2:x1abc#key-0".to_string());
+        let controller = "did:btcr2:x1abc".to_string();
+        let public_key = KeyPair::generate().public_key;
 
-    /// Happy path: a Multikey verification method yields its key.
-    #[test]
-    fn public_key_returns_key_for_multikey_type() {
-        let vm = vm_with_type("Multikey");
-        let pk = vm.public_key().expect("Multikey extraction succeeds");
-        assert_eq!(pk, &vm.public_key);
-    }
-
-    /// `new` preserves the Multikey default for in-crate constructions.
-    #[test]
-    fn new_defaults_to_multikey() {
         let vm = VerificationMethod::with_type(
-            VerificationMethodId("did:btcr2:x1abc#key-0".to_string()),
-            "did:btcr2:x1abc".to_string(),
-            KeyPair::generate().public_key,
-            "Multikey".to_string(),
+            id.clone(),
+            controller.clone(),
+            public_key,
+            "Ed25519VerificationKey2020".to_string(),
         );
-        let via_new = VerificationMethod::new(vm.id.clone(), vm.controller.clone(), vm.public_key);
+        assert_eq!(vm.type_, "Ed25519VerificationKey2020");
+        assert_eq!(vm.public_key, public_key);
+
+        let via_new = VerificationMethod::new(id, controller, public_key);
         assert_eq!(via_new.type_, "Multikey");
-        assert!(via_new.public_key().is_ok());
+        assert_eq!(via_new.public_key, public_key);
     }
 }
