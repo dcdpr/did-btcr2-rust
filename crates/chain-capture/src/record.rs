@@ -22,12 +22,19 @@ pub struct Recording {
     pub addresses: BTreeMap<String, Vec<Value>>,
     /// `GET /blocks/tip/height`.
     pub tip: Option<u32>,
+    /// `GET /block/{hash}` bodies keyed by the hash in the request path.
+    ///
+    /// Present only when the resolver asked for a block (an update proof
+    /// carrying `expires` needs the confirming block's `mediantime`).
+    pub blocks: BTreeMap<String, Value>,
 }
 
 /// A transport that delegates to `inner` and keeps the Esplora read traffic.
 ///
-/// Only the two endpoint families a resolve reads are recorded: the per-address
-/// transaction lists and the chain tip. Everything else — a broadcast, a UTXO
+/// Only the three endpoint families a resolve reads are recorded: the
+/// per-address transaction lists, the chain tip, and block headers (`GET
+/// /block/{hash}`, asked for only when an update proof carries `expires`).
+/// Everything else — a broadcast, a UTXO
 /// query, a fee estimate, a JSON-RPC call — passes through untouched and is
 /// never persisted. That is deliberate: a fixture holds public chain data, and
 /// an RPC request carries a credential.
@@ -102,9 +109,43 @@ impl<T: BtcTransport> BtcTransport for RecordingTransport<T> {
                 ))
             })?;
             self.recording.borrow_mut().tip = Some(tip);
+        } else if let Some(hash) = block_hash_from_path(&path) {
+            if !(200..300).contains(&status) {
+                return Err(TransportError::Io(std::io::Error::other(format!(
+                    "capture of block `{hash}` failed: HTTP {status} from {path} — \
+                     a fixture must never record a failed response"
+                ))));
+            }
+            let body: Value = serde_json::from_slice(resp.body()).map_err(|e| {
+                std::io::Error::other(format!(
+                    "capture of block `{hash}` failed: the response body is not a JSON \
+                     object ({e}) — check that {path} points at an Esplora endpoint"
+                ))
+            })?;
+            if !body.is_object() {
+                return Err(TransportError::Io(std::io::Error::other(format!(
+                    "capture of block `{hash}` failed: the response body is not a JSON \
+                     object (got {}) — check that {path} points at an Esplora endpoint",
+                    json_kind(&body)
+                ))));
+            }
+            let mut recording = self.recording.borrow_mut();
+            recording.blocks.insert(hash.to_string(), body);
         }
 
         Ok(resp)
+    }
+}
+
+/// The JSON type name of a value, for an error an operator has to read.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -126,6 +167,32 @@ pub fn address_from_txs_path(path: &str) -> Option<&str> {
     }
 }
 
+/// Extract the block hash from an Esplora `/block/{hash}` request path.
+///
+/// Splits the query string off first, then requires the last two segments to be
+/// `block`, `{hash}` with the hash exactly 64 hex characters. Mirrors the replay
+/// harness's route in the core crate, so capture and replay key a block on the
+/// same string: the hash as it appears in the request path.
+///
+/// A block sub-resource (`/block/{hash}/txids`, `/block/{hash}/status`), the tip
+/// (`/blocks/tip/height`), and a height lookup (`/block-height/{n}`) all return
+/// `None`.
+pub fn block_hash_from_path(path: &str) -> Option<&str> {
+    let path = path.split('?').next().unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let n = segments.len();
+    if n >= 2 && segments[n - 2] == "block" && is_block_hash(segments[n - 1]) {
+        Some(segments[n - 1])
+    } else {
+        None
+    }
+}
+
+/// Exactly 64 ASCII hex digits: the display form of a block hash.
+fn is_block_hash(segment: &str) -> bool {
+    segment.len() == 64 && segment.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +212,8 @@ mod tests {
         txs: BTreeMap<String, Vec<u8>>,
         /// Body for `/blocks/tip/height`.
         tip: Option<Vec<u8>>,
+        /// Block hash → response body for `/block/{hash}`.
+        blocks: BTreeMap<String, Vec<u8>>,
         /// Every path the fake was asked for, in order.
         seen: RefCell<Vec<String>>,
     }
@@ -154,6 +223,7 @@ mod tests {
             Self {
                 txs: BTreeMap::new(),
                 tip: None,
+                blocks: BTreeMap::new(),
                 seen: RefCell::new(Vec::new()),
             }
         }
@@ -166,6 +236,12 @@ mod tests {
 
         fn with_tip(mut self, body: &str) -> Self {
             self.tip = Some(body.as_bytes().to_vec());
+            self
+        }
+
+        fn with_block(mut self, hash: &str, body: &str) -> Self {
+            self.blocks
+                .insert(hash.to_string(), body.as_bytes().to_vec());
             self
         }
     }
@@ -182,6 +258,8 @@ mod tests {
                 self.txs.get(address).cloned()
             } else if path.ends_with("/blocks/tip/height") {
                 self.tip.clone()
+            } else if let Some(hash) = block_hash_from_path(&path) {
+                self.blocks.get(hash).cloned()
             } else if path.ends_with("/utxo") {
                 Some(b"[]".to_vec())
             } else if path.ends_with("/tx") {
@@ -245,6 +323,139 @@ mod tests {
             },
         }])
         .to_string()
+    }
+
+    /// A block hash as Esplora prints it: 64 lowercase hex characters.
+    fn block_hash() -> String {
+        "0a".repeat(32)
+    }
+
+    fn one_block_body(hash: &str) -> String {
+        json!({
+            "id": hash,
+            "height": 1,
+            "timestamp": 1_700_000_000i64,
+            "mediantime": 1_699_996_400i64,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_block_body_is_recorded_under_its_hash() {
+        let hash = block_hash();
+        let inner = FakeInner::new().with_block(&hash, &one_block_body(&hash));
+        let transport = RecordingTransport::new(inner);
+        let handle = transport.recording();
+
+        get(&transport, &format!("{BASE}/block/{hash}")).expect("the fetch succeeds");
+
+        let recording = handle.borrow();
+        let block = recording
+            .blocks
+            .get(&hash)
+            .expect("the block was recorded under its hash");
+        assert_eq!(block["mediantime"], json!(1_699_996_400i64));
+        assert_eq!(block["id"], json!(hash));
+        assert!(
+            recording.addresses.is_empty() && recording.tip.is_none(),
+            "a block request must not appear as an address or the tip"
+        );
+    }
+
+    #[test]
+    fn a_block_subresource_is_not_recorded() {
+        let hash = block_hash();
+        let transport = RecordingTransport::new(FakeInner::new());
+        let handle = transport.recording();
+
+        // The fake answers 404 for a sub-resource; the recorder must not treat
+        // that as a failed block capture either, since it is not a block request.
+        get(&transport, &format!("{BASE}/block/{hash}/txids"))
+            .expect("a sub-resource passes through unrecorded, whatever it returns");
+
+        assert!(
+            handle.borrow().blocks.is_empty(),
+            "only /block/{{hash}} bodies are recorded, got {:?}",
+            handle.borrow().blocks.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_non_success_block_response_is_an_error_and_records_nothing() {
+        let hash = block_hash();
+        let transport = RecordingTransport::new(FakeInner::new());
+        let handle = transport.recording();
+
+        let error = get(&transport, &format!("{BASE}/block/{hash}"))
+            .expect_err("an unanswered block must fail loud");
+        let message = chain(&error);
+        assert!(
+            message.contains(&hash) && message.contains("404"),
+            "the failure must name the block and the status: {message}"
+        );
+        assert!(handle.borrow().blocks.is_empty());
+    }
+
+    #[test]
+    fn a_block_body_that_is_not_an_object_is_an_error() {
+        let hash = block_hash();
+        for (body, fault) in [
+            ("<html>rate limited</html>", "not JSON"),
+            ("[1, 2, 3]", "a JSON array"),
+            ("\"a string\"", "a JSON string"),
+        ] {
+            let inner = FakeInner::new().with_block(&hash, body);
+            let transport = RecordingTransport::new(inner);
+            let handle = transport.recording();
+
+            let error = get(&transport, &format!("{BASE}/block/{hash}"))
+                .err()
+                .unwrap_or_else(|| panic!("{fault} must not be stored as a block"));
+            let message = chain(&error);
+            assert!(
+                message.contains(&hash) && message.contains("JSON object"),
+                "the failure must name the block and the fault: {message}"
+            );
+            assert!(handle.borrow().blocks.is_empty());
+        }
+    }
+
+    #[test]
+    fn block_hash_from_path_accepts_only_a_64_hex_last_segment() {
+        let hash = block_hash();
+        let upper = hash.to_uppercase();
+        assert_eq!(
+            block_hash_from_path(&format!("/block/{hash}")),
+            Some(hash.as_str())
+        );
+        assert_eq!(
+            block_hash_from_path(&format!("http://host:3000/block/{hash}?x=1")),
+            Some(hash.as_str()),
+            "the base and a query string are not part of the key"
+        );
+        assert_eq!(
+            block_hash_from_path(&format!("/block/{upper}")),
+            Some(upper.as_str()),
+            "hex case is not the recorder's concern; the key is the path segment verbatim"
+        );
+        for path in [
+            format!("/block/{hash}/txids"),
+            format!("/block/{hash}/status"),
+            "/blocks/tip/height".to_string(),
+            "/block-height/120".to_string(),
+            "/block/abc".to_string(),
+            format!("/block/{}", "zz".repeat(32)),
+            format!("/block/{hash}0"),
+            "/block".to_string(),
+            format!("/{hash}"),
+            "".to_string(),
+        ] {
+            assert_eq!(
+                block_hash_from_path(&path),
+                None,
+                "`{path}` is not a block-header path"
+            );
+        }
     }
 
     #[test]
@@ -428,6 +639,7 @@ mod tests {
             recording.addresses.keys().collect::<Vec<_>>()
         );
         assert_eq!(recording.tip, None);
+        assert!(recording.blocks.is_empty());
     }
 
     #[test]

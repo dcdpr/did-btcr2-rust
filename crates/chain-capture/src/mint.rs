@@ -1680,6 +1680,7 @@ fn build_minted_fixture(
     state: &MintState,
     tip_height: u32,
     addresses: &BTreeMap<String, Vec<Value>>,
+    blocks: &BTreeMap<String, Value>,
     expected: Value,
 ) -> Result<ChainFixture, MintError> {
     let vector = minted_vector(state);
@@ -1717,6 +1718,7 @@ fn build_minted_fixture(
         tip_height,
         signals,
         addresses: addresses.clone(),
+        blocks: blocks.clone(),
         sidecar: Some(sidecar),
         expected: Some(expected),
     })
@@ -1826,7 +1828,13 @@ fn emit_minted_in<T: BtcTransport>(
     let tip_height = recorded.tip.ok_or_else(|| MintError::NoTip {
         scenario: state.scenario.clone(),
     })?;
-    let fixture = build_minted_fixture(state, tip_height, &recorded.addresses, expected)?;
+    let fixture = build_minted_fixture(
+        state,
+        tip_height,
+        &recorded.addresses,
+        &recorded.blocks,
+        expected,
+    )?;
     let path = fixture::write_atomic_in(root, &fixture)?;
     // The derived path runs through the crate manifest directory, so it carries
     // `../..` segments; the file exists by now, so report the resolved one.
@@ -3964,6 +3972,7 @@ mod tests {
             &state,
             212,
             &bodies_announcing(&state),
+            &BTreeMap::new(),
             clean_expected(&json!({ "id": MINTED_DID }), 4),
         )
         .expect("a capture that announces every update builds a fixture");
@@ -3993,6 +4002,7 @@ mod tests {
                 &state,
                 212,
                 &bodies_announcing(&state),
+                &BTreeMap::new(),
                 clean_expected(&json!({ "id": MINTED_DID }), 4),
             )
             .expect("a sound capture builds a fixture");
@@ -4024,6 +4034,7 @@ mod tests {
             &state,
             212,
             &addresses,
+            &BTreeMap::new(),
             clean_expected(&json!({ "id": MINTED_DID }), 4),
         )
         .expect_err("a half-announced history must not be written");
@@ -4061,6 +4072,7 @@ mod tests {
             &state,
             212,
             &addresses,
+            &BTreeMap::new(),
             clean_expected(&json!({ "id": MINTED_DID }), 4),
         )
         .expect_err("a body that does not parse must refuse the emission");
@@ -4096,6 +4108,7 @@ mod tests {
             &reloaded,
             212,
             &bodies_announcing(&reloaded),
+            &BTreeMap::new(),
             clean_expected(&json!({ "id": MINTED_DID }), 4),
         )
         .expect("a completed state file emits without re-minting");

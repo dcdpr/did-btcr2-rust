@@ -221,6 +221,7 @@ pub fn emit(
     endpoint: &str,
     tip_height: u32,
     addresses: &BTreeMap<String, Vec<Value>>,
+    blocks: &BTreeMap<String, Value>,
     observed_confirmations: Option<u32>,
 ) -> Result<CaptureOutcome, CaptureError> {
     emit_to(
@@ -229,6 +230,7 @@ pub fn emit(
         endpoint,
         tip_height,
         addresses,
+        blocks,
         observed_confirmations,
     )
 }
@@ -247,6 +249,7 @@ pub fn emit_to(
     endpoint: &str,
     tip_height: u32,
     addresses: &BTreeMap<String, Vec<Value>>,
+    blocks: &BTreeMap<String, Value>,
     observed_confirmations: Option<u32>,
 ) -> Result<CaptureOutcome, CaptureError> {
     let signals = validate::validate(target, tip_height, addresses)?;
@@ -259,6 +262,7 @@ pub fn emit_to(
         tip_height,
         signals,
         addresses: addresses.clone(),
+        blocks: blocks.clone(),
         // A vendor vector reads its sidecar and its expectations from the
         // test-suite tree; only a minted scenario carries its own.
         sidecar: None,
@@ -371,6 +375,7 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
         base_url,
         tip,
         &recorded.addresses,
+        &recorded.blocks,
         result.document_metadata.confirmations,
     )
 }
@@ -801,6 +806,7 @@ mod tests {
             "http://localhost:3000",
             212,
             &addresses,
+            &BTreeMap::new(),
             Some(93),
         )
         .expect("a validated capture is written");
@@ -867,6 +873,7 @@ mod tests {
             "http://localhost:3000",
             212,
             &addresses,
+            &BTreeMap::new(),
             Some(93),
         )
         .expect_err("an unannounced update must not be written");

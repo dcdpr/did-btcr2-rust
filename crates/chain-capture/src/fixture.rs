@@ -42,6 +42,11 @@ pub struct ChainFixture {
     /// A key present with `[]` means captured-and-empty; a key ABSENT means
     /// never captured, and only the latter is a replay failure.
     pub addresses: BTreeMap<String, Vec<Value>>,
+    /// `GET /block/{hash}` bodies keyed by block hash, verbatim. Present only
+    /// when a replay needs a block's `mediantime` (an update proof carrying
+    /// `expires`); the resolver asks for the block and the recorder keeps it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blocks: BTreeMap<String, Value>,
     /// Minted scenarios only: the sidecar the replay test must resolve with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<Value>,
@@ -230,9 +235,45 @@ mod tests {
                 update_hash: "11".to_string() + &"22".repeat(31),
             }],
             addresses,
+            blocks: BTreeMap::new(),
             sidecar: None,
             expected: None,
         }
+    }
+
+    #[test]
+    fn a_fixture_without_blocks_serializes_without_the_key() {
+        let text = serde_json::to_string(&sample_fixture()).expect("the envelope serializes");
+        assert!(
+            !text.contains("\"blocks\""),
+            "an empty blocks map must not touch a fixture that never asked for a block: {text}"
+        );
+        let parsed: ChainFixture = serde_json::from_str(&text).expect("the envelope deserializes");
+        assert!(
+            parsed.blocks.is_empty(),
+            "an absent key reads back as an empty map"
+        );
+    }
+
+    #[test]
+    fn a_fixture_with_blocks_round_trips() {
+        let mut fixture = sample_fixture();
+        let hash = "0a".repeat(32);
+        fixture.blocks.insert(
+            hash.clone(),
+            json!({
+                "id": hash,
+                "height": 120,
+                "timestamp": 1_700_000_000i64,
+                "mediantime": 1_699_996_400i64,
+            }),
+        );
+
+        let text = serde_json::to_string(&fixture).expect("the envelope serializes");
+        assert!(text.contains("\"blocks\""));
+        let parsed: ChainFixture = serde_json::from_str(&text).expect("the envelope deserializes");
+        assert_eq!(parsed.blocks, fixture.blocks);
+        assert_eq!(parsed.blocks[&hash]["mediantime"], json!(1_699_996_400i64));
     }
 
     #[test]
