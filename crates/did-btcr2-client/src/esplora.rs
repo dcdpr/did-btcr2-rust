@@ -21,10 +21,12 @@ use crate::transport::BtcTransport;
 /// confirmed ones.
 pub const ESPLORA_PAGE_SIZE: usize = 25;
 
-/// Upper bound on the pages one address-history walk will fetch
-/// (`ESPLORA_PAGE_SIZE * MAX_ADDRESS_PAGES` = 25 000 confirmed transactions on
-/// a single beacon address). A server that keeps answering with full pages
-/// past this is reported as a malformed history, not walked forever.
+/// Upper bound on the pages one address-history walk will fetch. The
+/// terminating page (the first one short of [`ESPLORA_PAGE_SIZE`]) counts, so
+/// the largest history the walk accepts is 999 full pages plus a 24-entry
+/// page: 24 999 confirmed transactions on a single beacon address. A server
+/// that keeps answering with full pages past this is reported as a malformed
+/// history, not walked forever.
 pub const MAX_ADDRESS_PAGES: usize = 1_000;
 
 /// Execute a `GET` for a JSON transaction list, mapping a non-2xx status to

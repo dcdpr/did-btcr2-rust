@@ -29,7 +29,7 @@ above. Always name crates with `-p`.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 347 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 348 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 62 + 1 e2e |
 | `did-btcr2-cli` | 44 + 2 broken-pipe |
 | `chain-capture` | 185 |
@@ -513,7 +513,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 70 `#[test]` functions; `src/test_vectors.rs` holds 60.
+`src/resolver.rs` holds 71 `#[test]` functions; `src/test_vectors.rs` holds 62.
 
 ## 8. When `test-suite/` is absent
 

@@ -384,7 +384,11 @@ pub struct MintState {
     pub endpoint: String,
     /// The DID being minted.
     pub did: String,
-    /// The derived beacon addresses, in document order.
+    /// The GENESIS document's beacon addresses, in document order. A step's
+    /// `beacon_index` past this list names a beacon an earlier update added
+    /// (the clean scenario's index 3 is the address its version 2 update
+    /// declares); the tool re-derives that address from the key and resolves
+    /// the index against the contemporary document, not this list.
     pub beacons: Vec<String>,
     /// Completed steps, in order.
     pub steps: Vec<MintStep>,
@@ -395,7 +399,9 @@ pub struct MintState {
 pub struct MintStep {
     /// What this step did, e.g. `v2-add-beacon-service`.
     pub name: String,
-    /// Which of the document's beacons announced it.
+    /// Which of the contemporary document's beacons announced it — indexed
+    /// into the document as it stood when the step ran, so an index past
+    /// `MintState::beacons` names a beacon an earlier update added.
     pub beacon_index: usize,
     /// The version this update produces.
     pub target_version_id: u64,

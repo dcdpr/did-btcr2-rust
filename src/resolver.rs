@@ -330,13 +330,6 @@ impl Resolver {
         // Step 10.
         let mut contemporary_hash = self.contemporary_doc.hash();
 
-        // Most-recently-applied UNIQUE update's version, tracked as a
-        // loop-local (no struct field / no public-API change). Under the
-        // ascending (target_version_id, block_height) sort in `resolve` this is
-        // simply the last unique apply; it keys the defensive dedup guard in the
-        // duplicate branch below.
-        let mut most_recent_applied_version: Option<NonZeroU64> = None;
-
         // Taken one at a time so the unprocessed remainder can be parked when
         // an applied update introduces a beacon.
         let mut signals = signals.into_iter();
@@ -358,17 +351,18 @@ impl Resolver {
                 // duplicate signal into a false LATE_PUBLISHING.
                 update.confirm_duplicate(&self.update_hash_history)?;
 
-                // Defensive guard (dedup of the SAME announcement,
-                // resolve.md:57 footnote 2): fold in the lower height when
-                // this duplicate targets the most-recently-applied update.
-                // Under the ascending (target_version_id, block_height) sort
-                // in `resolve` the lowest-height announcement is ALWAYS
-                // processed FIRST and is already the applied height, so every
-                // later same-update announcement is at a HIGHER height and
-                // this min() is a no-op — unreachable as a state change under
-                // natural signal flow, retained only for robustness against
-                // unsorted input.
-                if most_recent_applied_version == Some(update.target_version_id)
+                // Dedup of the SAME announcement (resolve.md:57 footnote 2):
+                // `confirmations` derives from the LOWEST block among the
+                // announcements of the applied update. Within one round the
+                // ascending (target_version_id, block_height) sort makes the
+                // lowest height the one applied, so this min() is a no-op —
+                // but a duplicate can arrive in a LATER round, from a beacon
+                // the applied update itself introduced, at a lower height
+                // than the announcement that was applied. Keyed on
+                // `current_version_id`, which is the most recently applied
+                // version and survives the parked round; a loop-local would
+                // reset between rounds and skip the fold-in.
+                if update.target_version_id == self.current_version_id
                     && let Some(existing) = self.applied_block_height
                 {
                     self.applied_block_height = Some(existing.min(block_height));
@@ -445,7 +439,6 @@ impl Resolver {
                 // ascending-version loop this holds the highest-version (most
                 // recent) applied update's height.
                 self.applied_block_height = Some(block_height);
-                most_recent_applied_version = Some(update.target_version_id);
 
                 // resolve.md "Process Next Update" step 1: the spec re-checks
                 // the requested versionId at the top of every iteration, so
@@ -507,13 +500,17 @@ impl Resolver {
 
         // Step 11: unnecessary
 
-        // Step 12.
+        // Step 12. Every apply above already re-checked the beacon set and
+        // parked the remainder when it grew, so by the time the pool drains
+        // every beacon has been scanned and the history is exhausted (Process
+        // Next Update step 2). The `Requests` arm is a defensive guard, not a
+        // walk step: it cannot be reached under the per-apply re-check, and
+        // if it ever were, issuing the round is the safe answer — a release
+        // build must never resolve early on an unscanned beacon.
         let ResolverState::Requests(fsm, signals) = self.next_signals_requests()? else {
             unreachable!()
         };
         if signals.is_empty() {
-            // Every beacon has been scanned and every update applied: the
-            // history is exhausted (Process Next Update step 2).
             Resolver::from_waiting_for_responses(fsm).history_exhausted()
         } else {
             Ok(ResolverState::Requests(fsm, signals))
@@ -5374,6 +5371,48 @@ mod tests {
             vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
             "exactly two rounds: the genesis beacons, then the added beacon — scanned \
              before v4 is judged, not after the batch"
+        );
+    }
+
+    /// v2 is announced twice: at height 200 on a genesis beacon, and again at
+    /// height 150 on the beacon v2 itself adds. The genesis round applies the
+    /// height-200 announcement; the added beacon's round then delivers the
+    /// height-150 duplicate. resolve.md:57 footnote 2: when deduplicating,
+    /// `confirmations` derives from the LOWEST block — so the fold-in has to
+    /// work across rounds, not only within the batch that applied the update.
+    #[test]
+    fn a_lower_duplicate_on_the_added_beacon_lowers_confirmations() {
+        let (initial, update_v2, _update_v3, _update_v4) = chained_rotation_then_two_more();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2_high = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0xb2);
+        let tx_v2_low = confirmed_signal_tx(update_v2.hash(), 150, 1_699_999_900, 0xb3);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2_high]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, vec![tx_v2_low]),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update_v2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/lower-duplicate");
+
+        let result = result.expect("a duplicate announcement of the applied update is benign");
+        assert_eq!(u64::from(result.document_metadata.version_id), 2);
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon is scanned after v2 applies"
+        );
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 150 + 1),
+            "confirmations derive from the LOWER announcement, which arrived in the \
+             second round"
         );
     }
 
