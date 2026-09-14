@@ -396,6 +396,21 @@ The three mutinynet captures share tip 3307267 and all announce at height
 confirmations by provenance — derived from the most-recently-applied update's
 captured block — rather than against a stated number.
 
+### `versionTime` probes need the announcements' blocks
+
+A `versionTime` bound is compared against the announcing block's `mediantime`
+(resolve.md "Process Next Update" step 4, footnote 5), which only a
+`/block/{hash}` body carries. The capture tool now records that body for every
+announcement it finds, whether or not the resolve asked for it. Every
+committed capture predates that and holds no `blocks`, so the replay tests'
+versionTime probe skips on each of them — printing `SKIP: … no /block/{hash}
+body` — and the set is pinned in `test_vectors::FIXTURES_WITHOUT_SIGNAL_BLOCKS`,
+checked in both directions by `chain_fixture_signal_block_ledger_is_exact`. A
+re-capture fills the blocks in and fails that ledger test by name; delete the
+id from the list and the probe runs again. The versionTime rule itself is
+covered by the in-memory resolver tests (`version_time_*`) and the client's
+`resolve_evaluates_version_time_against_the_fetched_mediantime`.
+
 ### `minConf` and the minted captures
 
 The resolver processes a beacon signal only once it has

@@ -54,10 +54,15 @@ pub struct RecordingTransport<T: BtcTransport> {
 impl<T: BtcTransport> RecordingTransport<T> {
     /// Wrap `inner`, recording what passes through it.
     pub fn new(inner: T) -> Self {
-        Self {
-            inner,
-            recording: Rc::new(RefCell::new(Recording::default())),
-        }
+        Self::sharing(inner, Rc::new(RefCell::new(Recording::default())))
+    }
+
+    /// Wrap `inner`, writing into an existing `recording`. Two transports over
+    /// one recording is how a capture keeps a handle after the first has been
+    /// moved into a client: what the client fetched and what the capture
+    /// fetches afterwards land in the same fixture.
+    pub fn sharing(inner: T, recording: Rc<RefCell<Recording>>) -> Self {
+        Self { inner, recording }
     }
 
     /// A shared handle on what has been recorded so far.
@@ -176,6 +181,49 @@ impl<T: BtcTransport> BtcTransport for RecordingTransport<T> {
 
         Ok(resp)
     }
+}
+
+/// Fetch `GET {base_url}/block/{hash}` through `transport` for the block of
+/// every confirmed announcement-shaped transaction — last output `OP_RETURN
+/// <32-byte push>` — in `addresses`, one request per distinct block. Over a
+/// [`RecordingTransport`] the bodies land in the recording's `blocks`, so a
+/// fixture carries each announcement's `mediantime` whether or not the
+/// resolve that produced it happened to ask: a replay under a `versionTime`
+/// bound compares against it, and a capture without it cannot host that
+/// probe. Returns the hashes fetched, in order.
+pub fn capture_announcement_blocks<T: BtcTransport>(
+    transport: &T,
+    base_url: &str,
+    addresses: &BTreeMap<String, Vec<Value>>,
+) -> Result<Vec<String>, TransportError> {
+    let mut hashes: Vec<String> = Vec::new();
+    for tx in addresses.values().flatten() {
+        let announces = tx["vout"]
+            .as_array()
+            .and_then(|vout| vout.last())
+            .and_then(|out| out["scriptpubkey"].as_str())
+            .is_some_and(is_announcement_script);
+        let confirmed = tx["status"]["confirmed"].as_bool() == Some(true);
+        let Some(hash) = tx["status"]["block_hash"].as_str() else {
+            continue;
+        };
+        if announces && confirmed && is_block_hash(hash) && !hashes.iter().any(|h| h == hash) {
+            hashes.push(hash.to_string());
+        }
+    }
+    for hash in &hashes {
+        let request = http::Request::get(format!("{base_url}/block/{hash}"))
+            .body(Vec::new())
+            .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
+        transport.execute(request)?;
+    }
+    Ok(hashes)
+}
+
+/// `OP_RETURN OP_PUSHBYTES_32 <32 bytes>` as lowercase hex: `6a20` and 64
+/// hex digits, the shape of every beacon announcement's signal output.
+fn is_announcement_script(hex: &str) -> bool {
+    hex.len() == 68 && hex.starts_with("6a20") && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The JSON type name of a value, for an error an operator has to read.
@@ -635,6 +683,69 @@ mod tests {
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0]["status"]["block_height"], json!(120));
         assert_eq!(recording.tip, None);
+    }
+
+    #[test]
+    fn announcement_blocks_are_fetched_once_each_and_recorded() {
+        // Two announcements in block A (one request, not two), one
+        // non-announcing transaction in block B (not fetched), and one
+        // unconfirmed announcement (no block to fetch).
+        let hash_a = "aa".repeat(32);
+        let hash_b = "bb".repeat(32);
+        let announcement = |txid: &str, hash: &str| {
+            json!({
+                "txid": txid,
+                "version": 2, "locktime": 0, "vin": [],
+                "vout": [{ "scriptpubkey": format!("6a20{}", "11".repeat(32)), "value": 0 }],
+                "size": 0, "weight": 0, "fee": 0,
+                "status": { "confirmed": true, "block_height": 120, "block_hash": hash, "block_time": 1_700_000_000 },
+            })
+        };
+        let mut pending = announcement(&"04".repeat(32), &hash_b);
+        pending["status"] = json!({ "confirmed": false });
+        let mut payment = announcement(&"03".repeat(32), &hash_b);
+        payment["vout"] =
+            json!([{ "scriptpubkey": "0014".to_string() + &"ab".repeat(20), "value": 1 }]);
+        let addresses = BTreeMap::from([
+            (
+                ADDR.to_string(),
+                vec![
+                    announcement(&"01".repeat(32), &hash_a),
+                    announcement(&"02".repeat(32), &hash_a),
+                ],
+            ),
+            (OTHER.to_string(), vec![payment, pending]),
+        ]);
+
+        let inner = FakeInner::new().with_block(&hash_a, &one_block_body(&hash_a));
+        let transport = RecordingTransport::new(inner);
+        let handle = transport.recording();
+
+        let fetched = capture_announcement_blocks(&transport, BASE, &addresses)
+            .expect("the announcement's block is fetched");
+        assert_eq!(fetched, vec![hash_a.clone()], "one block, fetched once");
+        let recording = handle.borrow();
+        assert_eq!(
+            recording.blocks.keys().collect::<Vec<_>>(),
+            vec![&hash_a],
+            "the body is recorded under its hash; the payment's block is not fetched"
+        );
+    }
+
+    #[test]
+    fn a_shared_recording_sees_both_transports_traffic() {
+        let recording = Rc::new(RefCell::new(Recording::default()));
+        let first =
+            RecordingTransport::sharing(FakeInner::new().with_tip("212"), Rc::clone(&recording));
+        let second = RecordingTransport::sharing(
+            FakeInner::new().with_txs(ADDR, &one_tx_body()),
+            Rc::clone(&recording),
+        );
+        get(&first, &format!("{BASE}/blocks/tip/height")).expect("the tip fetches");
+        get(&second, &format!("{BASE}/address/{ADDR}/txs")).expect("the txs fetch");
+        let recording = recording.borrow();
+        assert_eq!(recording.tip, Some(212));
+        assert!(recording.addresses.contains_key(ADDR));
     }
 
     #[test]

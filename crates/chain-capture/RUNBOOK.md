@@ -185,7 +185,12 @@ transport and then refuses to write unless every one of these holds:
 - every matching announcement is confirmed, not sitting in the mempool;
 - the captured tip reproduces the vector's stated `confirmations`.
 
-Only then does it write `fixtures/chain/regtest/<k1|x1>/<short-id>.json`.
+Only then does it write `fixtures/chain/regtest/<k1|x1>/<short-id>.json`. The
+fixture also carries the `/block/{hash}` header of every block an announcement
+confirmed in, fetched after the resolve, so a replay under a `versionTime`
+bound can read the block's `mediantime`. Every committed capture predates this
+and holds no blocks; re-capturing fills them in (see `TESTING.md`,
+"`versionTime` probes need the announcements' blocks").
 
 ### 6. Read the summary
 
@@ -480,8 +485,10 @@ announcement.
 
 ### Fixture emission
 
-Each scenario finishes by resolving its own DID through a recording transport
-and writing a self-contained fixture:
+Each scenario finishes by resolving its own DID through a recording transport,
+fetching the `/block/{hash}` header of every block its announcements confirmed
+in (a replay under a `versionTime` bound compares against the block's
+`mediantime`), and writing a self-contained fixture:
 
 - `fixtures/chain/minted/clean-rotating-beacons.json`
 - `fixtures/chain/minted/late-publishing-fork.json`

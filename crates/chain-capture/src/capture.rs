@@ -17,11 +17,13 @@ use did_btcr2_client::{Client, UreqTransport};
 use error_iter::ErrorIter as _;
 use onlyerror::Error;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::fixture::{self, ChainFixture};
-use crate::record::RecordingTransport;
+use crate::record::{self, Recording, RecordingTransport};
 use crate::targets::{self, VectorTarget};
 use crate::validate;
 
@@ -302,10 +304,11 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
         });
     }
 
-    // Clone the recording handle BEFORE the transport is moved into the client:
-    // the client consumes the transport by value and never gives it back.
-    let transport = RecordingTransport::new(UreqTransport::new());
-    let recording = transport.recording();
+    // One recording, two transports over it: the client consumes its transport
+    // by value and never gives it back, and the announcements' blocks are
+    // fetched after the resolve through the second.
+    let recording = Rc::new(RefCell::new(Recording::default()));
+    let transport = RecordingTransport::sharing(UreqTransport::new(), Rc::clone(&recording));
     let client = Client::new(base_url.to_string(), transport);
 
     // `chain_tip_height` is None on purpose: the client fetches
@@ -365,6 +368,18 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
             ));
         }
     }
+
+    // The confirming block of every announcement, whether or not the resolve
+    // asked for it: a replay under a `versionTime` bound reads its
+    // `mediantime`, and a capture without it cannot host that probe.
+    let addresses = recording.borrow().addresses.clone();
+    let blocks_transport = RecordingTransport::sharing(UreqTransport::new(), Rc::clone(&recording));
+    record::capture_announcement_blocks(&blocks_transport, base_url, &addresses).map_err(
+        |source| CaptureError::ResolveFailed {
+            vector: target.id.clone(),
+            source: source.into(),
+        },
+    )?;
 
     let recorded = recording.borrow();
     let tip = recorded.tip.ok_or_else(|| CaptureError::NoTip {

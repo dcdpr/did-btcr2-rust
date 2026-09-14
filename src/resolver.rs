@@ -38,10 +38,11 @@ pub enum Error {
     Btcr2Error(#[from] crate::error::Btcr2Error),
 
     /// The resolver asked for the `mediantime` of the block that confirmed a
-    /// beacon signal (the update's proof carries `expires`) and the caller's
-    /// answer did not include it. The check cannot run, so resolution stops
-    /// rather than applying an update it could not check. A driver
-    /// precondition, not a spec error: the update has not been judged.
+    /// beacon signal (the update's proof carries `expires`, or a
+    /// `versionTime` bound is in force) and the caller's answer did not
+    /// include it. The check cannot run, so resolution stops rather than
+    /// applying an update it could not check. A driver precondition, not a
+    /// spec error: the update has not been judged.
     #[error("mediantime of block {block_hash} was requested but not supplied")]
     MissingBlockMediantime {
         /// Hash of the block whose mediantime is missing.
@@ -120,8 +121,9 @@ pub struct Resolver<T = ()> {
     applied_block_height: Option<u32>,
     rpc_host: String,
     request_cache: HashSet<esploda::http::Uri>,
-    /// `mediantime` of confirming blocks, fetched only for updates whose proof
-    /// carries `expires`.
+    /// `mediantime` of confirming blocks, fetched for updates whose proof
+    /// carries `expires` and for every applicable update under a
+    /// `versionTime` bound.
     block_mediantimes: HashMap<BlockHash, DateTime<Utc>>,
 
     // Finite State Machine
@@ -242,9 +244,10 @@ impl Resolver {
     /// Apply a sorted batch of matched signals (resolve.md "Process Next
     /// Update"), then ask for the next beacon round or resolve.
     ///
-    /// `may_request` is `true` on the first pass over a batch: if any proof of
-    /// a signal that can still apply carries `expires` and the confirming
-    /// block's mediantime is not yet held, the batch is parked in
+    /// `may_request` is `true` on the first pass over a batch: if any signal
+    /// that can still apply needs its confirming block's mediantime — its
+    /// proof carries `expires`, or a `versionTime` bound is in force — and
+    /// that mediantime is not yet held, the batch is parked in
     /// [`ResolverFsm::ApplySignals`] and a [`ResolverState::BlockRequests`] is
     /// returned. The second pass (after
     /// [`Resolver::<WaitingForBlockTimes>::process_block_times`]) runs with
@@ -254,10 +257,11 @@ impl Resolver {
         signals: Vec<AppliedSignal>,
         may_request: bool,
     ) -> Result<ResolverState, Error> {
-        // resolve.md "Check update.proof": `expires` is checked against the
-        // confirming block's mediantime, which the transaction status does not
-        // carry. Ask for every block still missing, once; a second pass without
-        // it is the caller's error.
+        // Two checks read the confirming block's mediantime, which the
+        // transaction status does not carry: resolve.md "Check update.proof"
+        // compares `expires` against it, and "Process Next Update" step 4
+        // compares it against `versionTime`. Ask for every block still
+        // missing, once; a second pass without it is the caller's error.
         //
         // The mediantime is only read in the apply branch of the loop below.
         // A signal whose targetVersionId is already at or below the current
@@ -271,10 +275,11 @@ impl Resolver {
         // independently rejects an `expires` proof whose mediantime is
         // unavailable, so a mis-filtered block would surface as
         // INVALID_DID_UPDATE, never as a silently skipped check.
+        let time_bound = matches!(self.target_condition, TargetCondition::Time(_));
         let missing: BTreeSet<BlockHash> = signals
             .iter()
             .filter(|s| s.update.target_version_id > self.current_version_id)
-            .filter(|s| s.update.proof.inner.expires.is_some())
+            .filter(|s| time_bound || s.update.proof.inner.expires.is_some())
             .map(|s| s.block_hash)
             .filter(|hash| !self.block_mediantimes.contains_key(hash))
             .collect();
@@ -359,13 +364,22 @@ impl Resolver {
                 // document in effect so far (the earlier version) and apply
                 // no further.
                 //
-                // Known divergence: the spec compares the block's `mediantime`
-                // (footnote 5: equal applies, no tolerance) while this
-                // comparison still uses the block header `block_time`.
-                if let TargetCondition::Time(time) = &self.target_condition
-                    && block_time > *time
-                {
-                    return Ok(ResolverState::Resolved(self.terminal_state()));
+                // "More recent" is the block's `mediantime` (footnote 5): an
+                // equal mediantime applies, there is no tolerance, and every
+                // resolver reads the same value off the chain, so every
+                // resolver selects the same version — the header timestamp,
+                // which a single miner sets, is not used for this. The
+                // mediantime was requested above; a hole here is the
+                // caller's, never an apply that skipped the bound.
+                if let TargetCondition::Time(time) = &self.target_condition {
+                    let mediantime = self
+                        .block_mediantimes
+                        .get(&block_hash)
+                        .copied()
+                        .ok_or(Error::MissingBlockMediantime { block_hash })?;
+                    if mediantime > *time {
+                        return Ok(ResolverState::Resolved(self.terminal_state()));
+                    }
                 }
 
                 // resolve.md "Apply update" step 1: a sourceHash that does not
@@ -809,12 +823,15 @@ pub enum ResolverState {
         HashMap<BeaconType, Vec<esploda::Req>>,
     ),
 
-    /// An update's proof carries `expires`, so the resolver needs the
-    /// `mediantime` of the block that confirmed its beacon signal
-    /// (did-btcr2/src/operations/resolve.md, "Check update.proof"). One
+    /// The resolver needs the `mediantime` of the block that confirmed a
+    /// beacon signal: an update's proof carries `expires`
+    /// (did-btcr2/src/operations/resolve.md, "Check update.proof"), or a
+    /// `versionTime` bound is in force and is compared against the block's
+    /// mediantime ("Process Next Update" step 4). One
     /// `GET {rpc_host}/block/{hash}` per block; parse `id` and `mediantime`
     /// from each body and feed them back with
-    /// [`Resolver::<WaitingForBlockTimes>::process_block_times`].
+    /// [`Resolver::<WaitingForBlockTimes>::process_block_times`]. A walk with
+    /// neither never asks.
     BlockRequests(Resolver<WaitingForBlockTimes>, Vec<esploda::Req>),
 
     /// Document is fully resolved. Carries the spec resolution triple
@@ -843,8 +860,8 @@ enum TargetCondition {
     /// `versionId`: stop once `current_version_id` reaches it.
     VersionId(NonZeroU64),
 
-    /// `versionTime`: stop before the first unique update whose block is
-    /// after it.
+    /// `versionTime`: stop before the first unique update whose block
+    /// `mediantime` is after it.
     Time(DateTime<Utc>),
 
     /// Neither option: apply every confirmed update. There is no implicit
@@ -871,12 +888,13 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_vectors::{
-        AssertionKind, ChainFixture, DRIVEN_FLOOR, NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES,
-        SkipOverride, Vector, VectorIdType, discover, expected_driven_with, field_bool, field_hex,
-        field_nonzero_version_id, field_str, field_u64, field_version_id,
-        network_dirs_with_vectors, read_chain_fixture, read_fixture_or_skip, read_vector_fixture,
-        reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
-        stale_overrides, test_suite_checked_out, unclassified_rows_with,
+        AssertionKind, ChainFixture, DRIVEN_FLOOR, FIXTURES_WITHOUT_SIGNAL_BLOCKS,
+        NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES, SkipOverride, Vector, VectorIdType, discover,
+        expected_driven_with, field_bool, field_hex, field_nonzero_version_id, field_str,
+        field_u64, field_version_id, network_dirs_with_vectors, read_chain_fixture,
+        read_fixture_or_skip, read_vector_fixture, reconcile_driven_with, redundant_overrides,
+        render_minted_summary, render_summary_with, stale_overrides, test_suite_checked_out,
+        unclassified_rows_with,
     };
     use std::collections::BTreeMap;
 
@@ -1176,6 +1194,34 @@ mod tests {
         drive_resolve(&vectors, SKIP_OVERRIDES);
     }
 
+    /// The `versionTime` a replay probe resolves at: one second before the
+    /// earliest `mediantime` among the blocks confirming the capture's
+    /// announcements, which is inside the walk's reach but before its first
+    /// update. `None`, with a `SKIP` line naming the block and the re-capture
+    /// command, when the fixture holds no `/block/{hash}` body to read that
+    /// mediantime from — a capture taken before the tool recorded blocks. The
+    /// set of such fixtures is pinned by `FIXTURES_WITHOUT_SIGNAL_BLOCKS`, so
+    /// the skip is a ledger entry rather than a silent loss, and a re-capture
+    /// turns the probe back on.
+    fn version_time_probe_bound(f: &ChainFixture, id: &str) -> Option<DateTime<Utc>> {
+        match f.earliest_signal_mediantime() {
+            Ok(earliest) => Some(ts(earliest - 1)),
+            Err(missing) => {
+                assert!(
+                    FIXTURES_WITHOUT_SIGNAL_BLOCKS.contains(&id),
+                    "{id}: the capture holds no `/block/{missing}` body and is not listed in \
+                     FIXTURES_WITHOUT_SIGNAL_BLOCKS"
+                );
+                eprintln!(
+                    "SKIP: {id}: the versionTime probe compares against block mediantimes and \
+                     the capture holds no `/block/{missing}` body; re-run capture to record the \
+                     announcements' blocks"
+                );
+                None
+            }
+        }
+    }
+
     /// A resolved document as comparable JSON.
     ///
     /// One function so the terminal document, the genesis reference and the
@@ -1202,12 +1248,14 @@ mod tests {
     /// 1. The genesis reference — the same DID, the same options, resolved with
     ///    no signals fed — must DIFFER from the terminal document. A replay in
     ///    which nothing was applied fails here.
-    /// 2. A `versionTime` one second before the earliest captured signal's block
-    ///    time must return version 1 and that same genesis document, having
-    ///    issued at least one request against the same capture. This is the
-    ///    versionTime path's first coverage against REAL block times — the
-    ///    `resolve_08` / `resolve_10` unit tests use timestamps we chose — and
-    ///    it is the only stop-where-asked bound observable on these rows.
+    /// 2. A `versionTime` one second before the earliest announcing block's
+    ///    `mediantime` must return version 1 and that same genesis document,
+    ///    having issued at least one request against the same capture. This
+    ///    is the versionTime path's first coverage against REAL block times —
+    ///    the unit tests use timestamps we chose — and it is the only
+    ///    stop-where-asked bound observable on these rows. It needs the
+    ///    capture's `/block/{hash}` bodies; a capture taken without them skips
+    ///    the probe by name (`FIXTURES_WITHOUT_SIGNAL_BLOCKS`).
     ///
     /// THERE IS DELIBERATELY NO `versionId = 1` PROBE, and one must not be
     /// "restored". At `Init` the FSM returns `Resolved` when a `VersionId`
@@ -1480,35 +1528,36 @@ mod tests {
                 );
 
                 // And it stops where asked. One second before the earliest
-                // captured signal's block time is inside the walk's reach but
+                // announcing block's mediantime is inside the walk's reach but
                 // before its first update, so the bound — which the FSM cannot
                 // short-circuit — must hold the answer at genesis.
-                let earliest = f.earliest_block_time().unwrap_or_else(|| {
-                    panic!("{id}: the captured fixture must carry at least one beacon signal")
-                });
-                let probe_resolver = Document::resolve(&did, make_options(Some(ts(earliest - 1))))
-                    .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}"));
-                let (probe, rounds) = drive_capture_rounds(probe_resolver, f, id);
-                let probe = probe.unwrap_or_else(|e| {
-                    panic!("{id}: the versionTime probe must resolve off the capture: {e}")
-                });
-                assert!(
-                    !rounds.is_empty(),
-                    "{id}: the versionTime probe must READ the chain — a bound that resolved \
-                     without issuing a request proves nothing about stopping"
-                );
-                assert_eq!(
-                    probe.document_metadata.version_id.get(),
-                    1,
-                    "{id}: a versionTime one second before the earliest captured signal \
-                     (block_time {earliest}) must resolve to version 1"
-                );
-                assert_eq!(
-                    resolved_document_json(&probe.document, id),
-                    genesis_json,
-                    "{id}: a versionTime before the first update must resolve the genesis \
-                     document"
-                );
+                if let Some(bound) = version_time_probe_bound(f, id) {
+                    let probe_resolver = Document::resolve(&did, make_options(Some(bound)))
+                        .unwrap_or_else(|e| {
+                            panic!("{id}: the resolver must accept the vector: {e}")
+                        });
+                    let (probe, rounds) = drive_capture_rounds(probe_resolver, f, id);
+                    let probe = probe.unwrap_or_else(|e| {
+                        panic!("{id}: the versionTime probe must resolve off the capture: {e}")
+                    });
+                    assert!(
+                        !rounds.is_empty(),
+                        "{id}: the versionTime probe must READ the chain — a bound that resolved \
+                         without issuing a request proves nothing about stopping"
+                    );
+                    assert_eq!(
+                        probe.document_metadata.version_id.get(),
+                        1,
+                        "{id}: a versionTime one second before the earliest announcing block's \
+                         mediantime ({bound}) must resolve to version 1"
+                    );
+                    assert_eq!(
+                        resolved_document_json(&probe.document, id),
+                        genesis_json,
+                        "{id}: a versionTime before the first update must resolve the genesis \
+                         document"
+                    );
+                }
             }
 
             observed.insert(id.clone());
@@ -3525,23 +3574,102 @@ mod tests {
         );
     }
 
-    /// A resolution whose `versionTime` falls mid-batch returns the
-    /// version in EFFECT at that time, not the batch's final version. Two chained
-    /// updates arrive (v2 @ block_time T2, v3 @ block_time T3) with
-    /// `T2 < versionTime < T3`; the resolved document is v2, NOT v3. The
-    /// per-tuple versionTime check inside the apply branch aborts before applying
-    /// v3.
+    /// A block hash from a repeated byte, for tests that need signals in
+    /// distinct blocks.
+    fn block_hash_of(byte: u8) -> BlockHash {
+        format!("{byte:02x}")
+            .repeat(32)
+            .parse()
+            .expect("64 hex digits parse as a block hash")
+    }
+
+    /// Drive a resolver to its terminal state over one batch of
+    /// Singleton-beacon transactions, answering every block request from
+    /// `mediantimes` (a block the map does not hold is a test failure) and
+    /// returning the block hashes that were requested alongside the result.
+    fn try_drive_serving_blocks(
+        resolver: Resolver,
+        txs: Vec<Transaction>,
+        mediantimes: &HashMap<BlockHash, DateTime<Utc>>,
+    ) -> (Result<ResolutionResult, Error>, Vec<BlockHash>) {
+        let mut requested = Vec::new();
+        let mut state = match resolver.resolve() {
+            Ok(state) => state,
+            Err(e) => return (Err(e), requested),
+        };
+        let mut first_round = Some(txs);
+        loop {
+            state = match state {
+                ResolverState::Resolved(result) => return (Ok(result), requested),
+                ResolverState::Requests(next, _requests) => {
+                    let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+                    if let Some(txs) = first_round.take() {
+                        transactions.insert(BeaconType::Singleton, txs);
+                    }
+                    match next.process_responses(transactions).resolve() {
+                        Ok(state) => state,
+                        Err(e) => return (Err(e), requested),
+                    }
+                }
+                ResolverState::BlockRequests(next, requests) => {
+                    let mut answers = HashMap::new();
+                    for req in &requests {
+                        let hash: BlockHash = block_hash_from_block_uri(req.uri())
+                            .parse()
+                            .expect("the request path carries a block hash");
+                        let mediantime = *mediantimes.get(&hash).unwrap_or_else(|| {
+                            panic!(
+                                "the resolver asked for block {hash}, which this test did not stage"
+                            )
+                        });
+                        requested.push(hash);
+                        answers.insert(hash, mediantime);
+                    }
+                    match next.process_block_times(answers).resolve() {
+                        Ok(state) => state,
+                        Err(e) => return (Err(e), requested),
+                    }
+                }
+            };
+        }
+    }
+
+    /// A resolution whose `versionTime` falls mid-batch returns the version
+    /// in EFFECT at that time, not the batch's final version. Two chained
+    /// updates arrive (v2 in block `aa`, v3 in block `bb`) with `mediantime(aa)
+    /// < versionTime < mediantime(bb)`; the resolved document is v2, NOT v3.
+    /// The per-tuple versionTime check inside the apply branch aborts before
+    /// applying v3.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:168-171.
+    /// The header timestamps are set the OTHER way round — `aa` after
+    /// versionTime, `bb` before it — so a comparison against the header time
+    /// would return v3 (or v1). Only the mediantime rule yields v2.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
+    /// and footnote 5 (the tuple's block `mediantime` is after `versionTime`).
     #[test]
     fn version_time_mid_batch_returns_the_version_in_effect() {
         let (initial, update1, update2) = chained_two_updates();
-        let t2 = 1_700_000_000i64;
-        let t3 = 1_700_000_200i64;
-        let version_time = 1_700_000_100i64; // T2 < T < T3
+        let version_time = 1_700_000_100i64;
 
-        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, t2, 0xa1);
-        let tx_v3 = confirmed_signal_tx(update2.hash(), 200, t3, 0xa2);
+        let tx_v2 = confirmed_signal_tx_in_block(
+            update1.hash(),
+            100,
+            version_time + 500,
+            &"aa".repeat(32),
+            0xa1,
+        );
+        let tx_v3 = confirmed_signal_tx_in_block(
+            update2.hash(),
+            200,
+            version_time - 500,
+            &"bb".repeat(32),
+            0xa2,
+        );
+        let mediantimes = HashMap::from([
+            (block_hash_of(0xaa), ts(version_time - 100)),
+            (block_hash_of(0xbb), ts(version_time + 100)),
+        ]);
 
         let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
         let options = ResolutionOptions {
@@ -3550,36 +3678,150 @@ mod tests {
             ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
-        let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
+        let (result, requested) =
+            try_drive_serving_blocks(resolver, vec![tx_v2, tx_v3], &mediantimes);
+        let result = result.expect("the walk resolves");
 
         assert_eq!(
             u64::from(result.document_metadata.version_id),
             2,
-            "mid-batch versionTime must resolve to the in-effect version (v2), not v3"
+            "mid-batch versionTime must resolve to the in-effect version (v2) by mediantime, not v3"
+        );
+        let mut requested = requested;
+        requested.sort();
+        assert_eq!(
+            requested,
+            vec![block_hash_of(0xaa), block_hash_of(0xbb)],
+            "a versionTime bound asks for every applicable signal's block, once"
         );
     }
 
-    /// Ordering fold-in: a DUPLICATE announcement of v2 at a HIGH
-    /// block_time (> versionTime), processed under the ascending
-    /// (target_version_id, block_height) sort BEFORE the UNIQUE v3 at a LOW
-    /// block_time (< versionTime), must NOT abort the loop. v3 IS still applied.
-    /// This pins that the versionTime cutoff lives ONLY in the unique-apply
-    /// branch, never on a duplicate tuple — a naive per-every-tuple check would
-    /// abort at the high-block_time duplicate and wrongly return v2.
+    /// An update whose block `mediantime` EQUALS `versionTime` applies: the
+    /// comparison has no tolerance and equal is not "after".
+    #[test]
+    fn version_time_equal_to_the_mediantime_applies_the_update() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let version_time = 1_700_000_100i64;
+        let tx = confirmed_signal_tx_in_block(
+            update1.hash(),
+            100,
+            version_time + 3600,
+            &"aa".repeat(32),
+            0xa3,
+        );
+        let mediantimes = HashMap::from([(block_hash_of(0xaa), ts(version_time))]);
+
+        let sidecar = SidecarData::new(None, vec![update1], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(version_time)),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, _) = try_drive_serving_blocks(resolver, vec![tx], &mediantimes);
+        assert_eq!(
+            u64::from(
+                result
+                    .expect("the walk resolves")
+                    .document_metadata
+                    .version_id
+            ),
+            2,
+            "a mediantime equal to versionTime is not after it: the update applies"
+        );
+    }
+
+    /// Under a `versionTime` bound the block is required even when no proof
+    /// carries `expires`: withholding it is the typed driver error, not an
+    /// apply that skipped the bound and not a silent stop.
+    #[test]
+    fn version_time_bound_requires_the_block_mediantime() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let tx = confirmed_signal_tx_in_block(
+            update1.hash(),
+            100,
+            1_700_000_000,
+            &"aa".repeat(32),
+            0xa4,
+        );
+        let sidecar = SidecarData::new(None, vec![update1], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(1_700_000_100)),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+
+        let ResolverState::Requests(next, _) = resolver.resolve().expect("Init step") else {
+            panic!("expected Requests from Init step");
+        };
+        let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![tx]);
+        let ResolverState::BlockRequests(next, requests) = next
+            .process_responses(transactions)
+            .resolve()
+            .expect("a versionTime bound asks for the block")
+        else {
+            panic!("expected BlockRequests under a versionTime bound");
+        };
+        assert_eq!(requests.len(), 1);
+
+        let err = next
+            .process_block_times(HashMap::new())
+            .resolve()
+            .expect_err("a withheld mediantime must not apply the update");
+        assert!(
+            matches!(err, Error::MissingBlockMediantime { block_hash } if block_hash == block_hash_of(0xaa)),
+            "got {err:?}"
+        );
+    }
+
+    /// Ordering fold-in: a DUPLICATE announcement of v2 in a block whose
+    /// mediantime is AFTER versionTime, processed under the ascending
+    /// (target_version_id, block_height) sort BEFORE the UNIQUE v3 in a block
+    /// whose mediantime is BEFORE versionTime, must NOT abort the loop. v3 IS
+    /// still applied. This pins that the versionTime cutoff lives ONLY in the
+    /// unique-apply branch, never on a duplicate tuple — a naive
+    /// per-every-tuple check would abort at the late duplicate and wrongly
+    /// return v2.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:168-171.
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4,
+    /// footnote 4.
     #[test]
     fn version_time_cutoff_ignores_duplicate_tuples() {
         let (initial, update1, update2) = chained_two_updates();
         let version_time = 1_700_000_100i64;
 
-        // v2 unique @ height 100, low block_time (< T) -> applied first.
-        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xb1);
-        // v2 DUPLICATE @ height 200, HIGH block_time (> T) -> processed before v3
-        // under the (tvid, height) sort, must NOT abort the loop.
-        let tx_v2_dup = confirmed_signal_tx(update1.hash(), 200, 1_700_000_999, 0xb2);
-        // v3 unique @ height 300, low block_time (< T) -> must still apply.
-        let tx_v3 = confirmed_signal_tx(update2.hash(), 300, 1_700_000_050, 0xb3);
+        // v2 unique @ height 100, block aa (mediantime < T) -> applied first.
+        let tx_v2 = confirmed_signal_tx_in_block(
+            update1.hash(),
+            100,
+            1_700_000_000,
+            &"aa".repeat(32),
+            0xb1,
+        );
+        // v2 DUPLICATE @ height 200, block bb (mediantime > T) -> processed
+        // before v3 under the (tvid, height) sort, must NOT abort the loop.
+        let tx_v2_dup = confirmed_signal_tx_in_block(
+            update1.hash(),
+            200,
+            1_700_000_999,
+            &"bb".repeat(32),
+            0xb2,
+        );
+        // v3 unique @ height 300, block cc (mediantime < T) -> must still apply.
+        let tx_v3 = confirmed_signal_tx_in_block(
+            update2.hash(),
+            300,
+            1_700_000_050,
+            &"cc".repeat(32),
+            0xb3,
+        );
+        let mediantimes = HashMap::from([
+            (block_hash_of(0xaa), ts(version_time - 100)),
+            (block_hash_of(0xbb), ts(version_time + 900)),
+            (block_hash_of(0xcc), ts(version_time - 50)),
+        ]);
 
         let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
         let options = ResolutionOptions {
@@ -3588,12 +3830,18 @@ mod tests {
             ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
-        let result = drive_to_resolved(resolver, vec![tx_v2, tx_v2_dup, tx_v3]);
+        let (result, _) =
+            try_drive_serving_blocks(resolver, vec![tx_v2, tx_v2_dup, tx_v3], &mediantimes);
 
         assert_eq!(
-            u64::from(result.document_metadata.version_id),
+            u64::from(
+                result
+                    .expect("the walk resolves")
+                    .document_metadata
+                    .version_id
+            ),
             3,
-            "a high-block_time duplicate must not suppress the later within-versionTime unique v3"
+            "a late-mediantime duplicate must not suppress the later within-versionTime unique v3"
         );
     }
 
@@ -4172,29 +4420,28 @@ mod tests {
             }
         }
 
-        // --- The time bound, against a real captured block time ---------------
-        let earliest = f
-            .earliest_block_time()
-            .unwrap_or_else(|| panic!("{id}: the capture must carry at least one beacon signal"));
-        let (before, before_rounds) =
-            drive_capture_rounds(resolver_for(None, Some(ts(earliest - 1))), &f, id);
-        let before =
-            before.unwrap_or_else(|e| panic!("{id}: the versionTime bound must resolve: {e}"));
-        assert!(
-            !before_rounds.is_empty(),
-            "{id}: the versionTime bound must READ the chain"
-        );
-        assert_eq!(
-            before.document_metadata.version_id.get(),
-            1,
-            "{id}: a versionTime one second before the earliest captured announcement \
-             (block_time {earliest}) must resolve to version 1"
-        );
-        assert_eq!(
-            resolved_document_json(&before.document, id),
-            genesis_json,
-            "{id}: a versionTime before the first update must resolve the genesis document"
-        );
+        // --- The time bound, against a real captured block mediantime ---------
+        if let Some(bound) = version_time_probe_bound(&f, id) {
+            let (before, before_rounds) =
+                drive_capture_rounds(resolver_for(None, Some(bound)), &f, id);
+            let before =
+                before.unwrap_or_else(|e| panic!("{id}: the versionTime bound must resolve: {e}"));
+            assert!(
+                !before_rounds.is_empty(),
+                "{id}: the versionTime bound must READ the chain"
+            );
+            assert_eq!(
+                before.document_metadata.version_id.get(),
+                1,
+                "{id}: a versionTime one second before the earliest announcing block's \
+                 mediantime ({bound}) must resolve to version 1"
+            );
+            assert_eq!(
+                resolved_document_json(&before.document, id),
+                genesis_json,
+                "{id}: a versionTime before the first update must resolve the genesis document"
+            );
+        }
     }
 
     /// The minted late-publishing fork, replayed from the snapshot taken of the

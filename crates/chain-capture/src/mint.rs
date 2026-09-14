@@ -46,15 +46,17 @@ use onlyerror::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::str::FromStr as _;
 
 use crate::chain::{self, ChainError, ChainOps};
 use crate::fixture::{self, ChainFixture};
-use crate::record::RecordingTransport;
+use crate::record::{self, Recording, RecordingTransport};
 use crate::secret::scrub;
 use crate::targets;
 use crate::validate;
@@ -1860,18 +1862,21 @@ pub fn emit_minted(state: &MintState) -> Result<PathBuf, MintError> {
 /// network for the resolve and this repository's own fixture tree for the write.
 /// A caller can hand it a scripted chain and a scratch directory and get the
 /// same code path a production emission takes.
-fn emit_minted_in<T: BtcTransport>(
+fn emit_minted_in<T: BtcTransport + Clone>(
     root: &Path,
     state: &MintState,
     transport: T,
 ) -> Result<PathBuf, MintError> {
     let did = Did::from_str(&state.did)?;
 
-    // Clone the recording handle BEFORE the transport is moved into the client:
-    // the client consumes the transport by value and never gives it back.
-    let transport = RecordingTransport::new(transport);
-    let recording = transport.recording();
-    let client = Client::new(state.endpoint.clone(), transport);
+    // One recording, two transports over it: the client consumes its
+    // transport by value and never gives it back, and the announcements'
+    // blocks are fetched after the resolve through the second.
+    let recording = Rc::new(RefCell::new(Recording::default()));
+    let client = Client::new(
+        state.endpoint.clone(),
+        RecordingTransport::sharing(transport.clone(), Rc::clone(&recording)),
+    );
 
     // No `chain_tip_height` is supplied: the client fetches `/blocks/tip/height`
     // itself and the recorder captures whatever the chain reported, so the tip in
@@ -1881,6 +1886,14 @@ fn emit_minted_in<T: BtcTransport>(
     // proves the fixture replays under it.
     let options = options_for(&recorded_updates(state), None)?;
     let expected = expectation_of(&client, &did, state, options)?;
+
+    // The confirming block of every announcement, whether or not the resolve
+    // asked for it: a replay under a `versionTime` bound reads its
+    // `mediantime`, and a capture without it cannot host that probe.
+    let addresses = recording.borrow().addresses.clone();
+    let blocks_transport = RecordingTransport::sharing(transport, Rc::clone(&recording));
+    record::capture_announcement_blocks(&blocks_transport, &state.endpoint, &addresses)
+        .map_err(did_btcr2_client::Error::from)?;
 
     let recorded = recording.borrow();
     let tip_height = recorded.tip.ok_or_else(|| MintError::NoTip {
@@ -2431,6 +2444,21 @@ mod tests {
             {
                 let txs = data.txs.get(address).cloned().unwrap_or_default();
                 (200, Value::Array(txs).to_string())
+            } else if let Some(hash) = path.strip_prefix("/block/") {
+                // Every block this fake confirms in carries the all-zero
+                // hash; a header for it, with a mediantime an hour behind the
+                // tip's timestamp, is what a capture records.
+                let tip = data.tip;
+                (
+                    200,
+                    json!({
+                        "id": hash,
+                        "height": tip,
+                        "timestamp": 1_700_000_000i64 + i64::from(tip),
+                        "mediantime": 1_699_996_400i64 + i64::from(tip),
+                    })
+                    .to_string(),
+                )
             } else {
                 (404, format!("this chain serves nothing at `{path}`"))
             };
@@ -4339,6 +4367,17 @@ mod tests {
             "the tip is the chain's own number — five blocks past the block the last \
              announcement confirmed in — captured by the recorder rather than chosen \
              by this tool"
+        );
+        assert_eq!(
+            written.blocks.keys().collect::<Vec<_>>(),
+            vec![&"00".repeat(32)],
+            "the announcements' confirming block is captured alongside the bodies, so a \
+             replay under a versionTime bound has its mediantime: {:?}",
+            written.blocks
+        );
+        assert!(
+            written.blocks[&"00".repeat(32)]["mediantime"].is_i64(),
+            "the block body carries the mediantime a replay reads"
         );
         let last_height = written
             .signals

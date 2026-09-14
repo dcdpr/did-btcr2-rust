@@ -48,6 +48,10 @@ fn build_agent() -> ureq::Agent {
 }
 
 /// The production transport: a `ureq::Agent` configured per `build_agent`.
+/// Cloning shares the agent (its connection pool), so a caller that needs a
+/// second handle — one moved into a client, one kept — does not build a
+/// second agent.
+#[derive(Clone)]
 pub struct UreqTransport {
     agent: ureq::Agent,
 }

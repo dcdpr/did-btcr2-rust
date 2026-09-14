@@ -1195,6 +1195,49 @@ mod tests {
         );
     }
 
+    /// A `versionTime` bound is evaluated against the announcing block's
+    /// `mediantime`, which the facade fetches through the block route: one
+    /// second after the served mediantime (1_699_996_400) the update applies,
+    /// one second before it the DID resolves to version 1. The header time
+    /// the announcement carries (1_700_000_000) is an hour later and plays
+    /// no part.
+    #[test]
+    fn resolve_evaluates_version_time_against_the_fetched_mediantime() {
+        let (did, update, txs) = announced_expiring_update();
+        for (version_time, expected_version) in [(1_699_996_401i64, 2u64), (1_699_996_399, 1)] {
+            let client = Client::new("http://fake".to_string(), FakeTransport::new(&txs));
+            let result = client
+                .resolve(
+                    &did,
+                    ResolutionOptions {
+                        sidecar_data: Some(SidecarData::new(
+                            None,
+                            vec![update.clone()],
+                            None,
+                            None,
+                        )),
+                        version_time: chrono::DateTime::from_timestamp(version_time, 0),
+                        ..Default::default()
+                    },
+                )
+                .expect("a versionTime bound resolves");
+            assert_eq!(
+                result.document_metadata.version_id.get(),
+                expected_version,
+                "versionTime {version_time} against mediantime 1699996400"
+            );
+            assert!(
+                client
+                    .transport
+                    .seen_paths()
+                    .iter()
+                    .any(|p| p.contains("/block/")),
+                "the block was fetched for the bound: {:?}",
+                client.transport.seen_paths()
+            );
+        }
+    }
+
     /// A caller-pinned `chain_tip_height` is used as given: the facade issues
     /// no `/blocks/tip/height` request, and an endpoint that cannot answer
     /// one does not fail the resolve. The pinned tip is what confirmations

@@ -53,6 +53,25 @@ pub(crate) const ALL_CHAIN_FIXTURES: &[&str] = &[
     "minted/late-publishing-fork",
 ];
 
+/// Captures taken before the capture tool recorded the confirming blocks of
+/// the announcements it found. A `versionTime` bound compares against the
+/// block's `mediantime`, which only a `/block/{hash}` body carries, so the
+/// replay tests' versionTime probe cannot run on these and skips, by name,
+/// until they are re-captured. Checked in BOTH directions: a listed fixture
+/// that now holds its blocks fails saying the list is stale, and an unlisted
+/// fixture missing a block fails as a new defect rather than being skipped.
+pub(crate) const FIXTURES_WITHOUT_SIGNAL_BLOCKS: &[&str] = &[
+    "regtest/k1/qgppexmy",
+    "regtest/k1/qgpy0hmm",
+    "regtest/x1/q26jeds9",
+    "regtest/x1/qfl7se8f",
+    "mutinynet/k1/q5p6w9su",
+    "mutinynet/k1/q5pgeu9z",
+    "mutinynet/x1/q5ugrf3w",
+    "minted/clean-rotating-beacons",
+    "minted/late-publishing-fork",
+];
+
 /// One captured chain snapshot: what the beacon addresses returned, the tip they
 /// were read against, and the signals found in them.
 #[derive(Debug, serde::Deserialize)]
@@ -151,6 +170,41 @@ impl ChainFixture {
     /// `versionTime` probe that must land BEFORE the first update.
     pub(crate) fn earliest_block_time(&self) -> Option<i64> {
         self.signals.iter().map(|signal| signal.block_time).min()
+    }
+
+    /// The hash of the block confirming each captured signal, read off the
+    /// address body the signal was scanned from.
+    pub(crate) fn signal_block_hashes(&self) -> BTreeSet<String> {
+        self.signals
+            .iter()
+            .filter_map(|signal| {
+                self.addresses
+                    .get(&signal.address)?
+                    .iter()
+                    .find(|tx| tx.txid.to_string() == signal.txid)
+                    .and_then(|tx| match &tx.status {
+                        Status::Confirmed { block_hash, .. } => Some(block_hash.to_string()),
+                        Status::Unconfirmed => None,
+                    })
+            })
+            .collect()
+    }
+
+    /// The earliest `mediantime` among the blocks confirming the captured
+    /// signals, or the first such block the fixture holds no `/block/{hash}`
+    /// body for. A `versionTime` probe is a comparison against these
+    /// mediantimes, so a fixture missing one cannot host the probe.
+    pub(crate) fn earliest_signal_mediantime(&self) -> Result<i64, String> {
+        let mut earliest: Option<i64> = None;
+        for hash in self.signal_block_hashes() {
+            let mediantime = self
+                .blocks
+                .get(&hash)
+                .and_then(|body| body["mediantime"].as_i64())
+                .ok_or(hash)?;
+            earliest = Some(earliest.map_or(mediantime, |e| e.min(mediantime)));
+        }
+        earliest.ok_or_else(|| "no captured signal".to_string())
     }
 }
 
@@ -3428,6 +3482,93 @@ fn chain_fixture_every_committed_capture_is_self_consistent() {
         let fixture = read_chain_fixture(id);
         assert_ne!(fixture.tip_height, 0, "{id}: every capture pins a real tip");
     }
+}
+
+/// The signal-block ledger is exact in both directions: every committed
+/// capture that lacks a `/block/{hash}` body for one of its announcements is
+/// listed in `FIXTURES_WITHOUT_SIGNAL_BLOCKS`, and every listed capture still
+/// lacks one. A re-capture that fills the blocks in fails here saying the
+/// list is stale — which is the moment the versionTime probes start running
+/// on that fixture — and a new capture missing blocks fails as a new defect.
+#[test]
+fn chain_fixture_signal_block_ledger_is_exact() {
+    for id in ALL_CHAIN_FIXTURES {
+        let fixture = read_chain_fixture(id);
+        let listed = FIXTURES_WITHOUT_SIGNAL_BLOCKS.contains(id);
+        match fixture.earliest_signal_mediantime() {
+            Ok(_) => assert!(
+                !listed,
+                "{id}: the capture now holds every announcement's block — delete it from \
+                 FIXTURES_WITHOUT_SIGNAL_BLOCKS so its versionTime probes run"
+            ),
+            Err(missing) => assert!(
+                listed,
+                "{id}: the capture holds no `/block/{missing}` body for one of its announcements; \
+                 re-run capture, or add the id to FIXTURES_WITHOUT_SIGNAL_BLOCKS to record it as \
+                 known-incomplete"
+            ),
+        }
+    }
+    for listed in FIXTURES_WITHOUT_SIGNAL_BLOCKS {
+        assert!(
+            ALL_CHAIN_FIXTURES.contains(listed),
+            "{listed} is listed in FIXTURES_WITHOUT_SIGNAL_BLOCKS but is not a committed fixture"
+        );
+    }
+}
+
+/// `signal_block_hashes` reads each signal's confirming block off its address
+/// body, and `earliest_signal_mediantime` is the minimum over the `/block`
+/// bodies for those hashes — or names the first hash the fixture lacks.
+#[test]
+fn chain_fixture_signal_blocks_and_earliest_mediantime() {
+    let hash_a = "aa".repeat(32);
+    let hash_b = "bb".repeat(32);
+    let mut tx1 = chain_signal_tx_json(&"11".repeat(32), &"01".repeat(32), 100, 1_700_000_000);
+    tx1["status"]["block_hash"] = serde_json::json!(hash_a);
+    let mut tx2 = chain_signal_tx_json(&"22".repeat(32), &"02".repeat(32), 101, 1_700_000_100);
+    tx2["status"]["block_hash"] = serde_json::json!(hash_b);
+    let signals = serde_json::json!([
+        { "address": "bcrt1qa", "txid": "01".repeat(32), "block_height": 100,
+          "block_time": 1_700_000_000, "update_hash": "11".repeat(32) },
+        { "address": "bcrt1qa", "txid": "02".repeat(32), "block_height": 101,
+          "block_time": 1_700_000_100, "update_hash": "22".repeat(32) },
+    ]);
+    let addresses = serde_json::json!({ "bcrt1qa": [tx1, tx2] });
+
+    let mut fixture = chain_fixture_envelope(signals, addresses);
+    assert_eq!(
+        fixture.signal_block_hashes(),
+        BTreeSet::from([hash_a.clone(), hash_b.clone()])
+    );
+    assert_eq!(
+        fixture.earliest_signal_mediantime(),
+        Err(hash_a.clone()),
+        "with no block bodies the first missing hash is named"
+    );
+
+    fixture.blocks.insert(
+        hash_a.clone(),
+        serde_json::json!({ "id": hash_a, "mediantime": 1_699_999_000 }),
+    );
+    assert_eq!(
+        fixture.earliest_signal_mediantime(),
+        Err(hash_b.clone()),
+        "one block is not enough: the other is named"
+    );
+    fixture.blocks.insert(
+        hash_b.clone(),
+        serde_json::json!({ "id": hash_b, "mediantime": 1_699_998_000 }),
+    );
+    assert_eq!(
+        fixture.earliest_signal_mediantime(),
+        Ok(1_699_998_000),
+        "the earliest mediantime, which is not the earliest header time's block"
+    );
+
+    let empty = chain_fixture_envelope(serde_json::json!([]), serde_json::json!({}));
+    assert!(empty.signal_block_hashes().is_empty());
+    assert!(empty.earliest_signal_mediantime().is_err());
 }
 
 /// A CAS or SMT beacon in the genesis document is TWO distinct blockers: how
