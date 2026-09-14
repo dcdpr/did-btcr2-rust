@@ -9,10 +9,10 @@ use crate::document::{
 use crate::update::UnsecuredUpdate;
 use crate::{error::Btcr2Error, identifier::Sha256Hash, update::Update};
 use chrono::{DateTime, Utc};
-use esploda::bitcoin::{Txid, opcodes::all::OP_RETURN, script::Instruction};
+use esploda::bitcoin::{BlockHash, Txid, opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
 use onlyerror::Error;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU64;
 
 const DEFAULT_RPC_BASE_URL: &str = "https://blockstream.info/testnet/api";
@@ -44,6 +44,16 @@ pub enum Error {
         /// Transaction id of the unconfirmed beacon-signal transaction.
         txid: Txid,
     },
+
+    /// The resolver asked for the `mediantime` of the block that confirmed a
+    /// beacon signal (the update's proof carries `expires`) and the caller's
+    /// answer did not include it. The check cannot run, so resolution stops
+    /// rather than applying an update it could not check.
+    #[error("mediantime of block {block_hash} was requested but not supplied")]
+    MissingBlockMediantime {
+        /// Hash of the block whose mediantime is missing.
+        block_hash: BlockHash,
+    },
 }
 
 /// Boundary conversion from the module-local resolver [`enum@Error`] to the
@@ -69,6 +79,11 @@ impl From<Error> for Btcr2Error {
             Error::Btcr2Error(e) => e,
             Error::UnconfirmedBeaconTx { txid } => Btcr2Error::InvalidSidecarData(format!(
                 "unconfirmed beacon transaction (txid={txid})"
+            )),
+            // The same fail-closed disposition `apply_update` takes when a
+            // proof carries `expires` and the mediantime is unavailable.
+            Error::MissingBlockMediantime { block_hash } => Btcr2Error::InvalidDidUpdate(format!(
+                "proof expires could not be checked: mediantime of block {block_hash} was not supplied"
             )),
         }
     }
@@ -97,6 +112,9 @@ pub struct Resolver<T = ()> {
     applied_block_height: Option<u32>,
     rpc_host: String,
     request_cache: HashSet<esploda::http::Uri>,
+    /// `mediantime` of confirming blocks, fetched only for updates whose proof
+    /// carries `expires`.
+    block_mediantimes: HashMap<BlockHash, DateTime<Utc>>,
 
     // Finite State Machine
     fsm: ResolverFsm,
@@ -129,25 +147,18 @@ impl Resolver {
             applied_block_height: None,
             rpc_host,
             request_cache: HashSet::new(),
+            block_mediantimes: HashMap::new(),
             fsm: ResolverFsm::Init,
             _type_state: (),
         }
     }
 
     fn from_waiting_for_responses(resolver: Resolver<WaitingForResponses>) -> Self {
-        Self {
-            contemporary_doc: resolver.contemporary_doc,
-            current_version_id: resolver.current_version_id,
-            target_condition: resolver.target_condition,
-            update_hash_history: resolver.update_hash_history,
-            update_lookup_table: resolver.update_lookup_table,
-            chain_tip_height: resolver.chain_tip_height,
-            applied_block_height: resolver.applied_block_height,
-            rpc_host: resolver.rpc_host,
-            request_cache: resolver.request_cache,
-            fsm: resolver.fsm,
-            _type_state: (),
-        }
+        resolver.with_state(())
+    }
+
+    fn from_waiting_for_block_times(resolver: Resolver<WaitingForBlockTimes>) -> Self {
+        resolver.with_state(())
     }
 
     /// Advance the resolution FSM one step, returning either a
@@ -195,151 +206,199 @@ impl Resolver {
                 // FIRST tuple is what the version_time bound is evaluated against.
                 signals.sort_unstable_by_key(|s| (s.update.target_version_id, s.block_height));
 
-                // Step 10.
-                let mut contemporary_hash = self.contemporary_doc.hash();
+                self.apply_signals(signals, true)
+            }
 
-                // Most-recently-applied UNIQUE update's version, tracked as a
-                // loop-local (no struct field / no public-API change). Under the
-                // ascending (target_version_id, block_height) sort at
-                // resolver.rs:190 this is simply the last unique apply; it keys the
-                // defensive dedup guard in the duplicate branch below.
-                let mut most_recent_applied_version: Option<NonZeroU64> = None;
+            ResolverFsm::ApplySignals(signals) => self.apply_signals(signals, false),
+        }
+    }
 
-                for AppliedSignal {
-                    update,
-                    block_height,
-                    block_time,
-                } in signals
+    /// Apply a sorted batch of matched signals (resolve.md "Process updates
+    /// Array"), then ask for the next beacon round or resolve.
+    ///
+    /// `may_request` is `true` on the first pass over a batch: if any proof in
+    /// it carries `expires` and the confirming block's mediantime is not yet
+    /// held, the batch is parked in [`ResolverFsm::ApplySignals`] and a
+    /// [`ResolverState::BlockRequests`] is returned. The second pass (after
+    /// [`Resolver::<WaitingForBlockTimes>::process_block_times`]) runs with
+    /// `false`: a still-missing mediantime is then the caller's error.
+    fn apply_signals(
+        mut self,
+        signals: Vec<AppliedSignal>,
+        may_request: bool,
+    ) -> Result<ResolverState, Error> {
+        // resolve.md "Check update.proof": `expires` is checked against the
+        // confirming block's mediantime, which the transaction status does not
+        // carry. Ask for every block still missing, once; a second pass without
+        // it is the caller's error.
+        let missing: BTreeSet<BlockHash> = signals
+            .iter()
+            .filter(|s| s.update.proof.inner.expires.is_some())
+            .map(|s| s.block_hash)
+            .filter(|hash| !self.block_mediantimes.contains_key(hash))
+            .collect();
+        if let Some(first) = missing.iter().next().copied() {
+            if !may_request {
+                return Err(Error::MissingBlockMediantime { block_hash: first });
+            }
+            let requests = missing
+                .iter()
+                .map(|hash| {
+                    esploda::Req::builder()
+                        .uri(format!("{}/block/{hash}", self.rpc_host))
+                        .body(())
+                        .expect("rpc_host + BlockHash hex produce a valid HTTP URI")
+                })
+                .collect();
+            self.fsm = ResolverFsm::ApplySignals(signals);
+            return Ok(ResolverState::BlockRequests(
+                self.with_state(WaitingForBlockTimes),
+                requests,
+            ));
+        }
+
+        // Step 10.
+        let mut contemporary_hash = self.contemporary_doc.hash();
+
+        // Most-recently-applied UNIQUE update's version, tracked as a
+        // loop-local (no struct field / no public-API change). Under the
+        // ascending (target_version_id, block_height) sort in `resolve` this is
+        // simply the last unique apply; it keys the defensive dedup guard in the
+        // duplicate branch below.
+        let mut most_recent_applied_version: Option<NonZeroU64> = None;
+
+        for AppliedSignal {
+            update,
+            block_height,
+            block_time,
+            block_hash,
+        } in signals
+        {
+            // Step 10.1.
+            if update.target_version_id <= self.current_version_id {
+                // confirm_duplicate indexes update_hash_history at
+                // [targetVersionId - 2], where each entry is an UPDATE
+                // hash appended by the apply branch (step 10.2.7 below).
+                // Do NOT push the contemporary DOCUMENT hash here: it
+                // would grow the history out from under confirm_duplicate
+                // and displace a later version's entry, turning a benign
+                // duplicate signal into a false LATE_PUBLISHING.
+                update.confirm_duplicate(&self.update_hash_history)?;
+
+                // Defensive guard (dedup of the SAME announcement,
+                // resolve.md:50 footnote 1): fold in the lower height when
+                // this duplicate targets the most-recently-applied update.
+                // Under the ascending (target_version_id, block_height) sort
+                // in `resolve` the lowest-height announcement is ALWAYS
+                // processed FIRST and is already the applied height, so every
+                // later same-update announcement is at a HIGHER height and
+                // this min() is a no-op — unreachable as a state change under
+                // natural signal flow, retained only for robustness against
+                // unsorted input.
+                if most_recent_applied_version == Some(update.target_version_id)
+                    && let Some(existing) = self.applied_block_height
                 {
-                    // Step 10.1.
-                    if update.target_version_id <= self.current_version_id {
-                        // confirm_duplicate indexes update_hash_history at
-                        // [targetVersionId - 2], where each entry is an UPDATE
-                        // hash appended by the apply branch (step 10.2.7 below).
-                        // Do NOT push the contemporary DOCUMENT hash here: it
-                        // would grow the history out from under confirm_duplicate
-                        // and displace a later version's entry, turning a benign
-                        // duplicate signal into a false LATE_PUBLISHING.
-                        update.confirm_duplicate(&self.update_hash_history)?;
-
-                        // Defensive guard (dedup of the SAME announcement,
-                        // resolve.md:50 footnote 1): fold in the lower height when
-                        // this duplicate targets the most-recently-applied update.
-                        // Under the ascending (target_version_id, block_height) sort
-                        // at resolver.rs:190 the lowest-height announcement is ALWAYS
-                        // processed FIRST and is already the applied height, so every
-                        // later same-update announcement is at a HIGHER height and
-                        // this min() is a no-op — unreachable as a state change under
-                        // natural signal flow, retained only for robustness against
-                        // unsorted input.
-                        if most_recent_applied_version == Some(update.target_version_id)
-                            && let Some(existing) = self.applied_block_height
-                        {
-                            self.applied_block_height = Some(existing.min(block_height));
-                        }
-                    }
-
-                    // Step 10.2.
-                    let next_update_version_id = self
-                        .current_version_id
-                        .checked_add(1)
-                        .expect("version_id overflow requires 2^64 updates to a single DID");
-                    if update.target_version_id == next_update_version_id {
-                        // Process updates §step 3 (resolve.md:153): the versionTime
-                        // bound is per UNIQUE applied tuple, evaluated against THIS
-                        // tuple's block_time. It sits inside the apply branch (not
-                        // the duplicate branch, not once per batch): under the
-                        // ascending (target_version_id, block_height) sort a
-                        // duplicate announcement is processed before a later-version
-                        // unique update, so a high-block_time DUPLICATE must never
-                        // abort the loop and suppress a later low-block_time unique
-                        // update announced within versionTime. If this unique update
-                        // is more recent than the requested time, resolve the
-                        // document in effect so far (the earlier version) and apply
-                        // no further.
-                        if let TargetCondition::Time(time) = &self.target_condition
-                            && block_time > *time
-                        {
-                            return Ok(ResolverState::Resolved(self.terminal_state()));
-                        }
-
-                        // Step 10.2.1.
-                        if update.source_hash != contemporary_hash {
-                            return Err(Btcr2Error::late_publishing(
-                                update.source_hash,
-                                contemporary_hash,
-                            ))?;
-                        }
-
-                        // Step 10.2.2 - 10.2.3.
-                        // The FSM does not yet fetch block mediantimes; a proof carrying `expires`
-                        // is rejected fail-closed until it does.
-                        let announcing_block = AnnouncingBlock {
-                            timestamp: block_time,
-                            mediantime: None,
-                        };
-                        self.contemporary_doc
-                            .apply_update(&update, &announcing_block)?;
-
-                        // Step 10.2.4.
-                        self.current_version_id = next_update_version_id;
-
-                        // confirmations = block of the most-recently-applied UNIQUE
-                        // update (resolve.md:31,50): overwrite here, so after the
-                        // ascending-version loop this holds the highest-version (most
-                        // recent) applied update's height.
-                        self.applied_block_height = Some(block_height);
-                        most_recent_applied_version = Some(update.target_version_id);
-
-                        // resolve.md §"Process updates Array" step 7
-                        // — once the document is deactivated, resolve it as the
-                        // final didDocument and process no further beacon
-                        // signals.
-                        if self.contemporary_doc.fields.deactivated {
-                            return Ok(ResolverState::Resolved(self.terminal_state()));
-                        }
-
-                        // Step 13.
-                        // Yes, we need to do 13 here: the spec does not early exit.
-                        if let TargetCondition::VersionId(version_id) = self.target_condition
-                            && version_id == self.current_version_id
-                        {
-                            return Ok(ResolverState::Resolved(self.terminal_state()));
-                        }
-
-                        // Step 10.2.5 - 10.2.6.
-                        let unsecured_update = UnsecuredUpdate::from(&update);
-
-                        // Step 10.2.7 - 10.2.8.
-                        self.update_hash_history.push(unsecured_update.hash());
-
-                        // Step 10.2.9.
-                        contemporary_hash = self.contemporary_doc.hash();
-                    }
-
-                    // Step 10.3.
-                    if update.target_version_id
-                        > self
-                            .current_version_id
-                            .checked_add(1)
-                            .expect("version_id overflow requires 2^64 updates to a single DID")
-                    {
-                        return Err(Error::LatePublishingError);
-                    }
-                }
-
-                // Step 11: unnecessary
-
-                // Step 12.
-                let ResolverState::Requests(fsm, signals) = self.next_signals_requests()? else {
-                    unreachable!()
-                };
-                if signals.is_empty() {
-                    Ok(ResolverState::Resolved(fsm.terminal_state()))
-                } else {
-                    Ok(ResolverState::Requests(fsm, signals))
+                    self.applied_block_height = Some(existing.min(block_height));
                 }
             }
+
+            // Step 10.2.
+            let next_update_version_id = self
+                .current_version_id
+                .checked_add(1)
+                .expect("version_id overflow requires 2^64 updates to a single DID");
+            if update.target_version_id == next_update_version_id {
+                // Process updates §step 3 (resolve.md:153): the versionTime
+                // bound is per UNIQUE applied tuple, evaluated against THIS
+                // tuple's block_time. It sits inside the apply branch (not
+                // the duplicate branch, not once per batch): under the
+                // ascending (target_version_id, block_height) sort a
+                // duplicate announcement is processed before a later-version
+                // unique update, so a high-block_time DUPLICATE must never
+                // abort the loop and suppress a later low-block_time unique
+                // update announced within versionTime. If this unique update
+                // is more recent than the requested time, resolve the
+                // document in effect so far (the earlier version) and apply
+                // no further.
+                if let TargetCondition::Time(time) = &self.target_condition
+                    && block_time > *time
+                {
+                    return Ok(ResolverState::Resolved(self.terminal_state()));
+                }
+
+                // Step 10.2.1.
+                if update.source_hash != contemporary_hash {
+                    return Err(Btcr2Error::late_publishing(
+                        update.source_hash,
+                        contemporary_hash,
+                    ))?;
+                }
+
+                // Step 10.2.2 - 10.2.3.
+                let announcing_block = AnnouncingBlock {
+                    timestamp: block_time,
+                    mediantime: self.block_mediantimes.get(&block_hash).copied(),
+                };
+                self.contemporary_doc
+                    .apply_update(&update, &announcing_block)?;
+
+                // Step 10.2.4.
+                self.current_version_id = next_update_version_id;
+
+                // confirmations = block of the most-recently-applied UNIQUE
+                // update (resolve.md:31,50): overwrite here, so after the
+                // ascending-version loop this holds the highest-version (most
+                // recent) applied update's height.
+                self.applied_block_height = Some(block_height);
+                most_recent_applied_version = Some(update.target_version_id);
+
+                // resolve.md §"Process updates Array" step 7
+                // — once the document is deactivated, resolve it as the
+                // final didDocument and process no further beacon
+                // signals.
+                if self.contemporary_doc.fields.deactivated {
+                    return Ok(ResolverState::Resolved(self.terminal_state()));
+                }
+
+                // Step 13.
+                // Yes, we need to do 13 here: the spec does not early exit.
+                if let TargetCondition::VersionId(version_id) = self.target_condition
+                    && version_id == self.current_version_id
+                {
+                    return Ok(ResolverState::Resolved(self.terminal_state()));
+                }
+
+                // Step 10.2.5 - 10.2.6.
+                let unsecured_update = UnsecuredUpdate::from(&update);
+
+                // Step 10.2.7 - 10.2.8.
+                self.update_hash_history.push(unsecured_update.hash());
+
+                // Step 10.2.9.
+                contemporary_hash = self.contemporary_doc.hash();
+            }
+
+            // Step 10.3.
+            if update.target_version_id
+                > self
+                    .current_version_id
+                    .checked_add(1)
+                    .expect("version_id overflow requires 2^64 updates to a single DID")
+            {
+                return Err(Error::LatePublishingError);
+            }
+        }
+
+        // Step 11: unnecessary
+
+        // Step 12.
+        let ResolverState::Requests(fsm, signals) = self.next_signals_requests()? else {
+            unreachable!()
+        };
+        if signals.is_empty() {
+            Ok(ResolverState::Resolved(fsm.terminal_state()))
+        } else {
+            Ok(ResolverState::Requests(fsm, signals))
         }
     }
 
@@ -382,7 +441,7 @@ impl Resolver {
                 };
                 let signal_bytes = Sha256Hash::from(signal_arr);
 
-                let (block_time, block_height) = match tx.status {
+                let (block_time, block_height, block_hash) = match tx.status {
                     Status::Unconfirmed => {
                         // only a *needed* signal — one whose announced hash is
                         // present in the sidecar update-lookup table — blocks resolution
@@ -400,8 +459,8 @@ impl Resolver {
                     Status::Confirmed {
                         block_time,
                         block_height,
-                        ..
-                    } => (block_time, block_height),
+                        block_hash,
+                    } => (block_time, block_height, block_hash),
                 };
 
                 signals.push(NextSignal {
@@ -409,6 +468,7 @@ impl Resolver {
                     signal_bytes,
                     block_time,
                     block_height,
+                    block_hash,
                 });
             }
         }
@@ -495,6 +555,7 @@ impl Resolver {
                     update,
                     block_height: beacon_signal.block_height,
                     block_time: beacon_signal.block_time,
+                    block_hash: beacon_signal.block_hash,
                 })
             })
             .collect()
@@ -502,6 +563,25 @@ impl Resolver {
 }
 
 impl<T> Resolver<T> {
+    /// Move every field into a resolver in type state `state`. The type-state
+    /// marker is the only thing that changes between FSM steps.
+    fn with_state<U>(self, state: U) -> Resolver<U> {
+        Resolver {
+            contemporary_doc: self.contemporary_doc,
+            current_version_id: self.current_version_id,
+            target_condition: self.target_condition,
+            update_hash_history: self.update_hash_history,
+            update_lookup_table: self.update_lookup_table,
+            chain_tip_height: self.chain_tip_height,
+            applied_block_height: self.applied_block_height,
+            rpc_host: self.rpc_host,
+            request_cache: self.request_cache,
+            block_mediantimes: self.block_mediantimes,
+            fsm: self.fsm,
+            _type_state: state,
+        }
+    }
+
     /// Construct the terminal [`ResolutionResult`] from the resolver's current
     /// state. Centralizes the metadata-assembly logic so
     /// every terminal arm of [`Resolver::resolve`] returns the spec triple
@@ -539,23 +619,14 @@ struct AppliedSignal {
     update: Update,
     block_height: u32,
     block_time: DateTime<Utc>,
+    /// Hash of the confirming block: the key under which its `mediantime` is
+    /// requested and held when the update's proof carries `expires`.
+    block_hash: BlockHash,
 }
 
 impl Resolver<WaitingForResponses> {
     fn from_init(resolver: Resolver) -> Self {
-        Self {
-            contemporary_doc: resolver.contemporary_doc,
-            current_version_id: resolver.current_version_id,
-            target_condition: resolver.target_condition,
-            update_hash_history: resolver.update_hash_history,
-            update_lookup_table: resolver.update_lookup_table,
-            chain_tip_height: resolver.chain_tip_height,
-            applied_block_height: resolver.applied_block_height,
-            rpc_host: resolver.rpc_host,
-            request_cache: resolver.request_cache,
-            fsm: resolver.fsm,
-            _type_state: WaitingForResponses,
-        }
+        resolver.with_state(WaitingForResponses)
     }
 
     /// Feed the blockchain transactions requested by a
@@ -571,9 +642,26 @@ impl Resolver<WaitingForResponses> {
     }
 }
 
+impl Resolver<WaitingForBlockTimes> {
+    /// Feed back the mediantimes a [`ResolverState::BlockRequests`] asked for,
+    /// keyed by block hash.
+    pub fn process_block_times(
+        mut self,
+        mediantimes: HashMap<BlockHash, DateTime<Utc>>,
+    ) -> Resolver {
+        self.block_mediantimes.extend(mediantimes);
+
+        Resolver::from_waiting_for_block_times(self)
+    }
+}
+
 /// Marker type for FSM.
 #[derive(Debug)]
 pub struct WaitingForResponses;
+
+/// Marker: the FSM has asked for the mediantime of one or more blocks.
+#[derive(Debug)]
+pub struct WaitingForBlockTimes;
 
 #[derive(Debug)]
 enum ResolverFsm {
@@ -582,6 +670,10 @@ enum ResolverFsm {
 
     /// FSM is ready to find the next beacon signals.
     FindNextSignals(HashMap<BeaconType, Vec<Transaction>>),
+
+    /// Signals already matched to sidecar updates, held while the caller
+    /// fetches the block mediantimes the proof checks need.
+    ApplySignals(Vec<AppliedSignal>),
 }
 
 /// The result of advancing the resolver FSM one step: either outstanding
@@ -594,6 +686,14 @@ pub enum ResolverState {
         Resolver<WaitingForResponses>,
         HashMap<BeaconType, Vec<esploda::Req>>,
     ),
+
+    /// An update's proof carries `expires`, so the resolver needs the
+    /// `mediantime` of the block that confirmed its beacon signal
+    /// (did-btcr2/src/operations/resolve.md, "Check update.proof"). One
+    /// `GET {rpc_host}/block/{hash}` per block; parse `id` and `mediantime`
+    /// from each body and feed them back with
+    /// [`Resolver::<WaitingForBlockTimes>::process_block_times`].
+    BlockRequests(Resolver<WaitingForBlockTimes>, Vec<esploda::Req>),
 
     /// Document is fully resolved. Carries the spec resolution triple
     /// (`didResolutionMetadata`, `didDocument`, `didDocumentMetadata`) as a
@@ -609,6 +709,9 @@ struct NextSignal {
     /// Confirming block height, carried into [`AppliedSignal`] for the
     /// confirmations computation.
     block_height: u32,
+    /// Confirming block hash, carried into [`AppliedSignal`] for the
+    /// mediantime lookup.
+    block_hash: BlockHash,
 }
 
 #[derive(Debug)]
@@ -640,7 +743,7 @@ mod tests {
         reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
         stale_overrides, test_suite_checked_out, unclassified_rows_with,
     };
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
     /// The discovered vector set, or `None` when the `test-suite/` submodule is
     /// absent — the non-recursive-clone case every op-vector test skips green on.
@@ -1989,6 +2092,9 @@ mod tests {
         match fsm.resolve().expect("empty-signal step resolves") {
             ResolverState::Resolved(result) => result,
             ResolverState::Requests(..) => panic!("expected Resolved with no signals"),
+            ResolverState::BlockRequests(..) => {
+                panic!("unexpected block request: no update in this test carries proof.expires")
+            }
         }
     }
 
@@ -2104,12 +2210,14 @@ mod tests {
             signal_bytes: update_hi.hash(),
             block_time: Utc::now(),
             block_height: 50,
+            block_hash: zero_block_hash(),
         };
         let signal_lo = NextSignal {
             beacon_type: BeaconType::Singleton,
             signal_bytes: update_lo.hash(),
             block_time: Utc::now(),
             block_height: 100,
+            block_hash: zero_block_hash(),
         };
 
         let Some(resolver) = resolver_with(sidecar, None) else {
@@ -2126,12 +2234,14 @@ mod tests {
                     signal_bytes: signal_hi.signal_bytes,
                     block_time: signal_hi.block_time,
                     block_height: signal_hi.block_height,
+                    block_hash: signal_hi.block_hash,
                 },
                 NextSignal {
                     beacon_type: signal_lo.beacon_type,
                     signal_bytes: signal_lo.signal_bytes,
                     block_time: signal_lo.block_time,
                     block_height: signal_lo.block_height,
+                    block_hash: signal_lo.block_hash,
                 },
             ];
 
@@ -2382,6 +2492,177 @@ mod tests {
         DateTime::from_timestamp(secs, 0).expect("in-range unix timestamp")
     }
 
+    /// The all-zero block hash every synthetic confirmed status carries
+    /// (`confirmed_signal_tx`).
+    fn zero_block_hash() -> BlockHash {
+        "00".repeat(32)
+            .parse()
+            .expect("64 hex zeros parse as a block hash")
+    }
+
+    /// Header timestamp of the synthetic block that confirms the `expires`
+    /// signal in the block-mediantime tests.
+    const HEADER_TIME: i64 = 1_700_000_000;
+    /// `expires` an hour after the header time.
+    const EXPIRES: i64 = 1_700_003_600;
+
+    /// A v2 update against `chain_initial_document` whose proof carries
+    /// `expires` (= `EXPIRES`) and no `created`, with the sidecar holding it and
+    /// the confirmed Singleton signal announcing it at `HEADER_TIME`.
+    fn update_with_expires() -> (InitialDocument, Update, Transaction) {
+        let (did, initial) = chain_initial_document();
+        let document = Document::from(initial.clone());
+        let vm_id = format!("{}#initialKey", did.encode());
+        let (unsigned, _, _) = document
+            .construct_unsigned_update(
+                &chain_benign_patch(&vm_id),
+                NonZeroU64::new(2).expect("2 is non-zero"),
+            )
+            .expect("v2 update constructs against the initial document");
+        let update = crate::test_signing::sign_unsigned_update_for_test(
+            &unsigned,
+            &did,
+            &vm_id,
+            &chain_secret_key(),
+            None,
+            Some(ts(EXPIRES)),
+        );
+        let tx = confirmed_signal_tx(update.hash(), 100, HEADER_TIME, 0xd1);
+        (initial, update, tx)
+    }
+
+    /// Drive `update_with_expires` from Init through the first signal round and
+    /// return the `BlockRequests` the resolver must raise for it.
+    fn drive_to_block_requests() -> (Resolver<WaitingForBlockTimes>, Vec<esploda::Req>) {
+        let (initial, update, tx) = update_with_expires();
+        let sidecar = SidecarData::new(None, vec![update], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        assert!(
+            resolver.block_mediantimes.is_empty(),
+            "a fresh resolver holds no block mediantimes"
+        );
+
+        let ResolverState::Requests(next_state, _requests) = resolver
+            .resolve()
+            .expect("Init step yields beacon requests")
+        else {
+            panic!("expected Requests from Init step");
+        };
+        let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![tx]);
+        match next_state
+            .process_responses(transactions)
+            .resolve()
+            .expect("a proof carrying expires asks for the block, not an error")
+        {
+            ResolverState::BlockRequests(next, requests) => (next, requests),
+            other => panic!("expected BlockRequests for a proof carrying expires, got {other:?}"),
+        }
+    }
+
+    /// Drive a post-`process_block_times` resolver to its terminal state with
+    /// empty beacon rounds; a second block request is a test failure.
+    fn drive_after_block_times(resolver: Resolver) -> Result<ResolutionResult, Error> {
+        let mut state = resolver.resolve()?;
+        loop {
+            match state {
+                ResolverState::Resolved(result) => break Ok(result),
+                ResolverState::Requests(next, _requests) => {
+                    state = next.process_responses(HashMap::new()).resolve()?;
+                }
+                ResolverState::BlockRequests(..) => {
+                    panic!("the resolver asked for a block it was already given")
+                }
+            }
+        }
+    }
+
+    /// A sidecar update whose proof carries `expires` makes the resolver ask
+    /// for the confirming block's mediantime — one `GET /block/{hash}` — and,
+    /// once given a mediantime `expires` is not before, applies the update.
+    #[test]
+    fn resolver_requests_block_mediantime_when_a_proof_carries_expires() {
+        let (next, requests) = drive_to_block_requests();
+        assert_eq!(requests.len(), 1, "one confirming block, one request");
+        let path = requests[0].uri().path().to_string();
+        assert!(
+            path.ends_with(
+                "/block/0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            "the request is GET /block/{{hash}} for the confirming block, got {path}"
+        );
+
+        let mut mediantimes = HashMap::new();
+        mediantimes.insert(zero_block_hash(), ts(HEADER_TIME - 3600));
+        let result = drive_after_block_times(next.process_block_times(mediantimes))
+            .expect("expires after the mediantime applies");
+        assert_eq!(result.document_metadata.version_id.get(), 2);
+    }
+
+    /// The fetched mediantime is what `expires` is checked against: a
+    /// mediantime after `expires` rejects the update as INVALID_DID_UPDATE.
+    #[test]
+    fn resolver_rejects_expires_before_the_fetched_mediantime() {
+        let (next, _requests) = drive_to_block_requests();
+        let mut mediantimes = HashMap::new();
+        mediantimes.insert(zero_block_hash(), ts(EXPIRES + 1));
+        let err = drive_after_block_times(next.process_block_times(mediantimes))
+            .expect_err("expires before the mediantime must be rejected");
+        match err {
+            Error::Btcr2Error(Btcr2Error::InvalidDidUpdate(msg)) => assert!(
+                msg.contains("expires is before the announcing block"),
+                "unexpected rejection message: {msg}"
+            ),
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
+    /// Answering the block round without the requested block is a typed
+    /// error naming the block, not an apply and not a second request.
+    #[test]
+    fn resolver_errors_when_the_requested_mediantime_is_not_supplied() {
+        let (next, _requests) = drive_to_block_requests();
+        let err = next
+            .process_block_times(HashMap::new())
+            .resolve()
+            .expect_err("a withheld mediantime must not apply the update");
+        match &err {
+            Error::MissingBlockMediantime { block_hash } => {
+                assert_eq!(*block_hash, zero_block_hash());
+            }
+            other => panic!("expected MissingBlockMediantime, got {other:?}"),
+        }
+        assert!(
+            matches!(Btcr2Error::from(err), Btcr2Error::InvalidDidUpdate(_)),
+            "the spec-error mapping is INVALID_DID_UPDATE"
+        );
+    }
+
+    /// Updates whose proofs carry no `expires` never trigger a block request:
+    /// the chained two-update drive still reaches version 3 through
+    /// `Requests` rounds only (the `BlockRequests` arm in `drive_to_resolved`
+    /// panics).
+    #[test]
+    fn resolver_never_requests_blocks_without_expires() {
+        let (initial, update1, update2) = chained_two_updates();
+        let tx1 = confirmed_signal_tx(update1.hash(), 100, HEADER_TIME, 0xe1);
+        let tx2 = confirmed_signal_tx(update2.hash(), 101, HEADER_TIME + 600, 0xe2);
+        let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..Default::default()
+        };
+        let resolver = Resolver::new(initial, options);
+        assert!(resolver.block_mediantimes.is_empty());
+
+        let result = drive_to_resolved(resolver, vec![tx1, tx2]);
+        assert_eq!(result.document_metadata.version_id.get(), 3);
+    }
+
     /// Extract the beacon address from a `/address/{a}/txs` request path.
     ///
     /// The ADDRESS is the routing key, not the URI: the full URI embeds
@@ -2409,6 +2690,37 @@ mod tests {
                  request shape needs a new route here — and a new capture to serve it."
             )
         }
+    }
+
+    /// Extract the block hash from a `/block/{hash}` request path. The hash is
+    /// the routing key into [`ChainFixture::blocks`], for the same reason
+    /// [`address_from_txs_uri`] keys on the address.
+    fn block_hash_from_block_uri(uri: &esploda::http::Uri) -> &str {
+        let path = uri.path();
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let n = segments.len();
+        if n >= 2 && segments[n - 2] == "block" {
+            segments[n - 1]
+        } else {
+            panic!(
+                "the resolver requested `{path}`, which is not a `/block/{{hash}}` endpoint. \
+                 The capture harness routes block requests on the hash in that path."
+            )
+        }
+    }
+
+    /// Parse a captured `/block/{hash}` body the way the client does: the
+    /// `id` field is the key, `mediantime` the value.
+    fn block_mediantime_from_fixture_body(body: &serde_json::Value) -> (BlockHash, DateTime<Utc>) {
+        let block_hash: BlockHash = body["id"]
+            .as_str()
+            .expect("a captured block body carries a string `id`")
+            .parse()
+            .expect("a captured block body's `id` is a hex block hash");
+        let mediantime = ts(body["mediantime"]
+            .as_i64()
+            .expect("a captured block body carries an integer `mediantime`"));
+        (block_hash, mediantime)
     }
 
     /// How many request rounds a captured replay may take before it is treated
@@ -2457,6 +2769,34 @@ mod tests {
             let (next_state, beacons) = match state {
                 ResolverState::Resolved(result) => return (Ok(result), rounds),
                 ResolverState::Requests(next_state, beacons) => (next_state, beacons),
+                ResolverState::BlockRequests(next_state, requests) => {
+                    // An update proof carries `expires`: serve each
+                    // `/block/{hash}` body from the fixture's `blocks` map,
+                    // keyed by the body's own `id` the way the client does.
+                    let mut requested: Vec<String> = Vec::new();
+                    let mut mediantimes: HashMap<BlockHash, DateTime<Utc>> = HashMap::new();
+                    for req in &requests {
+                        let hash = block_hash_from_block_uri(req.uri());
+                        requested.push(format!("block/{hash}"));
+                        let body = fixture.blocks.get(hash).unwrap_or_else(|| {
+                            panic!(
+                                "{id}: the resolver asked for block {hash} (an update proof \
+                                 carries `expires`) but the fixture holds no `/block/{hash}` \
+                                 body; re-run capture — `cargo run -p chain-capture -- capture \
+                                 --network {} --vector {id}`. Rounds so far: {rounds:?}",
+                                fixture.network
+                            )
+                        });
+                        let (block_hash, mediantime) = block_mediantime_from_fixture_body(body);
+                        mediantimes.insert(block_hash, mediantime);
+                    }
+                    rounds.push(requested);
+                    state = match next_state.process_block_times(mediantimes).resolve() {
+                        Ok(state) => state,
+                        Err(e) => return (Err(e), rounds),
+                    };
+                    continue;
+                }
             };
 
             if rounds.len() >= max_rounds {
@@ -2540,6 +2880,9 @@ mod tests {
                         .process_responses(HashMap::new())
                         .resolve()
                         .expect("empty-signal step resolves");
+                }
+                ResolverState::BlockRequests(..) => {
+                    panic!("unexpected block request: no update in this test carries proof.expires")
                 }
             }
         }
@@ -3234,6 +3577,7 @@ mod tests {
             signal_bytes: missing_hash,
             block_time: Utc::now(),
             block_height: 42,
+            block_hash: zero_block_hash(),
         };
 
         let err = resolver
@@ -3262,6 +3606,7 @@ mod tests {
             signal_bytes: Sha256Hash::from([1u8; 32]),
             block_time: Utc::now(),
             block_height: 1,
+            block_hash: zero_block_hash(),
         };
 
         let err = resolver
@@ -3286,6 +3631,7 @@ mod tests {
             signal_bytes: Sha256Hash::from([2u8; 32]),
             block_time: Utc::now(),
             block_height: 1,
+            block_hash: zero_block_hash(),
         };
 
         let err = resolver
@@ -3380,6 +3726,7 @@ mod tests {
             did: None,
             sidecar: None,
             expected: None,
+            blocks: BTreeMap::new(),
         }
     }
 

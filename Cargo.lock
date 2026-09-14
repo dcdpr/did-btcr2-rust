@@ -612,6 +612,7 @@ name = "did-btcr2-client"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "chrono",
  "did-btcr2",
  "esploda",
  "hex",

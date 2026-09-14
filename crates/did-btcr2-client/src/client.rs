@@ -107,7 +107,8 @@ impl<T: BtcTransport> Client<T> {
     ///
     /// Fetches the chain-tip height (a hard, propagated fetch — a None tip
     /// silently weakens confirmation reporting), then drives the sans-I/O
-    /// resolver FSM to completion, issuing each beacon request through the
+    /// resolver FSM to completion, issuing each beacon request — and, when an
+    /// update's proof carries `expires`, each block request — through the
     /// injected transport.
     pub fn resolve(
         &self,
@@ -149,6 +150,25 @@ impl<T: BtcTransport> Client<T> {
                         }
                     }
                     fsm = next_state.process_responses(responses);
+                }
+                ResolverState::BlockRequests(next_state, requests) => {
+                    // Keyed by the body's own `id`, not the request sent: a
+                    // response for the wrong block leaves the requested hash
+                    // missing and the core returns a typed error.
+                    let mut mediantimes = HashMap::new();
+                    for req in requests {
+                        let resp = self.transport.execute(req.map(|()| Vec::new()))?;
+                        let status = resp.status().as_u16();
+                        if !(200..300).contains(&status) {
+                            return Err(Error::Transport(TransportError::Status {
+                                status,
+                                body: String::from_utf8_lossy(resp.body()).into_owned(),
+                            }));
+                        }
+                        let (hash, mediantime) = esplora::block_mediantime_from_body(resp.body())?;
+                        mediantimes.insert(hash, mediantime);
+                    }
+                    fsm = next_state.process_block_times(mediantimes);
                 }
                 ResolverState::Resolved(result) => break result,
             }
@@ -439,6 +459,8 @@ mod tests {
         /// If set, `POST /tx` returns 200 with a txid that does NOT match the
         /// posted transaction (exercises the broadcast txid cross-check).
         echo_wrong_txid: bool,
+        /// Body served for `GET /block/{hash}` (an Esplora block header JSON).
+        block_body: Vec<u8>,
     }
 
     impl FakeTransport {
@@ -453,6 +475,7 @@ mod tests {
                 broadcast_status: 200,
                 force_status: None,
                 echo_wrong_txid: false,
+                block_body: crate::esplora::BLOCK_BODY.as_bytes().to_vec(),
             }
         }
 
@@ -582,6 +605,8 @@ mod tests {
                 self.utxo_body()
             } else if path.ends_with("/fee-estimates") {
                 br#"{"6":1.0}"#.to_vec()
+            } else if path.contains("/block/") && !path.ends_with("/txs") {
+                self.block_body.clone()
             } else {
                 // Unknown route: an empty array is a safe default for any other
                 // tx-list endpoint the FSM might probe.
@@ -801,6 +826,38 @@ mod tests {
             !result.document_metadata.deactivated,
             "genesis is not deactivated",
         );
+    }
+
+    /// The transport route the `BlockRequests` arm of `resolve` runs through:
+    /// a `GET {base}/block/{hash}` answered with an Esplora block body that
+    /// `block_mediantime_from_body` parses to the requested hash and its
+    /// mediantime.
+    ///
+    /// The arm cannot be driven end to end from the public API: only a proof
+    /// carrying `expires` triggers it, and `construct_signed_update` never sets
+    /// one. Its wiring is proven by the exhaustive match on `ResolverState`
+    /// (it does not compile without the arm), the core FSM tests, and the
+    /// parser tests in `esplora.rs`; this test pins the route those rely on.
+    #[test]
+    fn resolve_serves_block_requests_through_the_transport() {
+        let transport = FakeTransport::new("[]");
+        let zero_hash: esploda::bitcoin::BlockHash = "00"
+            .repeat(32)
+            .parse()
+            .expect("64 hex zeros parse as a block hash");
+        let req = http::Request::get(format!("http://fake/block/{zero_hash}"))
+            .body(Vec::new())
+            .expect("static URI is valid");
+
+        let resp = transport
+            .execute(req)
+            .expect("the fake serves block bodies");
+        assert_eq!(resp.status().as_u16(), 200);
+        let (hash, mediantime) =
+            esplora::block_mediantime_from_body(resp.body()).expect("the served block body parses");
+        assert_eq!(hash, zero_hash, "the body's id is the requested block");
+        assert_eq!(mediantime.timestamp(), 1_699_996_400);
+        assert_eq!(transport.call_count(), 1);
     }
 
     /// An externally-created (`x1`) DID whose genesis document is supplied

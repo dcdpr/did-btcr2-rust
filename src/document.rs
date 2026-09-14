@@ -3066,6 +3066,9 @@ mod tests {
                         .resolve()
                         .expect("empty-signal step resolves");
                 }
+                ResolverState::BlockRequests(..) => {
+                    panic!("unexpected block request: no update in this test carries proof.expires")
+                }
             }
         };
 
@@ -3183,6 +3186,9 @@ mod tests {
                         .resolve()
                         .expect("empty-signal step resolves without a false late-publishing");
                 }
+                ResolverState::BlockRequests(..) => {
+                    panic!("unexpected block request: no update in this test carries proof.expires")
+                }
             }
         };
 
@@ -3287,6 +3293,9 @@ mod tests {
                         .process_responses(empty)
                         .resolve()
                         .expect("empty-signal step resolves");
+                }
+                ResolverState::BlockRequests(..) => {
+                    panic!("unexpected block request: no update in this test carries proof.expires")
                 }
             }
         };

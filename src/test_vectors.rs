@@ -78,6 +78,10 @@ pub(crate) struct ChainFixture {
     /// Minted scenarios only.
     #[serde(default)]
     pub(crate) expected: Option<serde_json::Value>,
+    /// `GET /block/{hash}` bodies keyed by block hash, present only when a
+    /// replay needs a block's mediantime (an update proof carrying `expires`).
+    #[serde(default)]
+    pub(crate) blocks: BTreeMap<String, serde_json::Value>,
 }
 
 /// One beacon signal found in a captured snapshot: which address announced it,
