@@ -72,5 +72,8 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   Update" step 4), not only on the next version. A skipped version announced
   after `versionTime` now resolves the document in effect instead of raising
   `LATE_PUBLISHING`.
+- `did-btcr2-client`: address-history paging stops with
+  `TransportError::Malformed` when a continuation page repeats the page it was
+  keyed on, instead of looping on a server that re-serves the same page.
 
 ### Security

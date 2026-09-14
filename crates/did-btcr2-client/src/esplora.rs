@@ -6,7 +6,7 @@
 //! and `POST /tx` land in a later plan.
 
 use chrono::{DateTime, Utc};
-use esploda::bitcoin::BlockHash;
+use esploda::bitcoin::{BlockHash, Txid};
 use esploda::esplora::{Status, Transaction};
 
 use crate::error::{Error, TransportError};
@@ -49,7 +49,10 @@ fn fetch_txs<T: BtcTransport>(
 /// `/txs/chain/{last_seen_txid}` from the oldest confirmed transaction of each
 /// page until a page carries fewer than [`ESPLORA_PAGE_SIZE`] confirmed
 /// transactions. Mempool entries (first page only) are carried through
-/// unchanged; the core skips them itself.
+/// unchanged; the core skips them itself. A continuation whose oldest
+/// confirmed transaction is the very txid it was keyed on re-serves its own
+/// page: that is a malformed history, reported as
+/// [`TransportError::Malformed`], not an infinite walk.
 pub fn address_history<T: BtcTransport>(
     transport: &T,
     first: http::Request<Vec<u8>>,
@@ -57,6 +60,7 @@ pub fn address_history<T: BtcTransport>(
     let txs_uri = first.uri().to_string();
     let mut page = fetch_txs(transport, first)?;
     let mut history = Vec::new();
+    let mut previous_last_seen: Option<Txid> = None;
     loop {
         let confirmed = page
             .iter()
@@ -67,10 +71,18 @@ pub fn address_history<T: BtcTransport>(
             .rev()
             .find(|tx| matches!(tx.status, Status::Confirmed { .. }))
             .map(|tx| tx.txid);
+        if let Some(txid) = last_seen
+            && Some(txid) == previous_last_seen
+        {
+            return Err(Error::Transport(TransportError::Malformed(format!(
+                "address history continuation from {txid} returned the same page again"
+            ))));
+        }
         history.append(&mut page);
         let (Some(last_seen), true) = (last_seen, confirmed >= ESPLORA_PAGE_SIZE) else {
             return Ok(history);
         };
+        previous_last_seen = Some(last_seen);
         let next = http::Request::get(format!("{txs_uri}/chain/{last_seen}"))
             .body(Vec::new())
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;

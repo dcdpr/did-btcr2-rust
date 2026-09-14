@@ -30,9 +30,9 @@ above. Always name crates with `-p`.
 | Crate | Tests |
 |---|---|
 | `did-btcr2` | 342 lib + 9 conformance + 1 doctest |
-| `did-btcr2-client` | 48 + 1 e2e |
-| `did-btcr2-cli` | 42 + 2 broken-pipe |
-| `chain-capture` | 175 |
+| `did-btcr2-client` | 54 + 1 e2e |
+| `did-btcr2-cli` | 43 + 2 broken-pipe |
+| `chain-capture` | 184 |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 

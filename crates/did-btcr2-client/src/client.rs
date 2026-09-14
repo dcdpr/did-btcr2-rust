@@ -1157,6 +1157,52 @@ mod tests {
         );
     }
 
+    /// A continuation page that repeats the page it was keyed on is a
+    /// malformed history, not more history. The pager keys each continuation
+    /// on the previous page's oldest confirmed txid; a server that re-serves
+    /// the same full page for that key would otherwise be asked for it
+    /// forever. The walk stops after exactly two requests with a typed
+    /// `Malformed` transport error naming the repeated txid.
+    #[test]
+    fn address_history_rejects_a_repeated_continuation_page() {
+        let first_page: Vec<serde_json::Value> = (0..esplora::ESPLORA_PAGE_SIZE as u32)
+            .map(|i| filler_tx_json(0x3000 + i, 150 - i))
+            .collect();
+        let last_seen = first_page
+            .last()
+            .and_then(|tx| tx["txid"].as_str())
+            .expect("the page's oldest transaction has a txid")
+            .to_string();
+        let body = serde_json::Value::Array(first_page).to_string();
+
+        let transport = FakeTransport {
+            chain_pages: HashMap::from([(last_seen.clone(), body.clone().into_bytes())]),
+            ..FakeTransport::new(&body)
+        };
+        let req = http::Request::get("http://fake/address/tb1qtest/txs")
+            .body(Vec::new())
+            .expect("a static URI builds");
+
+        let err = esplora::address_history(&transport, req)
+            .expect_err("a continuation that repeats its own page is malformed");
+        assert!(
+            matches!(&err, Error::Transport(TransportError::Malformed(msg)) if msg.contains(&last_seen)),
+            "got {err:?}"
+        );
+
+        let paths = transport.seen_paths();
+        assert_eq!(
+            paths.len(),
+            2,
+            "the walk stops after the repeated page: {paths:?}"
+        );
+        assert!(paths[0].ends_with("/txs"), "first page: {paths:?}");
+        assert!(
+            paths[1].ends_with(&format!("/txs/chain/{last_seen}")),
+            "one continuation keyed on the first page's oldest confirmed txid: {paths:?}"
+        );
+    }
+
     /// A first page short of [`esplora::ESPLORA_PAGE_SIZE`] confirmed
     /// transactions is the whole history: no continuation is requested, and
     /// mempool entries on that page do not count toward the page size.
