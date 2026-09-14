@@ -115,11 +115,28 @@ impl std::fmt::Debug for SecretKey {
     }
 }
 
-impl Drop for SecretKey {
-    fn drop(&mut self) {
+#[cfg(test)]
+thread_local! {
+    /// How many times `SecretKey::scrub` ran on this thread. Test-only
+    /// evidence that `Drop` routes through the scrub.
+    static SCRUBS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl SecretKey {
+    /// Overwrite the secret scalar in place. `Drop` calls this; it is a
+    /// separate method so the scrub can be observed on live storage.
+    fn scrub(&mut self) {
         // secp256k1 0.27 overwrites the inner 32 bytes with `[1u8; 32]` in place
         // (all-zero is an invalid key, so it scrubs to all-ones).
         self.0.non_secure_erase();
+        #[cfg(test)]
+        SCRUBS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        self.scrub();
     }
 }
 
@@ -211,22 +228,23 @@ mod tests {
     }
 
     #[test]
-    fn test_drop_scrubs_secret_key() {
-        // Evidence (b): running SecretKey::drop scrubs the owned bytes to
-        // [1u8;32]. ManuallyDrop keeps the storage VALID after drop_in_place, so the
-        // post-drop read is on live memory — NOT a freed-memory / stale-pointer read.
-        use core::mem::ManuallyDrop;
-        let mut key = ManuallyDrop::new(
-            SecretKey::try_from([7u8; 32]).expect("[7u8;32] is a valid secp scalar"),
-        );
-        // SAFETY: `key` is a live ManuallyDrop; drop_in_place runs SecretKey::drop
-        // (invoking non_secure_erase) but leaves the storage owned by ManuallyDrop,
-        // so reading it immediately afterward is defined behavior. We never touch
-        // `key` again after this read, so no double-drop occurs.
-        unsafe {
-            core::ptr::drop_in_place(&mut *key as *mut SecretKey);
-        }
+    fn test_scrub_overwrites_the_secret_in_place() {
+        // Evidence (b): the scrub `Drop` routes through overwrites the owned
+        // bytes to [1u8;32]. The read is on live storage — the key is still
+        // owned here — so no post-drop memory is touched.
+        let mut key = SecretKey::try_from([7u8; 32]).expect("[7u8;32] is a valid secp scalar");
+        key.scrub();
         assert_eq!(key.as_inner().secret_bytes(), [1u8; 32]);
+    }
+
+    #[test]
+    fn test_drop_runs_the_scrub() {
+        // Evidence (c): `Drop` invokes the scrub. The counter is thread-local,
+        // so tests running in parallel on other threads cannot interfere, and a
+        // test on this thread cannot interleave with this one.
+        let before = SCRUBS.with(|count| count.get());
+        drop(SecretKey::try_from([7u8; 32]).expect("[7u8;32] is a valid secp scalar"));
+        assert_eq!(SCRUBS.with(|count| count.get()), before + 1);
     }
 
     #[test]

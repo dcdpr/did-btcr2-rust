@@ -16,6 +16,7 @@
 //!
 //! Key entry points: [`Document`] for DID documents, [`identifier::Did`] for
 //! parsed identifiers, and [`Resolver`](resolver::Resolver) for resolution.
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod beacon;

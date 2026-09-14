@@ -8,6 +8,8 @@
 //! announce/broadcast logic of its own; the sans-I/O core (`did-btcr2`) makes no
 //! network calls, and all HTTP lives behind the facade's transport seam.
 
+#![forbid(unsafe_code)]
+
 use did_btcr2::{
     ResolutionResult,
     document::{IntermediateDocument, SidecarData},

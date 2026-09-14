@@ -829,4 +829,112 @@ mod tests {
             "a locally self-signed update must still verify through the original-JSON proofOptions path",
         );
     }
+
+    /// Verify every update-step proof of every vendor vector whose update
+    /// `@context` predates the spec pin, exactly as shipped in `output.json`.
+    ///
+    /// While those vectors' Resolve rows are skipped, this is the only place a
+    /// proof produced by another implementation reaches this crate's BIP340
+    /// verification path; every other driver re-signs the update with the
+    /// vector's own secret and so only ever verifies its own signature. The
+    /// pinned-context check lives in `apply_update`, not here, so the stale
+    /// `@context` does not get in the way: what is under test is the JCS /
+    /// proof-options composition, and this fails loudly if it ever diverges
+    /// from the vendor's.
+    ///
+    /// The signing key is the one the vector's own `sourceDocument` names for
+    /// the proof's `verificationMethod`, so a proof that verifies under some
+    /// other key does not pass. A flipped signature byte proves the assertion
+    /// bites.
+    #[test]
+    fn stale_vectors_foreign_proofs_verify_under_this_cryptosuite() {
+        use crate::document::Document;
+        use crate::test_vectors::{STALE_UPDATE_CONTEXT, discover, read_vector_fixture};
+        use crate::update::Update;
+        use crate::zcap::proof::ProofPurpose;
+
+        if !crate::test_vectors::test_suite_checked_out() {
+            eprintln!(
+                "SKIP: test-suite submodule absent; run `git submodule update --init --recursive`"
+            );
+            return;
+        }
+
+        // Re-derive the signing key from the step's own sourceDocument.
+        fn invoking_key_for(
+            source_document: &serde_json::Value,
+            update: &Update,
+            ctx: &str,
+        ) -> PublicKey {
+            let source = Document::from_json_string(&source_document.to_string())
+                .unwrap_or_else(|e| panic!("{ctx}: sourceDocument must parse: {e}"));
+            source
+                .fields
+                .invoking_public_key(&update.proof.inner.verification_method)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{ctx}: the proof's verificationMethod must be an invoking entry of \
+                         sourceDocument: {e}"
+                    )
+                })
+        }
+
+        let mut verified = 0usize;
+        let mut first_proof: Option<(String, serde_json::Value, serde_json::Value)> = None;
+        for vector in discover()
+            .into_iter()
+            .filter(|v| STALE_UPDATE_CONTEXT.contains(&v.id.as_str()))
+        {
+            for step in vector.update_layout.step_prefixes() {
+                let ctx = format!("{} {step}", vector.id);
+                let input = read_vector_fixture(&format!("{}/{step}/input.json", vector.id));
+                let output = read_vector_fixture(&format!("{}/{step}/output.json", vector.id));
+                let update = Update::from_json_value(output["signedUpdate"].clone())
+                    .unwrap_or_else(|e| panic!("{ctx}: signedUpdate must parse: {e}"));
+                let key = invoking_key_for(&input["sourceDocument"], &update, &ctx);
+                CryptoSuite
+                    .data_integrity_verify_proof(key, &update, &ProofPurpose::CapabilityInvocation)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{ctx}: the vendor's proofValue must verify under this cryptosuite: {e}"
+                        )
+                    });
+                verified += 1;
+                first_proof.get_or_insert_with(|| {
+                    (
+                        ctx.clone(),
+                        input["sourceDocument"].clone(),
+                        output["signedUpdate"].clone(),
+                    )
+                });
+            }
+        }
+        assert!(
+            verified >= 17,
+            "expected every stale vector to contribute at least one foreign proof, verified {verified}"
+        );
+
+        // Anti-vacuity: one flipped signature byte must fail.
+        let (ctx, source_document, mut signed) =
+            first_proof.expect("the floor assertion above implies at least one proof was seen");
+        let proof_value = signed["proof"]["proofValue"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{ctx}: proofValue must be a string"))
+            .to_string();
+        let (base, mut sig) = decode(&proof_value)
+            .unwrap_or_else(|e| panic!("{ctx}: proofValue must be multibase: {e}"));
+        *sig.last_mut().expect("a BIP340 signature is 64 bytes") ^= 0x01;
+        signed["proof"]["proofValue"] = Value::String(encode(base, sig));
+        let tampered = Update::from_json_value(signed)
+            .unwrap_or_else(|e| panic!("{ctx}: a proofValue-only swap must still parse: {e}"));
+        let key = invoking_key_for(&source_document, &tampered, &ctx);
+        let err = CryptoSuite
+            .data_integrity_verify_proof(key, &tampered, &ProofPurpose::CapabilityInvocation)
+            .expect_err("a proofValue with one flipped byte must not verify");
+        assert!(
+            matches!(err, Btcr2Error::InvalidUpdateProof(_)),
+            "{ctx}: a flipped signature byte must fail the BIP340 check itself, not an earlier \
+             structural check, got {err:?}"
+        );
+    }
 }

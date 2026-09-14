@@ -33,6 +33,7 @@
 //! [`resolve_base_url`] map a network name to its Esplora endpoint; regtest has
 //! no default and requires one to be supplied.
 
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod client;
