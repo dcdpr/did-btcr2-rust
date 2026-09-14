@@ -105,21 +105,24 @@ impl<T: BtcTransport> Client<T> {
 
     /// Resolve a `did:btcr2` identifier to the spec resolution triple.
     ///
-    /// Fetches the chain-tip height (a hard, propagated fetch — a None tip
-    /// silently weakens confirmation reporting), then drives the sans-I/O
-    /// resolver FSM to completion, issuing each beacon request — and, when an
-    /// update's proof carries `expires`, each block request — through the
-    /// injected transport.
+    /// Fetches the chain-tip height unless the caller pinned one (a hard,
+    /// propagated fetch — a None tip would stop the resolver at the first
+    /// confirmed signal and weaken confirmation reporting), then drives the
+    /// sans-I/O resolver FSM to completion, issuing each beacon request —
+    /// and, when an update's proof carries `expires`, each block request —
+    /// through the injected transport.
     pub fn resolve(
         &self,
         did: &Did,
         mut opts: ResolutionOptions,
     ) -> Result<ResolutionResult, Error> {
-        // Chain-tip GET — confirmations depend on a reliable tip, so this is a
-        // hard `?`-propagated fetch (CLI main.rs:255-260 precedent).
-        let tip = esplora::chain_tip_height(&self.transport, &self.base_url)?;
+        // Chain-tip GET, only when the caller did not pin one: a pinned tip is
+        // what makes a capture's `confirmations` reproducible, and fetching a
+        // value that would then be discarded would still fail the whole
+        // resolve on an endpoint that cannot answer it.
         if opts.chain_tip_height.is_none() {
-            opts.chain_tip_height = Some(tip);
+            opts.chain_tip_height =
+                Some(esplora::chain_tip_height(&self.transport, &self.base_url)?);
         }
         if opts.esplora_url.is_none() {
             opts.esplora_url = Some(self.base_url.clone());
@@ -481,6 +484,10 @@ mod tests {
         echo_wrong_txid: bool,
         /// Body served for `GET /block/{hash}` (an Esplora block header JSON).
         block_body: Vec<u8>,
+        /// If set, `GET /blocks/tip/height` returns this HTTP status instead of
+        /// the tip (exercises a pinned tip against an endpoint that cannot
+        /// answer for it).
+        tip_status: Option<u16>,
     }
 
     impl FakeTransport {
@@ -497,6 +504,7 @@ mod tests {
                 force_status: None,
                 echo_wrong_txid: false,
                 block_body: crate::esplora::BLOCK_BODY.as_bytes().to_vec(),
+                tip_status: None,
             }
         }
 
@@ -622,6 +630,15 @@ mod tests {
                 return Ok(http::Response::builder()
                     .status(200)
                     .body(body.into_bytes())
+                    .expect("static status is valid"));
+            }
+
+            if let Some(status) = self.tip_status
+                && path.ends_with("/blocks/tip/height")
+            {
+                return Ok(http::Response::builder()
+                    .status(status)
+                    .body(b"tip unavailable".to_vec())
                     .expect("static status is valid"));
             }
 
@@ -1034,6 +1051,67 @@ mod tests {
                 .any(|p| p.ends_with(&block_path)),
             "the resolver fetched the announcing block through the transport: {:?}",
             client.transport.seen_paths()
+        );
+    }
+
+    /// A caller-pinned `chain_tip_height` is used as given: the facade issues
+    /// no `/blocks/tip/height` request, and an endpoint that cannot answer
+    /// one does not fail the resolve. The pinned tip is what confirmations
+    /// and the `minConf` gate are measured against.
+    #[test]
+    fn resolve_uses_a_pinned_tip_without_fetching_one() {
+        let (did, update, txs) = announced_expiring_update();
+        let transport = FakeTransport {
+            tip_status: Some(500),
+            ..FakeTransport::new(&txs)
+        };
+        let client = Client::new("http://fake".to_string(), transport);
+
+        let result = client
+            .resolve(
+                &did,
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::new(None, vec![update], None, None)),
+                    // Announcement at height 100: ten confirmations against
+                    // this tip.
+                    chain_tip_height: Some(109),
+                    ..Default::default()
+                },
+            )
+            .expect("a pinned tip resolves without the tip endpoint");
+
+        assert!(
+            !client
+                .transport
+                .seen_paths()
+                .iter()
+                .any(|p| p.ends_with("/blocks/tip/height")),
+            "no tip request was issued: {:?}",
+            client.transport.seen_paths()
+        );
+        assert_eq!(result.document_metadata.version_id.get(), 2);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(10),
+            "confirmations are measured against the pinned tip"
+        );
+
+        // Without a pin the same endpoint fault fails the resolve: the tip is
+        // required, not optional.
+        let transport = FakeTransport {
+            tip_status: Some(500),
+            ..FakeTransport::new(&txs)
+        };
+        let client = Client::new("http://fake".to_string(), transport);
+        let err = client
+            .resolve(&did, ResolutionOptions::default())
+            .expect_err("an unpinned tip must be fetched, and the fetch failed");
+        assert!(
+            matches!(
+                err,
+                Error::Transport(TransportError::Status { status: 500, .. })
+            ),
+            "got {err:?}"
         );
     }
 
