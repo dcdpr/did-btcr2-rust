@@ -654,15 +654,18 @@ impl<T> Resolver<T> {
     /// every terminal arm of [`Resolver::resolve`] returns the spec triple
     /// identically (PATTERNS.md §"ResolverState::Resolved" guidance).
     ///
-    /// `confirmations` is computed as
-    /// `tip.saturating_sub(applied_block_height).saturating_add(1)`;
-    /// `None` when the caller supplied no
-    /// chain tip or no update was applied.
+    /// `confirmations` is `tip.saturating_sub(applied_block_height)
+    /// .saturating_add(1)` for the most recently applied unique update, and
+    /// `0` when the tip is known but no update was applied — the spec starts
+    /// `block_confirmations` at `0` and lists `confirmations` as REQUIRED
+    /// (resolve.md "Process", footnote 2). `None` is reserved for a caller
+    /// that supplied no chain tip: nothing can be counted, and an invented
+    /// `0` would read as "the update is unconfirmed".
     fn terminal_state(&self) -> ResolutionResult {
-        let confirmations = match (self.chain_tip_height, self.applied_block_height) {
-            (Some(tip), Some(height)) => Some(tip.saturating_sub(height).saturating_add(1)),
-            _ => None,
-        };
+        let confirmations = self.chain_tip_height.map(|tip| {
+            self.applied_block_height
+                .map_or(0, |height| tip.saturating_sub(height).saturating_add(1))
+        });
         let document_metadata = crate::document::DocumentMetadata {
             version_id: self.current_version_id,
             confirmations,
@@ -2591,6 +2594,26 @@ mod tests {
         assert_eq!(document_metadata.confirmations, None);
     }
 
+    /// A never-updated DID resolved with a chain tip reports `confirmations:
+    /// 0` on the wire — present, as the spec requires — not an omitted key.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process" (`block_confirmations`
+    /// starts at `0`; `confirmations` is REQUIRED in `didDocumentMetadata`).
+    #[test]
+    fn genesis_resolve_with_a_tip_reports_zero_confirmations() {
+        let Some(resolver) = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP)) else {
+            return;
+        };
+        let result = resolve_with_no_signals(resolver);
+        assert_eq!(result.document_metadata.confirmations, Some(0));
+        let json =
+            serde_json::to_string(&result.document_metadata).expect("document metadata serializes");
+        assert!(
+            json.contains(r#""confirmations":0"#),
+            "confirmations is emitted as 0, not omitted: {json}"
+        );
+    }
+
     /// `DocumentMetadata.version_id` round-trips as an ASCII string.
     /// The exhaustive serde round-trip (json + jcs + numeric-rejection) is pinned
     /// by `document::tests::document_metadata_version_id_round_trips_as_ascii_string`
@@ -2614,8 +2637,8 @@ mod tests {
     }
 
     /// `confirmations == tip - applied_block_height + 1` with
-    /// saturating arithmetic (tip > h, tip == h, tip < h) plus the no-tip and
-    /// no-applied-update cases. This exercises only `terminal_state`'s formatting
+    /// saturating arithmetic (tip > h, tip == h, tip < h), `0` when the tip is
+    /// known but nothing applied, and `None` without a tip. This exercises only `terminal_state`'s formatting
     /// of `applied_block_height`, which is unchanged; the *accounting* of that
     /// height (most-recently-applied unique update, not a running min across
     /// distinct updates) is driven end-to-end by
@@ -2653,11 +2676,13 @@ mod tests {
             Some(1)
         );
 
-        // No applied update → confirmations None.
+        // Tip known, no applied update → confirmations 0: the spec's starting
+        // value, and REQUIRED in the metadata, so it is emitted rather than
+        // omitted.
         resolver.applied_block_height = None;
         assert_eq!(
             resolver.terminal_state().document_metadata.confirmations,
-            None
+            Some(0)
         );
 
         // No chain tip → confirmations None even with an applied height.

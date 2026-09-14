@@ -559,8 +559,9 @@ pub struct ResolutionMetadata {}
 /// - `version_id`: REQUIRED per resolve.md:52-57; OPTIONAL per
 ///   data-structures.md:333-341. Always emitted as a UNION.
 /// - `confirmations`: REQUIRED per resolve.md:54; ABSENT in
-///   data-structures.md. None when caller did not supply chain_tip_height
-///   (fail-closed).
+///   data-structures.md. `0` when the tip is known and no update was
+///   applied (the spec's starting value); `None` only when the caller did
+///   not supply `chain_tip_height` (fail-closed).
 /// - `deactivated`: REQUIRED per both sources.
 /// - `updated`: OPTIONAL per data-structures.md; ABSENT in resolve.md.
 ///   Always emitted as a UNION.
@@ -571,7 +572,9 @@ pub struct DocumentMetadata {
     #[serde(rename = "versionId", with = "version_id_serde")]
     pub version_id: std::num::NonZeroU64,
 
-    /// `None` when caller did not supply `ResolutionOptions::chain_tip_height`.
+    /// Confirmations of the block holding the most recently applied unique
+    /// update; `0` when none was applied. `None` (omitted on the wire) only
+    /// when the caller did not supply `ResolutionOptions::chain_tip_height`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub confirmations: Option<u32>,
 
