@@ -3,6 +3,7 @@
 //! This module implements the algorithms specified in section 11.4 of the DID:BTCR2
 //! specification for deriving and dereferencing root capabilities.
 
+#[cfg(test)]
 use crate::error::Btcr2Error;
 use crate::identifier::Did;
 
@@ -42,6 +43,10 @@ pub(crate) fn derive_root_capability(did_identifier: Did) -> String {
 ///
 /// * `Ok(Did)` - The dereferenced root capability as a did
 /// * `Err(Error)` - If the capability ID is invalid
+///
+/// The resolve path compares the URN by equality; this inverse is kept for
+/// the tests that pin the URN format.
+#[cfg(test)]
 pub(crate) fn dereference_root_capability(capability_id: &str) -> Result<Did, Btcr2Error> {
     let Some(did_identifier_str) = capability_id.strip_prefix("urn:zcap:root:") else {
         return Err(Btcr2Error::Zcap("invalid root capability".into()));

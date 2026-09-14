@@ -3,7 +3,9 @@
 
 use crate::beacon::BeaconType;
 use crate::canonical_hash::CanonicalHash as _;
-use crate::document::{InitialDocument, ResolutionOptions, ResolutionResult, SidecarData};
+use crate::document::{
+    AnnouncingBlock, InitialDocument, ResolutionOptions, ResolutionResult, SidecarData,
+};
 use crate::update::UnsecuredUpdate;
 use crate::{error::Btcr2Error, identifier::Sha256Hash, update::Update};
 use chrono::{DateTime, Utc};
@@ -270,7 +272,14 @@ impl Resolver {
                         }
 
                         // Step 10.2.2 - 10.2.3.
-                        self.contemporary_doc.apply_update(&update)?;
+                        // The FSM does not yet fetch block mediantimes; a proof carrying `expires`
+                        // is rejected fail-closed until it does.
+                        let announcing_block = AnnouncingBlock {
+                            timestamp: block_time,
+                            mediantime: None,
+                        };
+                        self.contemporary_doc
+                            .apply_update(&update, &announcing_block)?;
 
                         // Step 10.2.4.
                         self.current_version_id = next_update_version_id;
@@ -1463,7 +1472,7 @@ mod tests {
                             )
                         });
                 initial
-                    .apply_update(&update)
+                    .apply_update(&update, &AnnouncingBlock::fixed())
                     .unwrap_or_else(|e| panic!("{id}: {step} produced proof must verify: {e}"));
 
                 // (f) Structural proof shape.
@@ -1578,7 +1587,7 @@ mod tests {
                             )
                         }),
                 };
-                doc.apply_update(&update)
+                doc.apply_update(&update, &AnnouncingBlock::fixed())
                     .unwrap_or_else(|e| panic!("{id}: applying {step} must succeed: {e}"));
                 carried = Some(doc);
             }
@@ -2324,7 +2333,7 @@ mod tests {
 
         let mut after1 = initial.clone();
         after1
-            .apply_update(&update1)
+            .apply_update(&update1, &AnnouncingBlock::fixed())
             .expect("update #1 applies to the initial document");
         let doc_after1 = Document::from(after1);
 

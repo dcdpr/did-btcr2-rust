@@ -95,3 +95,53 @@ pub(crate) fn sign_and_finalize_for_test(
     }
     SignedBeaconTx::try_from(tx)
 }
+
+/// Sign an already-built unsigned update with caller-chosen proof
+/// `created` / `expires`. `Document::construct_signed_update` never sets
+/// either, so tests that need a validly signed proof the resolve path must
+/// still reject (a time bound outside the announcing block, a target hash
+/// that does not match) assemble the proof here. Mirrors the
+/// construct path's Data Integrity Config exactly, apart from the two
+/// timestamps.
+pub(crate) fn sign_unsigned_update_for_test(
+    unsigned: &crate::update::UnsecuredUpdate,
+    did: &crate::identifier::Did,
+    verification_method: &str,
+    secret_key: &crate::key::SecretKey,
+    created: Option<chrono::DateTime<chrono::Utc>>,
+    expires: Option<chrono::DateTime<chrono::Utc>>,
+) -> crate::update::Update {
+    use crate::cryptosuite::CryptoSuite;
+    use crate::zcap::derive_root_capability;
+    use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofPurpose, ProofType};
+
+    let inner = ProofInner {
+        id: None,
+        proof_type: ProofType::DataIntegrityProof,
+        proof_purpose: ProofPurpose::CapabilityInvocation,
+        verification_method: verification_method.to_string(),
+        cryptosuite: CryptoSuiteName::Jcs,
+        created,
+        expires,
+        domain: None,
+        challenge: None,
+        previous_proof: None,
+        nonce: None,
+        context: vec![],
+        capability: derive_root_capability(did.clone()),
+        capability_action: "Write".to_string(),
+        invocation_target: None,
+    };
+    let proof = CryptoSuite
+        .create_proof(unsigned, inner, secret_key)
+        .expect("signing a well-formed unsigned update succeeds");
+
+    let mut json = unsigned.as_ref().clone();
+    if let serde_json::Value::Object(map) = &mut json {
+        map.insert(
+            "proof".to_string(),
+            serde_json::to_value(&proof).expect("a proof serializes"),
+        );
+    }
+    crate::update::Update::from_json_value(json).expect("a signed update re-parses")
+}

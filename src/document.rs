@@ -11,7 +11,7 @@ use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network, Sha256H
 use crate::key::{PublicKey, PublicKeyExt as _};
 use crate::verification::{VerificationMethod, VerificationMethodId, VerificationRelationship};
 use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofType};
-use crate::zcap::{dereference_root_capability, derive_root_capability, proof::ProofPurpose};
+use crate::zcap::{derive_root_capability, proof::ProofPurpose};
 use crate::{
     identifier::TryNetworkExt,
     json_tools,
@@ -744,7 +744,10 @@ impl DocumentFields<Did> {
     /// did-btcr2/src/operations/update.md (construction) and
     /// did-btcr2/src/operations/resolve.md (resolution), the same code on both
     /// sides, so no interop-visible divergence ships.
-    fn invoking_public_key(&self, verification_method: &str) -> Result<PublicKey, Btcr2Error> {
+    pub(crate) fn invoking_public_key(
+        &self,
+        verification_method: &str,
+    ) -> Result<PublicKey, Btcr2Error> {
         let target = absolutize_did_url(verification_method, &self.id);
 
         let entry = self
@@ -833,7 +836,7 @@ impl Document {
     ///
     /// Spec: did-btcr2/src/operations/update.md — "Construct BTCR2 Unsigned
     /// Update" and the identifier-immutability requirement.
-    fn construct_unsigned_update(
+    pub(crate) fn construct_unsigned_update(
         &self,
         patch: &Patch,
         target_version_id: NonZeroU64,
@@ -1064,6 +1067,31 @@ pub struct InitialDocument {
     json_data: Value,
 }
 
+/// The Bitcoin block that confirmed the beacon signal announcing an update.
+/// The resolve path checks a proof's `created` against the header
+/// `timestamp` and its `expires` against the block `mediantime`
+/// (did-btcr2/src/operations/resolve.md, "Check update.proof").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnnouncingBlock {
+    /// `time` from the block header (Esplora `status.block_time`).
+    pub(crate) timestamp: DateTime<Utc>,
+    /// The block's `mediantime`; `None` when the caller has not obtained it.
+    /// A proof carrying `expires` cannot be checked without it and is rejected.
+    pub(crate) mediantime: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+impl AnnouncingBlock {
+    /// A fixed block for tests: header time 1_700_000_000, mediantime one
+    /// hour earlier (the mainnet-typical gap the spec footnote describes).
+    pub(crate) fn fixed() -> Self {
+        Self {
+            timestamp: DateTime::from_timestamp(1_700_000_000, 0).expect("in range"),
+            mediantime: Some(DateTime::from_timestamp(1_699_996_400, 0).expect("in range")),
+        }
+    }
+}
+
 impl InitialDocument {
     /// Load an initial document from a file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
@@ -1230,12 +1258,23 @@ impl InitialDocument {
     /// Apply a signed update to this document on the resolve path
     /// (did-btcr2/src/operations/resolve.md, "Check update.proof" and
     /// "Apply update"). In order: refuse if deactivated; require the update's
-    /// and its proof's `@context` to be the pinned array; the proof's root
-    /// capability must dereference to this DID; the proof's verificationMethod
-    /// must be identified by a `capabilityInvocation` entry, whose key verifies
-    /// the proof; apply the patch; re-parse; the id must be unchanged and the
-    /// result must hash to `targetHash`. Every rejection is `INVALID_DID_UPDATE`.
-    pub(crate) fn apply_update(&mut self, update: &Update) -> Result<(), Btcr2Error> {
+    /// and its proof's `@context` to be the pinned array; the proof's
+    /// `proofPurpose` must be `capabilityInvocation`, its `capabilityAction`
+    /// must be `Write`, and its `capability` must equal this DID's root
+    /// capability URN; the proof's `verificationMethod` must be identified by
+    /// a `capabilityInvocation` entry; the proof's `created` must not be after
+    /// the announcing block's header timestamp, its `expires` must not be
+    /// before the block's `mediantime`, and `expires` must not be before
+    /// `created`; the entry's key must verify the proof; apply the patch to a
+    /// clone; re-parse; the id must be unchanged and the result must hash to
+    /// `targetHash`. Every rejection is `INVALID_DID_UPDATE`. The document is
+    /// replaced only after every check passes; a rejected update leaves it
+    /// unchanged.
+    pub(crate) fn apply_update(
+        &mut self,
+        update: &Update,
+        announcing_block: &AnnouncingBlock,
+    ) -> Result<(), Btcr2Error> {
         // A deactivated DID is terminal and MUST NOT accept further updates
         // (spec: did-btcr2/src/operations/deactivate.md). The resolver FSM
         // short-circuits on deactivation, but the application primitive must also
@@ -1252,16 +1291,27 @@ impl InitialDocument {
         // line; this one fixes what both must equal.
         update.ensure_pinned_context()?;
 
-        let capability_id = &update.proof.inner.capability;
-        let did = dereference_root_capability(capability_id)?;
-
-        if self.fields.id != did {
+        // The three Data Integrity Config equalities (resolve.md, "Check
+        // update.proof"), checked before any signature work. The capability
+        // is compared by string equality against the URN derived for this
+        // DID: the spec says the value equals the URN the config specifies.
+        let proof = &update.proof.inner;
+        if proof.proof_purpose != ProofPurpose::CapabilityInvocation {
             return Err(Btcr2Error::InvalidDidUpdate(
-                "Proof root capability is not for this DID document".into(),
+                "proof proofPurpose is not capabilityInvocation".into(),
             ));
         }
-
-        let crypto_suite = CryptoSuite;
+        if proof.capability_action != "Write" {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "proof capabilityAction is not \"Write\"".into(),
+            ));
+        }
+        let expected_capability = derive_root_capability(self.fields.id.clone());
+        if proof.capability != expected_capability {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "proof capability is not the root capability URN of this DID".into(),
+            ));
+        }
 
         // The proof's verificationMethod MUST be identified by an entry of this
         // document's capabilityInvocation set, and the key is read from that
@@ -1270,16 +1320,43 @@ impl InitialDocument {
         // or a dangling reference is the spec-literal INVALID_DID_UPDATE.
         let public_key = self
             .fields
-            .invoking_public_key(&update.proof.inner.verification_method)?;
+            .invoking_public_key(&proof.verification_method)?;
 
-        // NOTE (resolve-path proof checks, O-1/O-2): proof.expires and
-        // proof.capabilityAction are NOT enforced here — they appear nowhere in
-        // resolve.md or any migrated resolve vector (the spec is silent on them on
-        // the resolve path). Enforcing one now would bake an interop divergence in
-        // before the Rust/JS/Java implementations agree (a T7-class hazard), so the
-        // open question is escalated to QUESTIONS.txt rather than invented here.
-        // capabilityAction == "Write" remains a CONSTRUCTION must (data-structures.md);
-        // only its resolve-path enforcement is deferred.
+        // Proof time bounds against the block that confirmed the announcing
+        // beacon signal (resolve.md, "Check update.proof", footnote 3):
+        // `created` against the header timestamp, `expires` against
+        // `mediantime`. Strict comparisons: an equal timestamp passes. A proof
+        // carrying `expires` is rejected when the mediantime is unavailable —
+        // the spec makes the check unconditional, so it cannot be skipped.
+        if let Some(created) = proof.created
+            && created > announcing_block.timestamp
+        {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "proof created is after the announcing block's header timestamp".into(),
+            ));
+        }
+        if let Some(expires) = proof.expires {
+            match announcing_block.mediantime {
+                Some(mediantime) if expires < mediantime => {
+                    return Err(Btcr2Error::InvalidDidUpdate(
+                        "proof expires is before the announcing block's mediantime".into(),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(Btcr2Error::InvalidDidUpdate(
+                        "proof expires cannot be checked: the announcing block's mediantime is not available".into(),
+                    ));
+                }
+            }
+        }
+        if let (Some(created), Some(expires)) = (proof.created, proof.expires)
+            && expires < created
+        {
+            return Err(Btcr2Error::InvalidDidUpdate(
+                "proof expires is before proof created".into(),
+            ));
+        }
 
         // Resolve-path apply site: a proof-verification failure MUST surface as
         // INVALID_DID_UPDATE (resolve.md:200), not the granular ProofVerification
@@ -1287,38 +1364,43 @@ impl InitialDocument {
         // so the whole apply step is spec-uniform. Find-refs confirms apply_update
         // has one production caller — the resolver resolve path — so this collapse
         // is resolve-path-only (no construction caller loses a granular variant).
-        crypto_suite
+        CryptoSuite
             .data_integrity_verify_proof(public_key, update, &ProofPurpose::CapabilityInvocation)
             .map_err(|e| {
                 Btcr2Error::InvalidDidUpdate(format!("update proof failed verification: {e}"))
             })?;
 
-        // Step 11
-        json_patch::patch(&mut self.json_data, &update.patch)
+        // Apply the patch to a clone and commit only after every check below
+        // passes, so a rejected update never leaves a half-mutated document
+        // behind for the resolver to keep iterating with.
+        let mut patched = self.json_data.clone();
+        json_patch::patch(&mut patched, &update.patch)
             .map_err(|_| Btcr2Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
 
-        // Step 12
-        self.fields = DocumentFields::try_from((&self.json_data, None)).map_err(|_| {
+        let fields = DocumentFields::try_from((&patched, None)).map_err(|_| {
             Btcr2Error::InvalidDidUpdate("Updated DID document is non-conformant".into())
         })?;
 
         // The document identifier is immutable across an update: the post-patch
-        // document id MUST still equal this DID (resolve.md:187). `did` is the DID
-        // decoded from the proof's root capability above; rejecting a mismatch
-        // stops a patch from re-pointing the document identity. Spec-literal
-        // INVALID_DID_UPDATE, matching the pre-patch capability check above.
-        if self.fields.id != did {
+        // document id MUST still equal this DID (resolve.md:187). Rejecting a
+        // mismatch stops a patch from re-pointing the document identity.
+        if fields.id != self.fields.id {
             return Err(Btcr2Error::InvalidDidUpdate(
                 "post-patch document id does not equal the DID".into(),
             ));
         }
 
-        if self.hash() != update.target_hash {
+        let candidate = InitialDocument {
+            fields,
+            json_data: patched,
+        };
+        if candidate.hash() != update.target_hash {
             return Err(Btcr2Error::InvalidDidUpdate(
                 "Hash of updated document does not match target hash".into(),
             ));
         }
 
+        *self = candidate;
         Ok(())
     }
 }
@@ -1568,6 +1650,7 @@ fn generate_beacons(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zcap::dereference_root_capability;
     // ResolverState is only used by test_document_from_did_components, which is
     // feature-gated under `old-spec-fixtures`. Gate the import to match.
     #[cfg(feature = "old-spec-fixtures")]
@@ -2737,7 +2820,7 @@ mod tests {
 
         let mut applied = initial.clone();
         applied
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect("the produced update must apply cleanly to the prior document");
         assert_eq!(
             applied.hash(),
@@ -2776,7 +2859,7 @@ mod tests {
         // whose hash matches the constructed targetHash.
         let mut applied = initial.clone();
         applied
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect("the produced deactivate update must apply cleanly to the prior document");
         assert!(
             applied.fields.deactivated,
@@ -3029,7 +3112,7 @@ mod tests {
         // Apply #1 to get the contemporary document for update #2.
         let mut after_update1 = genesis.clone();
         after_update1
-            .apply_update(&update1)
+            .apply_update(&update1, &AnnouncingBlock::fixed())
             .expect("update #1 applies to the genesis document");
         let doc_after_update1 = Document::from(after_update1);
 
@@ -3136,7 +3219,7 @@ mod tests {
         // Apply update #1 to obtain the contemporary document for update #2.
         let mut after_update1 = genesis.clone();
         after_update1
-            .apply_update(&update1)
+            .apply_update(&update1, &AnnouncingBlock::fixed())
             .expect("update #1 applies to the genesis document");
         let doc_after_update1 = Document::from(after_update1);
 
@@ -3319,7 +3402,7 @@ mod tests {
         let mut target = InitialDocument::from_json_value(json)
             .expect("the apply target is a conformant document");
         let err = target
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("a proof VM absent from capabilityInvocation must be rejected on apply");
         match err {
             Btcr2Error::InvalidDidUpdate(msg) => assert!(
@@ -3416,7 +3499,7 @@ mod tests {
 
         let mut target = initial.clone();
         let err = target
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("a patch that changes the document id must be rejected on apply");
         assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
@@ -3587,7 +3670,7 @@ mod tests {
         let mut target =
             InitialDocument::from_json_value(json).expect("the apply target is conformant");
         target
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect("an update identified by an embedded capabilityInvocation object applies");
         assert_eq!(target.hash(), update.target_hash);
     }
@@ -3628,7 +3711,7 @@ mod tests {
         let mut target =
             InitialDocument::from_json_value(json).expect("the apply target is conformant");
         let err = target
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("a dangling capabilityInvocation reference must be rejected on apply");
         match err {
             Btcr2Error::InvalidDidUpdate(msg) => assert!(
@@ -3687,7 +3770,7 @@ mod tests {
         let mut target =
             InitialDocument::from_json_value(json).expect("the apply target is conformant");
         target
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect("a relative proof verificationMethod resolves against the document id");
         assert_eq!(target.hash(), update.target_hash);
     }
@@ -3733,7 +3816,7 @@ mod tests {
         let mut target =
             InitialDocument::from_json_value(json).expect("the apply target is conformant");
         let err = target
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("an embedded object under a foreign id must not identify the proof");
         match err {
             Btcr2Error::InvalidDidUpdate(msg) => assert!(
@@ -3824,7 +3907,7 @@ mod tests {
             .expect("a deactivated document is still conformant");
 
         let err = deactivated
-            .apply_update(&update)
+            .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("an update must not apply to a deactivated document");
         match err {
             Btcr2Error::InvalidDidUpdate(msg) => assert!(
@@ -4201,7 +4284,7 @@ mod tests {
         let mut target = InitialDocument::from_did(&_did, &ResolutionOptions::default())
             .expect("key DID regenerates its initial document");
         let err = target
-            .apply_update(&corrupted)
+            .apply_update(&corrupted, &AnnouncingBlock::fixed())
             .expect_err("a corrupted-proofValue update must be rejected");
         match err {
             Btcr2Error::InvalidDidUpdate(_) => {}
@@ -4241,7 +4324,7 @@ mod tests {
         let mut target = InitialDocument::from_did(&did, &ResolutionOptions::default())
             .expect("key DID regenerates its initial document");
         let err = target
-            .apply_update(&bad_update)
+            .apply_update(&bad_update, &AnnouncingBlock::fixed())
             .expect_err("an update whose proof fails verification must be rejected");
         assert!(
             matches!(err, Btcr2Error::InvalidDidUpdate(_)),
@@ -4267,8 +4350,8 @@ mod tests {
         let mut target = InitialDocument::from_did(did, &ResolutionOptions::default())
             .expect("key DID regenerates its initial document");
         target
-            .apply_update(&update)
-            .expect_err("an update whose @context is not the pinned array must be rejected")
+            .apply_update(&update, &AnnouncingBlock::fixed())
+            .expect_err("a mutated update must be rejected")
     }
 
     /// resolve.md "Check update.proof": an update whose `@context` is the old
@@ -4325,5 +4408,271 @@ mod tests {
             ),
             other => panic!("expected InvalidDidUpdate, got {other:?}"),
         }
+    }
+
+    /// A `DateTime<Utc>` from a unix timestamp (seconds).
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).expect("in-range unix timestamp")
+    }
+
+    /// A validly signed benign update over the source document whose proof
+    /// carries the given `created` / `expires`; the construct path never sets
+    /// either, so the proof is assembled through the test signer.
+    fn signed_update_with_times(
+        created: Option<DateTime<Utc>>,
+        expires: Option<DateTime<Utc>>,
+    ) -> (Did, Update) {
+        let (did, vm_id, _initial, document) = source_documents();
+        let patch = benign_patch(&vm_id);
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let (unsigned, _source_hash, _target_hash) = document
+            .construct_unsigned_update(&patch, version)
+            .expect("unsigned update constructs against the source document");
+        let update = crate::test_signing::sign_unsigned_update_for_test(
+            &unsigned,
+            &did,
+            &vm_id,
+            &source_secret_key(),
+            created,
+            expires,
+        );
+        (did, update)
+    }
+
+    /// A validly signed update whose proof carries the given `created` /
+    /// `expires`, applied to a fresh initial document against `block`.
+    fn apply_with_times(
+        created: Option<DateTime<Utc>>,
+        expires: Option<DateTime<Utc>>,
+        block: &AnnouncingBlock,
+    ) -> Result<(), Btcr2Error> {
+        let (did, update) = signed_update_with_times(created, expires);
+        let mut target = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("key DID regenerates its initial document");
+        target.apply_update(&update, block)
+    }
+
+    /// resolve.md "Check update.proof": `proofPurpose` must equal
+    /// `capabilityInvocation`. The proof is otherwise intact, so the
+    /// rejection names proofPurpose, not a later check.
+    #[test]
+    fn apply_update_rejects_non_capability_invocation_proof_purpose() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+
+        let mut json = update.as_ref().clone();
+        json["proof"]["proofPurpose"] = Value::String("assertionMethod".into());
+        let err = apply_mutated(&did, json);
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("proofPurpose")),
+            "expected the proofPurpose rejection, got {err:?}"
+        );
+    }
+
+    /// resolve.md "Check update.proof": `capabilityAction` must equal `Write`.
+    #[test]
+    fn apply_update_rejects_non_write_capability_action() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+
+        let mut json = update.as_ref().clone();
+        json["proof"]["capabilityAction"] = Value::String("Read".into());
+        let err = apply_mutated(&did, json);
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("capabilityAction")),
+            "expected the capabilityAction rejection, got {err:?}"
+        );
+    }
+
+    /// resolve.md "Check update.proof": `capability` must equal the root
+    /// capability URN of the DID being resolved. A well-formed URN for a
+    /// different DID is rejected before any signature work.
+    #[test]
+    fn apply_update_rejects_foreign_root_capability() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let update = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+
+        let mut json = update.as_ref().clone();
+        json["proof"]["capability"] = Value::String(
+            "urn:zcap:root:did%3Abtcr2%3Ak1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+                .into(),
+        );
+        let err = apply_mutated(&did, json);
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("root capability URN")),
+            "expected the root-capability rejection, got {err:?}"
+        );
+    }
+
+    /// resolve.md "Check update.proof": `created` after the announcing block's
+    /// header timestamp is rejected.
+    #[test]
+    fn apply_update_rejects_created_after_block_header_time() {
+        let err = apply_with_times(Some(ts(1_700_000_001)), None, &AnnouncingBlock::fixed())
+            .expect_err("a proof created after the block header time must be rejected");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("created is after")),
+            "expected the created rejection, got {err:?}"
+        );
+    }
+
+    /// resolve.md "Check update.proof": `expires` before the announcing block's
+    /// `mediantime` is rejected.
+    #[test]
+    fn apply_update_rejects_expires_before_block_mediantime() {
+        let err = apply_with_times(None, Some(ts(1_699_996_399)), &AnnouncingBlock::fixed())
+            .expect_err("a proof expired before the block mediantime must be rejected");
+        assert!(
+            matches!(
+                err,
+                Btcr2Error::InvalidDidUpdate(ref msg)
+                    if msg.contains("expires is before the announcing block")
+            ),
+            "expected the expires-before-mediantime rejection, got {err:?}"
+        );
+    }
+
+    /// resolve.md "Check update.proof": `expires` before `created` is rejected
+    /// even when each is individually inside the block's bounds.
+    #[test]
+    fn apply_update_rejects_expires_before_created() {
+        let err = apply_with_times(
+            Some(ts(1_699_999_000)),
+            Some(ts(1_699_998_000)),
+            &AnnouncingBlock::fixed(),
+        )
+        .expect_err("a proof that expires before it was created must be rejected");
+        assert!(
+            matches!(
+                err,
+                Btcr2Error::InvalidDidUpdate(ref msg)
+                    if msg.contains("expires is before proof created")
+            ),
+            "expected the expires-before-created rejection, got {err:?}"
+        );
+    }
+
+    /// The `expires` check is unconditional when the value is present, so a
+    /// caller that has not obtained the block's mediantime cannot skip it:
+    /// the proof is rejected (fail-closed), never silently accepted.
+    #[test]
+    fn apply_update_rejects_expires_when_mediantime_unavailable() {
+        let block = AnnouncingBlock {
+            timestamp: ts(1_700_000_000),
+            mediantime: None,
+        };
+        let err = apply_with_times(None, Some(ts(1_700_003_600)), &block)
+            .expect_err("a proof carrying expires must be rejected without a mediantime");
+        assert!(
+            matches!(
+                err,
+                Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("mediantime is not available")
+            ),
+            "expected the fail-closed rejection, got {err:?}"
+        );
+    }
+
+    /// Happy path: `created` at or before the header timestamp and `expires`
+    /// at or after the mediantime apply. The comparisons are strict, so equal
+    /// timestamps pass on both bounds; the two equalities are checked in
+    /// separate updates because the fixed block's mediantime precedes its
+    /// header time, and a single proof with both would expire before it was
+    /// created.
+    #[test]
+    fn apply_update_accepts_proof_times_inside_the_block_bounds() {
+        let block = AnnouncingBlock::fixed();
+        let cases = [
+            (
+                Some(ts(1_699_999_000)),
+                Some(ts(1_700_003_600)),
+                "proof times strictly inside the block bounds apply",
+            ),
+            (
+                Some(ts(1_700_000_000)),
+                None,
+                "created equal to the header timestamp applies",
+            ),
+            (
+                None,
+                Some(ts(1_699_996_400)),
+                "expires equal to the mediantime applies",
+            ),
+        ];
+        for (created, expires, what) in cases {
+            let (did, update) = signed_update_with_times(created, expires);
+            let mut target = InitialDocument::from_did(&did, &ResolutionOptions::default())
+                .expect("key DID regenerates its initial document");
+            target.apply_update(&update, &block).expect(what);
+            assert_eq!(target.hash(), update.target_hash, "{what}");
+        }
+    }
+
+    /// A rejected update leaves the document exactly as it was, whether the
+    /// rejection happens before the patch (proofPurpose) or after it (target
+    /// hash mismatch, where the signature verifies and the patch applies to
+    /// the clone before the hash check fails).
+    #[test]
+    fn apply_update_failure_after_patch_leaves_document_unchanged() {
+        let (did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+
+        let unsigned = UnsecuredUpdate::construct(
+            &benign_patch(&vm_id),
+            document.hash(),
+            Sha256Hash::from([0xAB; 32]),
+            version,
+        );
+        let update = crate::test_signing::sign_unsigned_update_for_test(
+            &unsigned,
+            &did,
+            &vm_id,
+            &source_secret_key(),
+            None,
+            None,
+        );
+
+        let mut target = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("key DID regenerates its initial document");
+        let before = target.clone();
+        let err = target
+            .apply_update(&update, &AnnouncingBlock::fixed())
+            .expect_err("a validly signed update over the wrong target hash must be rejected");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("target hash")),
+            "expected the target-hash rejection, got {err:?}"
+        );
+        assert_eq!(target, before);
+        assert_eq!(
+            serde_json::to_string(target.as_ref()).expect("document serializes"),
+            serde_json::to_string(before.as_ref()).expect("document serializes")
+        );
+
+        let good = document
+            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
+            .expect("construction of the signed update must succeed");
+        let mut json = good.as_ref().clone();
+        json["proof"]["proofPurpose"] = Value::String("assertionMethod".into());
+        let bad_purpose = Update::from_json_value(json).expect("a proofPurpose swap re-parses");
+        let err = target
+            .apply_update(&bad_purpose, &AnnouncingBlock::fixed())
+            .expect_err("a proof whose purpose is not capabilityInvocation must be rejected");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref msg) if msg.contains("proofPurpose")),
+            "expected the proofPurpose rejection, got {err:?}"
+        );
+        assert_eq!(target, before);
+        assert_eq!(
+            serde_json::to_string(target.as_ref()).expect("document serializes"),
+            serde_json::to_string(before.as_ref()).expect("document serializes")
+        );
     }
 }
