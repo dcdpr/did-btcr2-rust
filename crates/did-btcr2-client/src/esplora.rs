@@ -49,19 +49,19 @@ struct EsploraBlock {
 /// Parse the block hash and `mediantime` out of an Esplora `GET /block/{hash}`
 /// body. Only those two fields are read; the rest of the block header is
 /// ignored. A body that is not JSON, lacks either field, or carries a
-/// non-hex `id` or an out-of-range `mediantime` is a typed error.
+/// non-hex `id` or an out-of-range `mediantime` is a typed error: a non-JSON
+/// body or a missing field is [`Error::Json`], a present-but-wrong field is
+/// [`TransportError::Malformed`].
 pub fn block_mediantime_from_body(body: &[u8]) -> Result<(BlockHash, DateTime<Utc>), Error> {
     let block: EsploraBlock = serde_json::from_slice(body)?;
     let hash = block.id.parse::<BlockHash>().map_err(|e| {
-        TransportError::Io(std::io::Error::other(format!(
-            "block body `id` is not a block hash: {e}"
-        )))
+        TransportError::Malformed(format!("block body `id` is not a block hash: {e}"))
     })?;
     let mediantime = DateTime::from_timestamp(block.mediantime, 0).ok_or_else(|| {
-        TransportError::Io(std::io::Error::other(format!(
+        TransportError::Malformed(format!(
             "block body `mediantime` {} is out of range",
             block.mediantime
-        )))
+        ))
     })?;
     Ok((hash, mediantime))
 }
@@ -102,15 +102,10 @@ mod tests {
     fn block_mediantime_rejects_a_non_hex_id() {
         let body = br#"{"id":"not-a-block-hash","mediantime":1699996400}"#;
         let err = block_mediantime_from_body(body).expect_err("a non-hex id is rejected");
-        match err {
-            Error::Transport(TransportError::Io(io)) => {
-                assert!(
-                    io.to_string().contains("not a block hash"),
-                    "unexpected message: {io}"
-                );
-            }
-            other => panic!("expected Transport(Io), got {other:?}"),
-        }
+        assert!(
+            matches!(&err, Error::Transport(TransportError::Malformed(msg)) if msg.contains("not a block hash")),
+            "expected Transport(Malformed), got {err:?}"
+        );
     }
 
     #[test]
@@ -118,15 +113,18 @@ mod tests {
         let body = br#"{"id":"0000000000000000000000000000000000000000000000000000000000000000","mediantime":9223372036854775807}"#;
         let err =
             block_mediantime_from_body(body).expect_err("an out-of-range mediantime is rejected");
-        match err {
-            Error::Transport(TransportError::Io(io)) => {
-                assert!(
-                    io.to_string().contains("out of range"),
-                    "unexpected message: {io}"
-                );
-            }
-            other => panic!("expected Transport(Io), got {other:?}"),
-        }
+        assert!(
+            matches!(&err, Error::Transport(TransportError::Malformed(msg)) if msg.contains("out of range")),
+            "expected Transport(Malformed), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_transport_error_displays_its_message() {
+        assert_eq!(
+            TransportError::Malformed("x".to_string()).to_string(),
+            "malformed response body: x"
+        );
     }
 
     #[test]

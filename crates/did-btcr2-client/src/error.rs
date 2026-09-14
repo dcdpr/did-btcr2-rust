@@ -1,10 +1,11 @@
 //! Error types for the `did-btcr2-client` facade.
 //!
 //! Two layers, mirroring the CLI's `CliRunError` shape: [`TransportError`] for
-//! the HTTP seam (a genuine network failure, an I/O read error, or a typed
-//! non-2xx status), and [`Error`] for the facade as a whole (transport, JSON
-//! parsing, the sans-I/O core's resolver/document errors, and an
-//! unknown-network rejection).
+//! the HTTP seam (a genuine network failure, an I/O read error, a typed
+//! non-2xx status, or a well-formed response whose body has the wrong shape),
+//! and [`Error`] for the facade as a whole (transport, JSON parsing, the
+//! sans-I/O core's resolver/document errors, and an unknown-network
+//! rejection).
 
 use onlyerror::Error;
 
@@ -22,6 +23,16 @@ pub enum TransportError {
 
     /// An I/O error reading the response body.
     Io(#[from] std::io::Error),
+
+    /// A well-formed HTTP response whose body does not have the shape the
+    /// client requires: JSON that parsed but carries a field that is not what
+    /// it claims to be (a block `id` that is not a hex block hash, a
+    /// `mediantime` outside the representable range), or a body that
+    /// contradicts the request it answers. Nothing I/O-related happened, which
+    /// is why this is not [`TransportError::Io`]; a body that is not JSON at
+    /// all is the facade's `Error::Json`.
+    #[error("malformed response body: {0}")]
+    Malformed(String),
 
     /// A non-2xx HTTP response, carrying the status code and body for
     /// deterministic inspection by the caller.

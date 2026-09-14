@@ -24,6 +24,11 @@ pub struct Recording {
     pub tip: Option<u32>,
     /// `GET /block/{hash}` bodies keyed by the hash in the request path.
     ///
+    /// Invariant: each body's `id` equals its key. The recorder refuses a body
+    /// whose `id` is absent, not a string, or a different hash, because the
+    /// replay harness keys the served-back `mediantime` by the body's `id` and
+    /// a mismatched body would silently never be found.
+    ///
     /// Present only when the resolver asked for a block (an update proof
     /// carrying `expires` needs the confirming block's `mediantime`).
     pub blocks: BTreeMap<String, Value>,
@@ -117,17 +122,37 @@ impl<T: BtcTransport> BtcTransport for RecordingTransport<T> {
                 ))));
             }
             let body: Value = serde_json::from_slice(resp.body()).map_err(|e| {
-                std::io::Error::other(format!(
+                TransportError::Malformed(format!(
                     "capture of block `{hash}` failed: the response body is not a JSON \
                      object ({e}) — check that {path} points at an Esplora endpoint"
                 ))
             })?;
             if !body.is_object() {
-                return Err(TransportError::Io(std::io::Error::other(format!(
+                return Err(TransportError::Malformed(format!(
                     "capture of block `{hash}` failed: the response body is not a JSON \
                      object (got {}) — check that {path} points at an Esplora endpoint",
                     json_kind(&body)
-                ))));
+                )));
+            }
+            // Exact comparison, no case folding: the resolver requests
+            // `/block/{hash}` in lowercase hex, Esplora echoes the same lowercase
+            // hex in `id`, and replay looks the body up by that same string — a
+            // key differing only in case would never be served back anyway.
+            match body.get("id").and_then(Value::as_str) {
+                Some(id) if id == hash => {}
+                Some(id) => {
+                    return Err(TransportError::Malformed(format!(
+                        "capture of block `{hash}` failed: the response body's `id` is `{id}`, \
+                         not the hash in the request path — replay keys the block's mediantime \
+                         by the body's `id`, so a mismatched body would never be served back"
+                    )));
+                }
+                None => {
+                    return Err(TransportError::Malformed(format!(
+                        "capture of block `{hash}` failed: the response body has no string \
+                         `id` — check that {path} points at an Esplora endpoint"
+                    )));
+                }
             }
             let mut recording = self.recording.borrow_mut();
             recording.blocks.insert(hash.to_string(), body);
@@ -393,6 +418,10 @@ mod tests {
             message.contains(&hash) && message.contains("404"),
             "the failure must name the block and the status: {message}"
         );
+        assert!(
+            matches!(error, TransportError::Io(_)),
+            "a failed response is an I/O-class capture failure, got {error:?}"
+        );
         assert!(handle.borrow().blocks.is_empty());
     }
 
@@ -411,10 +440,66 @@ mod tests {
             let error = get(&transport, &format!("{BASE}/block/{hash}"))
                 .err()
                 .unwrap_or_else(|| panic!("{fault} must not be stored as a block"));
+            assert!(
+                matches!(error, TransportError::Malformed(_)),
+                "{fault} is a malformed body, not an I/O failure, got {error:?}"
+            );
             let message = chain(&error);
             assert!(
                 message.contains(&hash) && message.contains("JSON object"),
                 "the failure must name the block and the fault: {message}"
+            );
+            assert!(handle.borrow().blocks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_block_body_whose_id_is_not_the_path_hash_is_an_error() {
+        let hash = block_hash();
+        let other = "0b".repeat(32);
+        let inner = FakeInner::new().with_block(&hash, &one_block_body(&other));
+        let transport = RecordingTransport::new(inner);
+        let handle = transport.recording();
+
+        let error = get(&transport, &format!("{BASE}/block/{hash}"))
+            .expect_err("a body for a different block must not be stored under this hash");
+        assert!(
+            matches!(error, TransportError::Malformed(_)),
+            "a contradicting body is a malformed body, got {error:?}"
+        );
+        let message = chain(&error);
+        assert!(
+            message.contains(&hash) && message.contains(&other) && message.contains("id"),
+            "the failure must name both hashes and the `id` field: {message}"
+        );
+        assert!(handle.borrow().blocks.is_empty());
+    }
+
+    #[test]
+    fn a_block_body_without_a_string_id_is_an_error() {
+        let hash = block_hash();
+        for (body, fault) in [
+            (
+                r#"{"height":1,"mediantime":1699996400}"#,
+                "a body with no id",
+            ),
+            (r#"{"id":5,"mediantime":1699996400}"#, "a non-string id"),
+        ] {
+            let inner = FakeInner::new().with_block(&hash, body);
+            let transport = RecordingTransport::new(inner);
+            let handle = transport.recording();
+
+            let error = get(&transport, &format!("{BASE}/block/{hash}"))
+                .err()
+                .unwrap_or_else(|| panic!("{fault} must not be stored as a block"));
+            assert!(
+                matches!(error, TransportError::Malformed(_)),
+                "{fault} is a malformed body, got {error:?}"
+            );
+            let message = chain(&error);
+            assert!(
+                message.contains(&hash) && message.contains("id"),
+                "the failure must name the block and the `id` field: {message}"
             );
             assert!(handle.borrow().blocks.is_empty());
         }
