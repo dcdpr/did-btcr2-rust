@@ -347,11 +347,14 @@ claims.
 
 ### Scenario A — `clean-rotating-beacons`
 
-Three updates, announced from three different derived beacons (P2WPKH, then
-P2TR, then P2PKH), each confirmed in its own block, ending with the DID
-deactivated on chain. Its version 2 update also adds a **fourth** beacon that is
-never funded and never announces, so a replayed resolve issues a second round of
-requests naming an address the first round did not.
+Three updates, announced from three different beacons — the genesis P2WPKH,
+then the P2WPKH beacon that the version 2 update **added**, then the genesis
+P2PKH — each confirmed in its own block, ending with the DID deactivated on
+chain. Announcing version 3 from a beacon that version 2 introduced, between
+two announcements from genesis beacons, is the history a resolver only
+sequences correctly if it scans the added beacon before it judges the next
+tuple: a replayed resolve issues a second round of requests naming that
+address, and the round carries a real announcement.
 
 #### 1. Generate a throwaway key, outside both repositories
 
@@ -392,11 +395,12 @@ cargo run -q -p chain-capture -- \
   --state-file ~/.btcr2-mint/clean-state.json --fee 1000
 ```
 
-The first invocation prints the DID it derived from the key, its three beacon
-addresses in document order (P2PKH, P2WPKH, P2TR), the funding plan for the ones
-that will announce, and the address of the fourth beacon its version 2 update
-adds — which is never funded and never announces. Then it funds, signs,
-broadcasts, mines and waits, step by step.
+The first invocation prints the DID it derived from the key, its three genesis
+beacon addresses in document order (P2PKH, P2WPKH, P2TR), and the funding plan
+for the three that will announce — beacon 1, then beacon 3 (the P2WPKH address
+the version 2 update adds, derived from the same key), then beacon 0. Then it
+funds, signs, broadcasts, mines and waits, step by step; the version 3
+announcement is signed with the added beacon's own derived key.
 
 The `--bitcoind-*` flags are what let it produce a block: the export ships
 `"autoMineMode": 0`, so nothing else on this chain will. They are flags rather

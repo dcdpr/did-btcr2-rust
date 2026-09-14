@@ -12,8 +12,9 @@ Two subcommands:
   vector's own stated output, every sidecar update is announced on chain, and
   the captured tip reproduces the vector's `confirmations`.
 - **`mint`** publishes a scenario no upstream vector covers: one DID that
-  announces three updates from three different beacons and ends deactivated on
-  chain, and a second DID carrying two conflicting version 2 announcements so
+  announces three updates from three different beacons — the second of them
+  from a beacon its first update added — and ends deactivated on chain, and a
+  second DID carrying two conflicting version 2 announcements so
   the late-publishing anomaly is a historical fact rather than an arrangement
   assembled at replay time. Each scenario writes its own self-contained fixture,
   carrying its sidecar and its expectation alongside the captured bodies.

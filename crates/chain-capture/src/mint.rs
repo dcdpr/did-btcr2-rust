@@ -717,14 +717,23 @@ pub struct ScenarioStep {
     pub beacon_index: usize,
 }
 
+/// Where the clean scenario's version 2 update appends its beacon: after the
+/// three the genesis document declares. The step table announces version 3
+/// from it and the version 2 patch inserts it there, so the two cannot drift
+/// apart.
+pub const ROTATED_BEACON_INDEX: usize = 3;
+
 /// The clean scenario's three steps.
 ///
 /// Every vendor vector announces from a single beacon, so this rotation is the
 /// only real-transaction coverage of cross-beacon signal discovery, of merging
 /// several addresses' responses into one singleton-beacon result, and of the
-/// resolver's request de-duplication. Document order is P2PKH, P2WPKH, P2TR, so
-/// the indices below name three different address types as well as three
-/// different addresses.
+/// resolver's request de-duplication. Version 3 is announced from the beacon
+/// that version 2 ADDED, between two announcements from genesis beacons: that
+/// is the history a resolver only sequences correctly if it scans a beacon an
+/// applied update introduced before it judges the next tuple. Document order is
+/// P2PKH, P2WPKH, P2TR, then the added P2WPKH at [`ROTATED_BEACON_INDEX`], so
+/// the indices below name three different addresses.
 pub const CLEAN_STEPS: [ScenarioStep; 3] = [
     ScenarioStep {
         name: "v2-add-beacon-service",
@@ -734,7 +743,7 @@ pub const CLEAN_STEPS: [ScenarioStep; 3] = [
     ScenarioStep {
         name: "v3-add-non-beacon-service",
         target_version_id: 3,
-        beacon_index: 2,
+        beacon_index: ROTATED_BEACON_INDEX,
     },
     ScenarioStep {
         name: "v4-deactivate",
@@ -760,30 +769,34 @@ pub const FORK_STEPS: [ScenarioStep; 2] = [
     },
 ];
 
-/// Derive the extra beacon address the clean scenario's version 2 update adds.
+/// Derive the extra beacon the clean scenario's version 2 update adds: the key
+/// that spends from it and its P2WPKH address.
 ///
 /// Deterministic, so the runbook can reproduce it, and derived from the minting
 /// key rather than written out as a literal so it is correct on every chain the
 /// scenario is re-minted on — a hardcoded address would hardcode a
-/// human-readable part and therefore a chain. Nothing ever publishes from it;
-/// its only job is to give a replayed resolve a second round of requests naming
-/// an address the first round did not.
-fn extra_beacon_address(
+/// human-readable part and therefore a chain. The version 3 update is announced
+/// from it, signed with the key returned here, so a replayed resolve finds an
+/// announcement on the beacon its second round asks for.
+fn extra_beacon_key(
     seed: &secp256k1::SecretKey,
     network: Network,
-) -> Result<Address, MintError> {
+) -> Result<(secp256k1::SecretKey, Address), MintError> {
     let bytes: [u8; 32] = Sha256::digest(seed.secret_bytes()).into();
-    address_from_hash_seed(bytes, network)
+    key_from_hash_seed(bytes, network)
 }
 
-/// The bounded re-hash [`extra_beacon_address`] runs, factored out so a test can
+/// The bounded re-hash [`extra_beacon_key`] runs, factored out so a test can
 /// hand it a first value that is NOT a valid scalar and prove the retry works.
 ///
 /// A digest outside the secp256k1 scalar range is astronomically unlikely rather
 /// than impossible, and "astronomically unlikely" written as a comment is an
 /// untested branch. Written as a bounded loop it is a code path with a
 /// deterministic answer and a named error at the end of it.
-fn address_from_hash_seed(mut bytes: [u8; 32], network: Network) -> Result<Address, MintError> {
+fn key_from_hash_seed(
+    mut bytes: [u8; 32],
+    network: Network,
+) -> Result<(secp256k1::SecretKey, Address), MintError> {
     let btc_network = esploda::bitcoin::Network::try_from(network)?;
     for _ in 0..KEY_DERIVATION_ATTEMPTS {
         if let Ok(secret) = secp256k1::SecretKey::from_slice(&bytes) {
@@ -792,12 +805,13 @@ fn address_from_hash_seed(mut bytes: [u8; 32], network: Network) -> Result<Addre
             // The only failure is an uncompressed public key, and `PublicKey::new`
             // produces a compressed one — reported rather than unwrapped so an
             // upstream change cannot turn it into a panic in an operator session.
-            return Address::p2wpkh(&public_key, btc_network).map_err(|e| {
+            let address = Address::p2wpkh(&public_key, btc_network).map_err(|e| {
                 MintError::ExtraBeaconAddress {
                     network: btc_network.to_string(),
                     reason: e.to_string(),
                 }
-            });
+            })?;
+            return Ok((secret, address));
         }
         bytes = Sha256::digest(bytes).into();
     }
@@ -807,11 +821,12 @@ fn address_from_hash_seed(mut bytes: [u8; 32], network: Network) -> Result<Addre
 }
 
 /// The patch the clean scenario's version 2 update applies: a FOURTH singleton
-/// beacon, at an address nothing ever publishes from.
+/// beacon at [`ROTATED_BEACON_INDEX`], which the version 3 update is then
+/// announced from.
 fn add_beacon_service_patch(did: &str, extra_address: &Address) -> Patch {
     serde_json::from_value(json!([{
         "op": "add",
-        "path": "/service/3",
+        "path": format!("/service/{ROTATED_BEACON_INDEX}"),
         "value": {
             "id": format!("{did}#rotatedP2WPKH"),
             "type": "SingletonBeacon",
@@ -1092,12 +1107,18 @@ impl<T: BtcTransport> MintSession<'_, T> {
     /// The ordering is the point: a broadcast that is not recorded is
     /// unrecoverable, because a resume would re-announce the same version from a
     /// different output and fork the DID it is minting.
+    ///
+    /// `signing_key` spends from the announcing beacon's address. It is the
+    /// session's minting key for a genesis beacon and the derived extra key for
+    /// the beacon the clean scenario's version 2 update adds; the caller knows
+    /// which beacon the step announces from, so the caller chooses.
     fn announce(
         &self,
         state: &mut MintState,
         step: &ScenarioStep,
         doc: &Document,
         update: Update,
+        signing_key: secp256k1::SecretKey,
     ) -> Result<(), MintError> {
         let address = doc
             .beacons()
@@ -1138,7 +1159,7 @@ impl<T: BtcTransport> MintSession<'_, T> {
             step.beacon_index,
             Fee::Absolute(self.fee),
             None,
-            self.beacon_sk,
+            signing_key,
         )?;
         // Both known BEFORE the relay: the txid is a function of the bytes, and
         // `broadcast` computes the same one to cross-check the endpoint's answer
@@ -1340,9 +1361,24 @@ fn print_funding_plan(ops: &dyn ChainOps, addresses: &[(usize, String)], needed_
     }
 }
 
+/// Every beacon a scenario can announce from, indexed as its steps index them:
+/// the genesis document's beacons in document order, then the one the clean
+/// scenario's version 2 update adds, when the scenario has one.
+///
+/// Built up front rather than read off the contemporary document, because the
+/// funding plan is printed before anything is minted and has to name the added
+/// beacon while the genesis document does not yet carry it.
+fn planned_beacons(genesis: &Document, extra: Option<&Address>) -> Vec<String> {
+    genesis
+        .beacons()
+        .map(|beacon| beacon.address().to_string())
+        .chain(extra.map(ToString::to_string))
+        .collect()
+}
+
 /// The announcing beacons of a scenario, in the order its steps use them.
 fn announcing_beacons(
-    doc: &Document,
+    beacons: &[String],
     steps: &[ScenarioStep],
 ) -> Result<Vec<(usize, String)>, MintError> {
     let mut seen = Vec::new();
@@ -1350,22 +1386,21 @@ fn announcing_beacons(
         if seen.iter().any(|(index, _)| *index == step.beacon_index) {
             continue;
         }
-        let address = doc
-            .beacons()
-            .nth(step.beacon_index)
+        let address = beacons
+            .get(step.beacon_index)
             .ok_or_else(|| MintError::NoBeacon {
                 name: step.name.to_string(),
                 index: step.beacon_index,
             })?
-            .address()
-            .to_string();
+            .clone();
         seen.push((step.beacon_index, address));
     }
     Ok(seen)
 }
 
 /// Mint the clean scenario: three updates, three different beacons, three
-/// distinct blocks, ending deactivated on chain.
+/// distinct blocks, ending deactivated on chain. The second announcement comes
+/// from the beacon the first update added, signed with that beacon's own key.
 ///
 /// Each step waits for its own confirmation before the next is built, so the
 /// three announcements land at three distinct heights. On a chain this tool mines
@@ -1380,15 +1415,15 @@ pub fn mint_clean<T: BtcTransport>(
 ) -> Result<(), MintError> {
     let did = Did::from_str(&state.did)?;
     let vm = vm_id(&state.did);
-    let extra_address = extra_beacon_address(&session.beacon_sk, network)?;
+    let (extra_sk, extra_address) = extra_beacon_key(&session.beacon_sk, network)?;
 
     print_funding_plan(
         session.ops,
-        &announcing_beacons(genesis, &CLEAN_STEPS)?,
+        &announcing_beacons(
+            &planned_beacons(genesis, Some(&extra_address)),
+            &CLEAN_STEPS,
+        )?,
         session.fee + FUNDING_HEADROOM_SATS,
-    );
-    eprintln!(
-        "  the version 2 update adds a fourth beacon at {extra_address}, which is never funded and never announces"
     );
 
     let mut contemporary = genesis.clone();
@@ -1418,7 +1453,15 @@ pub fn mint_clean<T: BtcTransport>(
                         update_secret(&session.beacon_sk)?,
                     )?
                 };
-                session.announce(state, step, source, update)?;
+                // The source document for version 3 is the contemporary one
+                // after version 2, which carries the added beacon at
+                // `ROTATED_BEACON_INDEX`; only its spend key differs.
+                let signing_key = if step.beacon_index == ROTATED_BEACON_INDEX {
+                    extra_sk
+                } else {
+                    session.beacon_sk
+                };
+                session.announce(state, step, source, update, signing_key)?;
             }
         }
         let result = session.advance(state, &did, step)?;
@@ -1614,7 +1657,7 @@ pub fn mint_fork<T: BtcTransport>(
 
     print_funding_plan(
         session.ops,
-        &announcing_beacons(genesis, &FORK_STEPS)?,
+        &announcing_beacons(&planned_beacons(genesis, None), &FORK_STEPS)?,
         session.fee + FUNDING_HEADROOM_SATS,
     );
 
@@ -1638,7 +1681,7 @@ pub fn mint_fork<T: BtcTransport>(
                     &vm,
                     update_secret(&session.beacon_sk)?,
                 )?;
-                session.announce(state, step, source, update)?;
+                session.announce(state, step, source, update, session.beacon_sk)?;
             }
         }
     }
@@ -2501,8 +2544,14 @@ mod tests {
                 .beacons()
                 .map(|beacon| beacon.address().to_string())
                 .collect();
-            for (_, address) in
-                announcing_beacons(&genesis, steps).expect("every announcing beacon resolves")
+            // The clean scenario announces its third update from the beacon
+            // its second update adds, so the fake chain holds an output for
+            // that address too: derived from this session's own key, exactly
+            // as the scenario driver derives it.
+            let (_, extra) =
+                extra_beacon_key(&secret, Network::Regtest).expect("the extra key derives");
+            for (_, address) in announcing_beacons(&planned_beacons(&genesis, Some(&extra)), steps)
+                .expect("every announcing beacon resolves")
             {
                 chain.fund(&address, 50_000);
             }
@@ -3009,7 +3058,7 @@ mod tests {
             .as_str()
             .expect("the created document names its DID")
             .to_string();
-        let extra = extra_beacon_address(&secret, Network::Regtest).expect("it derives");
+        let (_, extra) = extra_beacon_key(&secret, Network::Regtest).expect("it derives");
         let update = genesis
             .construct_signed_update(
                 add_beacon_service_patch(&did, &extra),
@@ -3035,7 +3084,7 @@ mod tests {
         };
 
         let error = session
-            .announce(&mut state, &CLEAN_STEPS[0], &genesis, update)
+            .announce(&mut state, &CLEAN_STEPS[0], &genesis, update, secret)
             .expect_err("a declined step must not proceed");
         assert!(matches!(error, MintError::Declined), "got {error:?}");
         assert!(
@@ -3180,9 +3229,15 @@ mod tests {
             table,
             vec![
                 ("v2-add-beacon-service", 2, 1),
-                ("v3-add-non-beacon-service", 3, 2),
+                ("v3-add-non-beacon-service", 3, ROTATED_BEACON_INDEX),
                 ("v4-deactivate", 4, 0),
-            ]
+            ],
+            "version 3 announces from the beacon version 2 added, then version 4 from a \
+             genesis beacon again"
+        );
+        assert_eq!(
+            ROTATED_BEACON_INDEX, 3,
+            "the genesis document declares three beacons, so the added one is the fourth"
         );
 
         let versions: Vec<u64> = CLEAN_STEPS.iter().map(|s| s.target_version_id).collect();
@@ -3204,7 +3259,7 @@ mod tests {
             .as_str()
             .expect("the created document names its DID")
             .to_string();
-        let extra = extra_beacon_address(&sample_keys().0, Network::Regtest)
+        let (_, extra) = extra_beacon_key(&sample_keys().0, Network::Regtest)
             .expect("the extra beacon address derives");
 
         // Building the patch at all proves it parses as `json_patch::Patch`; the
@@ -3255,8 +3310,8 @@ mod tests {
     fn the_extra_beacon_address_is_deterministic_and_chain_specific() {
         let (secret, _) = sample_keys();
 
-        let once = extra_beacon_address(&secret, Network::Regtest).expect("it derives");
-        let twice = extra_beacon_address(&secret, Network::Regtest).expect("it derives again");
+        let (_, once) = extra_beacon_key(&secret, Network::Regtest).expect("it derives");
+        let (_, twice) = extra_beacon_key(&secret, Network::Regtest).expect("it derives again");
         assert_eq!(
             once, twice,
             "the same key in must yield the same address out, or the runbook cannot \
@@ -3266,7 +3321,7 @@ mod tests {
         // No human-readable part is written anywhere in this module: the address
         // constructor is given the chain and produces the right encoding for it.
         assert!(once.to_string().starts_with("bcrt1q"), "{once}");
-        let signet = extra_beacon_address(&secret, Network::Signet).expect("it derives on signet");
+        let (_, signet) = extra_beacon_key(&secret, Network::Signet).expect("it derives on signet");
         assert!(signet.to_string().starts_with("tb1q"), "{signet}");
         assert_ne!(
             once, signet,
@@ -3277,7 +3332,7 @@ mod tests {
     #[test]
     fn the_extra_beacon_address_is_none_of_the_documents_own_beacons() {
         let (secret, _) = sample_keys();
-        let extra = extra_beacon_address(&secret, Network::Regtest).expect("it derives");
+        let (_, extra) = extra_beacon_key(&secret, Network::Regtest).expect("it derives");
         let genesis = genesis_document(Network::Regtest);
 
         for (index, beacon) in genesis.beacons().enumerate() {
@@ -3301,14 +3356,43 @@ mod tests {
             "this test is only meaningful while all-ones is not a valid scalar"
         );
 
-        let derived = address_from_hash_seed(refused, Network::Regtest)
+        let (_, derived) = key_from_hash_seed(refused, Network::Regtest)
             .expect("an out-of-range first hash is retried, not fatal");
         let next: [u8; 32] = Sha256::digest(refused).into();
         assert_eq!(
             derived,
-            address_from_hash_seed(next, Network::Regtest).expect("the retried seed derives"),
+            key_from_hash_seed(next, Network::Regtest)
+                .expect("the retried seed derives")
+                .1,
             "the retry advanced to the next hash rather than returning something else"
         );
+    }
+
+    #[test]
+    fn the_extra_beacon_key_matches_the_extra_beacon_address() {
+        // The version 3 announcement is signed with this key and spends from
+        // this address, so the two must be halves of one keypair on every
+        // chain. `sign_beacon_tx` does not check that they are — a node would,
+        // by rejecting the spend, which is the wrong place to find out.
+        let (secret, _) = sample_keys();
+        for (network, btc_network) in [
+            (Network::Regtest, esploda::bitcoin::Network::Regtest),
+            (Network::Signet, esploda::bitcoin::Network::Signet),
+        ] {
+            let (key, address) = extra_beacon_key(&secret, network).expect("it derives");
+            let public_key =
+                esploda::bitcoin::PublicKey::new(key.public_key(&secp256k1::Secp256k1::new()));
+            let from_key = Address::p2wpkh(&public_key, btc_network)
+                .expect("a compressed public key has a P2WPKH address");
+            assert_eq!(
+                address, from_key,
+                "on {network:?} the derived address is the P2WPKH of the derived key"
+            );
+            assert_ne!(
+                key, secret,
+                "the extra beacon's key is derived from the minting key, not the minting key"
+            );
+        }
     }
 
     #[test]
@@ -3436,17 +3520,44 @@ mod tests {
     #[test]
     fn the_announcing_beacons_of_the_clean_scenario_are_three_distinct_addresses() {
         let genesis = genesis_document(Network::Regtest);
-        let beacons = announcing_beacons(&genesis, &CLEAN_STEPS).expect("all three resolve");
+        let (_, extra) = extra_beacon_key(&sample_keys().0, Network::Regtest).expect("it derives");
+        let planned = planned_beacons(&genesis, Some(&extra));
+        assert_eq!(
+            planned.len(),
+            4,
+            "the three genesis beacons in document order, then the one version 2 adds"
+        );
+        assert_eq!(
+            planned[ROTATED_BEACON_INDEX],
+            extra.to_string(),
+            "the added beacon sits at the index the version 2 patch appends it at"
+        );
+        let beacons = announcing_beacons(&planned, &CLEAN_STEPS).expect("all three resolve");
 
         assert_eq!(
             beacons.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
-            vec![1, 2, 0],
+            vec![1, ROTATED_BEACON_INDEX, 0],
             "reported in the order the steps use them, so one faucet visit covers them"
+        );
+        assert_eq!(
+            beacons[1].1,
+            extra.to_string(),
+            "version 3's announcing beacon is the derived extra beacon, which is why the \
+             funding plan has to list it before anything is minted"
         );
         let mut addresses: Vec<&str> = beacons.iter().map(|(_, a)| a.as_str()).collect();
         addresses.sort_unstable();
         addresses.dedup();
         assert_eq!(addresses.len(), 3, "three different addresses");
+
+        // Without the extra beacon in the plan, version 3's index is out of
+        // range: named by step and index rather than a panic.
+        let error = announcing_beacons(&planned_beacons(&genesis, None), &CLEAN_STEPS)
+            .expect_err("a plan without the added beacon cannot announce version 3");
+        assert!(
+            matches!(error, MintError::NoBeacon { ref name, index: ROTATED_BEACON_INDEX } if name == "v3-add-non-beacon-service"),
+            "got {error:?}"
+        );
 
         // A document with no beacon at the requested index names the step rather
         // than panicking on the index.
@@ -3455,7 +3566,7 @@ mod tests {
             json["service"] = json!([json["service"][0].clone()]);
             Document::from_json_value(json).expect("a one-beacon document is conformant")
         };
-        let error = announcing_beacons(&stripped, &CLEAN_STEPS)
+        let error = announcing_beacons(&planned_beacons(&stripped, None), &CLEAN_STEPS)
             .expect_err("a missing beacon is an error, not a panic");
         assert!(
             matches!(error, MintError::NoBeacon { ref name, index: 1 } if name == "v2-add-beacon-service"),
@@ -4428,7 +4539,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("v2-add-beacon-service", 2, 1),
-                ("v3-add-non-beacon-service", 3, 2),
+                ("v3-add-non-beacon-service", 3, ROTATED_BEACON_INDEX),
                 ("v4-deactivate", 4, 0),
             ],
             "every step is recorded, in order, with the beacon it announced from"
@@ -4436,6 +4547,37 @@ mod tests {
         assert!(
             persisted.steps.iter().all(MintStep::is_confirmed),
             "each step confirmed before the next was built"
+        );
+
+        // Version 3 announces from the beacon version 2 added: that beacon was
+        // funded by the session, and the announcement it relayed spends from
+        // it (the fake files an announcement under the address whose output
+        // it consumed).
+        let (_, extra) =
+            extra_beacon_key(&driven.secret, Network::Regtest).expect("the extra key derives");
+        let extra = extra.to_string();
+        assert!(
+            ops.calls()
+                .iter()
+                .any(|call| call.starts_with(&format!("ensure_funded {extra} "))),
+            "the added beacon is funded before version 3 is announced from it: {:?}",
+            ops.calls()
+        );
+        let v3_txid = persisted
+            .steps
+            .iter()
+            .find(|step| step.name == "v3-add-non-beacon-service")
+            .expect("version 3 is recorded")
+            .txid
+            .clone();
+        assert!(
+            driven
+                .chain
+                .announcements()
+                .iter()
+                .any(|(address, txid, _)| *address == extra && *txid == v3_txid),
+            "the version 3 announcement spends from the added beacon: {:?}",
+            driven.chain.announcements()
         );
 
         let heights: Vec<u32> = persisted
