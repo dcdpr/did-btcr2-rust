@@ -9,7 +9,7 @@ use crate::document::{
 use crate::update::UnsecuredUpdate;
 use crate::{error::Btcr2Error, identifier::Sha256Hash, update::Update};
 use chrono::{DateTime, Utc};
-use esploda::bitcoin::{BlockHash, Txid, opcodes::all::OP_RETURN, script::Instruction};
+use esploda::bitcoin::{BlockHash, opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
 use onlyerror::Error;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -28,20 +28,6 @@ pub enum Error {
 
     /// DID:BTCR2 error
     Btcr2Error(#[from] crate::error::Btcr2Error),
-
-    /// A *needed* beacon-signal transaction — one whose announced hash matches a
-    /// sidecar update we are expecting — is still unconfirmed; the spec resolver
-    /// works in confirmed-block terms. Raised only for needed signals: unrelated
-    /// unconfirmed txs on a beacon address are skipped, not surfaced.
-    /// Unconfirmed-tx *handling* (waiting on / applying mempool updates) remains
-    /// Out of scope; this variant exists so the singleton-beacon happy
-    /// path returns a typed Err instead of panicking.
-    /// Module-local enum only; `Btcr2Error` (the spec-error enum) is untouched
-    #[error("unconfirmed beacon transaction (txid={txid})")]
-    UnconfirmedBeaconTx {
-        /// Transaction id of the unconfirmed beacon-signal transaction.
-        txid: Txid,
-    },
 
     /// The resolver asked for the `mediantime` of the block that confirmed a
     /// beacon signal (the update's proof carries `expires`) and the caller's
@@ -75,9 +61,6 @@ impl From<Error> for Btcr2Error {
             ),
             // Pass-through: the inner spec error is already authoritative.
             Error::Btcr2Error(e) => e,
-            Error::UnconfirmedBeaconTx { txid } => Btcr2Error::InvalidSidecarData(format!(
-                "unconfirmed beacon transaction (txid={txid})"
-            )),
             // The same fail-closed disposition `apply_update` takes when a
             // proof carries `expires` and the mediantime is unavailable.
             Error::MissingBlockMediantime { block_hash } => Btcr2Error::InvalidDidUpdate(format!(
@@ -476,20 +459,14 @@ impl Resolver {
                 let signal_bytes = Sha256Hash::from(signal_arr);
 
                 let (block_time, block_height, block_hash) = match tx.status {
-                    Status::Unconfirmed => {
-                        // only a *needed* signal — one whose announced hash is
-                        // present in the sidecar update-lookup table — blocks resolution
-                        // while its beacon tx is unconfirmed. Unrelated unconfirmed txs on
-                        // the beacon address (ordinary mempool traffic) are skipped so the
-                        // confirmed history still resolves; a beacon address routinely
-                        // carries mempool txs that are not DID updates we hold data for.
-                        // Unconfirmed-tx *handling* (waiting on / applying mempool updates)
-                        // remains out of scope.
-                        if self.update_lookup_table.contains_key(&signal_bytes) {
-                            return Err(Error::UnconfirmedBeaconTx { txid: tx.txid });
-                        }
-                        continue;
-                    }
+                    // resolve.md "Find Beacon Signals": "Unconfirmed mempool
+                    // transactions MUST NOT be processed." Skipped whether or
+                    // not the sidecar holds the update it announces — a
+                    // controller resolving with the full sidecar before its
+                    // own broadcast is mined gets the confirmed history, not
+                    // an error; the pending update is simply not yet part
+                    // of it.
+                    Status::Unconfirmed => continue,
                     Status::Confirmed {
                         block_time,
                         block_height,
@@ -1990,14 +1967,16 @@ mod tests {
     /// per-vector chain snapshots.
     const UNCONFIRMED_FIXTURE: &str = include_str!("../fixtures/singleton-beacon-signal-txs.json");
 
-    /// a *needed* unconfirmed signal — one whose
-    /// announced hash is present in the sidecar update-lookup table — must raise a
-    /// typed `Err(resolver::Error::UnconfirmedBeaconTx { txid })` (the hidden panic
-    /// previously at resolver.rs:227), preserving the txid.
+    /// An unconfirmed announcement is skipped even when the sidecar holds the
+    /// update it announces (a *needed* signal): the spec says mempool
+    /// transactions are not processed, and a controller resolving with the
+    /// full sidecar before its own broadcast is mined must get the confirmed
+    /// history rather than an error.
     ///
-    /// `Btcr2Error` is untouched.
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (unconfirmed mempool transactions MUST NOT be processed).
     #[test]
-    fn unconfirmed_needed_signal_returns_err() {
+    fn unconfirmed_needed_signal_is_skipped() {
         // `find_next_signals` iterates the supplied `transactions` map and inspects
         // each tx's last output + confirmation status; it does NOT cross-check the
         // tx against the resolver's beacon addresses (that coupling only governs
@@ -2031,22 +2010,45 @@ mod tests {
             .update_lookup_table
             .insert(announced, sidecar.updates[0].clone());
 
-        // Unconfirmed pass: the same tx, now in the mempool. A *needed* unconfirmed
-        // signal must hard-fail resolution with the txid preserved.
-        let mut json: serde_json::Value = serde_json::from_str(UNCONFIRMED_FIXTURE).unwrap();
-        let first_tx = &mut json["SingletonBeacon"][0];
-        let expected_txid_str = first_tx["txid"].as_str().unwrap().to_string();
+        // Unconfirmed pass: the same tx, now in the mempool, on its own. A needed
+        // unconfirmed signal is not processed: no signal, no error.
+        let json: serde_json::Value = serde_json::from_str(UNCONFIRMED_FIXTURE).unwrap();
+        let mut first_tx = json["SingletonBeacon"][0].clone();
         first_tx["status"] = serde_json::json!({ "confirmed": false });
         let unconfirmed_txs: HashMap<BeaconType, Vec<Transaction>> =
-            serde_json::from_value(json).unwrap();
+            serde_json::from_value(serde_json::json!({ "SingletonBeacon": [first_tx] })).unwrap();
 
-        let err = resolver.find_next_signals(unconfirmed_txs).unwrap_err();
-        match err {
-            Error::UnconfirmedBeaconTx { txid } => {
-                assert_eq!(txid.to_string(), expected_txid_str);
-            }
-            other => panic!("expected UnconfirmedBeaconTx, got {other:?}"),
-        }
+        let signals = resolver
+            .find_next_signals(unconfirmed_txs)
+            .expect("an unconfirmed announcement is skipped, not an error");
+        assert!(
+            signals.is_empty(),
+            "the needed-but-unconfirmed announcement yields no signal"
+        );
+    }
+
+    /// The end-to-end shape of the same rule: v2 confirmed and v3 still in the
+    /// mempool, both in the sidecar, resolve to version 2 — the confirmed
+    /// history — rather than aborting on the pending announcement.
+    #[test]
+    fn pending_announcement_resolves_to_the_confirmed_version() {
+        let (initial, update1, update2) = chained_two_updates();
+        let tx_v2 = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xa7);
+        let tx_v3 = unconfirmed_signal_tx(update2.hash(), 0xa8);
+
+        let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
+
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            2,
+            "the confirmed v2 applies; the pending v3 is not processed and is not an error"
+        );
     }
 
     /// an unconfirmed beacon tx whose announced hash is NOT a needed signal
@@ -2717,6 +2719,26 @@ mod tests {
             &"00".repeat(32),
             txid_seed,
         )
+    }
+
+    /// A Singleton-beacon esplora transaction announcing `signal` that is
+    /// still in the mempool (`status.confirmed == false`).
+    fn unconfirmed_signal_tx(signal: Sha256Hash, txid_seed: u8) -> Transaction {
+        let script_pubkey = format!("6a20{}", hex::encode(signal.as_bytes()));
+        let txid = format!("{txid_seed:02x}").repeat(32);
+        let json = serde_json::json!({
+            "txid": txid,
+            "version": 2,
+            "locktime": 0,
+            "vin": [],
+            "vout": [{ "scriptpubkey": script_pubkey, "value": 0 }],
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": { "confirmed": false },
+        });
+        serde_json::from_value(json)
+            .expect("synthetic unconfirmed esplora transaction deserializes")
     }
 
     /// `confirmed_signal_tx` with the confirming block's hash chosen by the
