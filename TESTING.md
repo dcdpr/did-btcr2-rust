@@ -29,7 +29,7 @@ above. Always name crates with `-p`.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 342 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 347 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 54 + 1 e2e |
 | `did-btcr2-cli` | 43 + 2 broken-pipe |
 | `chain-capture` | 184 |
@@ -373,7 +373,7 @@ addresses captured; `signals` is the number of OP_RETURN announcements found.
 | regtest/k1/qgpy0hmm.json | regtest | http://localhost:3000 | 758 | 4 | 1 | 681 |
 | regtest/x1/q26jeds9.json | regtest | http://localhost:3000 | 758 | 2 | 1 | 694 |
 | regtest/x1/qfl7se8f.json | regtest | http://localhost:3000 | 758 | 1 | 1 | 706 |
-| minted/clean-rotating-beacons.json | regtest | http://localhost:3000 | 769 | 3 | 3 | 760, 762, 764 |
+| minted/clean-rotating-beacons.json | regtest | http://localhost:3000 | 769 | 4 | 3 | 760, 762, 764 |
 | minted/late-publishing-fork.json | regtest | http://localhost:3000 | 778 | 3 | 2 | 771, 773 |
 
 The other 4 driven vectors (`q5puld7y`, `q5g3smvu`, `qgpakaw4`, `q2fz9mz6`) are
@@ -509,9 +509,10 @@ Tests worth grepping for:
 | `a_live_skip_override_keeps_every_driver_green` | a hand-written `SKIP_OVERRIDES` entry does not break the drivers |
 | `ledger_summary_never_mentions_a_minted_scenario` | minted scenarios stay out of the upstream ledger |
 | `capture_pump_*` (`src/resolver.rs`) | replay routing and its fail-loud behaviour |
+| `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 49 `#[test]` functions; `src/test_vectors.rs` holds 60.
+`src/resolver.rs` holds 70 `#[test]` functions; `src/test_vectors.rs` holds 60.
 
 ## 8. When `test-suite/` is absent
 

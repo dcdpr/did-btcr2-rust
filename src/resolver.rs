@@ -125,6 +125,12 @@ pub struct Resolver<T = ()> {
     /// carries `expires` and for every applicable update under a
     /// `versionTime` bound.
     block_mediantimes: HashMap<BlockHash, DateTime<Utc>>,
+    /// Signals already matched to sidecar updates but not yet processed,
+    /// parked when an applied update introduced a beacon: Find Beacon Signals
+    /// precedes every Process Next Update (resolve.md:40-46), so the new
+    /// beacon is scanned first. The next round's tuples are merged into these
+    /// and the merged pool re-sorted before processing resumes.
+    pending_signals: Vec<AppliedSignal>,
 
     // Finite State Machine
     fsm: ResolverFsm,
@@ -175,6 +181,7 @@ impl Resolver {
             rpc_host,
             request_cache: HashSet::new(),
             block_mediantimes: HashMap::new(),
+            pending_signals: Vec::new(),
             fsm: ResolverFsm::Init,
             _type_state: (),
         })
@@ -190,8 +197,15 @@ impl Resolver {
 
     /// Advance the resolution FSM one step, returning either a
     /// [`ResolverState::Requests`] (blockchain data the caller must fetch and
-    /// feed back) or a [`ResolverState::Resolved`] result (did:btcr2 spec
-    /// section 7.2.2.1).
+    /// feed back), a [`ResolverState::BlockRequests`], or a
+    /// [`ResolverState::Resolved`] result (did:btcr2 spec section 7.2.2.1).
+    ///
+    /// The loop is the spec's (resolve.md:40-46): scan every beacon not yet
+    /// scanned, then take ONE tuple, apply it, and scan again. Each round's
+    /// tuples are merged with any parked from an earlier round, sorted, and
+    /// applied in order; after every applied update the beacon set is
+    /// re-checked, and if the update introduced a beacon the tuples not yet
+    /// processed are parked while that beacon's history is fetched.
     // TODO: Better name for this?
     pub fn resolve(mut self) -> Result<ResolverState, Error> {
         // Take the FSM state, leaving the default in its place.
@@ -218,22 +232,30 @@ impl Resolver {
                 // Step 4. (Assignment)
                 let next_signals = self.find_next_signals(responses)?;
 
-                // Process Next Update step 2: `updates` is empty.
-                if next_signals.is_empty() {
+                // Tuples parked when an applied update introduced the beacon
+                // this round scanned. They and the new round form ONE pool.
+                let mut signals = std::mem::take(&mut self.pending_signals);
+
+                // Process Next Update step 2 on the MERGED pool: an empty
+                // round ends the walk only when nothing is parked behind it.
+                if next_signals.is_empty() && signals.is_empty() {
                     return self.history_exhausted();
                 }
 
                 // Find Beacon Signals (resolve.md:122-146): build the tuples
                 // (raises MISSING_UPDATE_DATA here, before the version_time bound —
                 // resolve.md:145-147).
-                let mut signals = self.process_beacon_signals(next_signals)?;
+                signals.extend(self.process_beacon_signals(next_signals)?);
 
-                // Process Next Update step 3 (resolve.md:167): sort by
-                // targetVersionId (ascending) with block_height as a tiebreaker; the
-                // spec removes the FIRST tuple, and that is what the version_time
-                // bound is evaluated against.
+                // Process Next Update step 3 (resolve.md:167): sort the union
+                // of parked and new tuples by targetVersionId (ascending) with
+                // block_height as a tiebreaker; the spec removes the FIRST
+                // tuple, and that is what the version_time bound is evaluated
+                // against.
                 signals.sort_unstable_by_key(|s| (s.update.target_version_id, s.block_height));
 
+                // `may_request` is true: a parked tuple may need its block's
+                // mediantime, and this is the first pass over the merged pool.
                 self.apply_signals(signals, true)
             }
 
@@ -241,10 +263,16 @@ impl Resolver {
         }
     }
 
-    /// Apply a sorted batch of matched signals (resolve.md "Process Next
-    /// Update"), then ask for the next beacon round or resolve.
+    /// Process a sorted pool of matched signals one tuple at a time
+    /// (resolve.md "Process Next Update"), re-checking the beacon set after
+    /// every applied update. An update that introduced a beacon yields a
+    /// [`ResolverState::Requests`] for it, with the tuples not yet processed
+    /// parked in `pending_signals` for the next
+    /// [`ResolverFsm::FindNextSignals`] to merge. Once the pool is drained
+    /// with the beacon set unchanged by the last apply, the walk asks for any
+    /// beacon still unscanned or resolves.
     ///
-    /// `may_request` is `true` on the first pass over a batch: if any signal
+    /// `may_request` is `true` on the first pass over a pool: if any signal
     /// that can still apply needs its confirming block's mediantime — its
     /// proof carries `expires`, or a `versionTime` bound is in force — and
     /// that mediantime is not yet held, the batch is parked in
@@ -309,12 +337,15 @@ impl Resolver {
         // duplicate branch below.
         let mut most_recent_applied_version: Option<NonZeroU64> = None;
 
-        for AppliedSignal {
+        // Taken one at a time so the unprocessed remainder can be parked when
+        // an applied update introduces a beacon.
+        let mut signals = signals.into_iter();
+        while let Some(AppliedSignal {
             update,
             block_height,
             block_time,
             block_hash,
-        } in signals
+        }) = signals.next()
         {
             // Step 10.1.
             if update.target_version_id <= self.current_version_id {
@@ -444,6 +475,23 @@ impl Resolver {
 
                 // Step 10.2.9.
                 contemporary_hash = self.contemporary_doc.hash();
+
+                // Find Beacon Signals runs before every Process Next Update
+                // (resolve.md:40-46): a beacon this update introduced is
+                // scanned now, and its tuples are merged with the ones still
+                // waiting, before the next tuple is taken. `request_cache`
+                // makes this a no-op unless the beacon set actually grew.
+                let ResolverState::Requests(fsm, requests) = self.next_signals_requests()? else {
+                    unreachable!("next_signals_requests only builds Requests")
+                };
+                self = Resolver::from_waiting_for_responses(fsm);
+                if !requests.is_empty() {
+                    self.pending_signals = signals.collect();
+                    return Ok(ResolverState::Requests(
+                        self.with_state(WaitingForResponses),
+                        requests,
+                    ));
+                }
             }
 
             // Step 10.3.
@@ -689,6 +737,7 @@ impl<T> Resolver<T> {
             rpc_host: self.rpc_host,
             request_cache: self.request_cache,
             block_mediantimes: self.block_mediantimes,
+            pending_signals: self.pending_signals,
             fsm: self.fsm,
             _type_state: state,
         }
@@ -834,7 +883,10 @@ enum ResolverFsm {
 pub enum ResolverState {
     /// Requests need to be sent to the blockchain: one
     /// `GET {esplora_url}/address/{address}/txs` per beacon address not yet
-    /// scanned, grouped by beacon type.
+    /// scanned, grouped by beacon type. A round can arrive in the middle of
+    /// a batch: when an applied update adds a beacon, that beacon is scanned
+    /// before the next tuple is processed, and the remaining tuples wait for
+    /// the answer. The driver's contract is the same for every round.
     ///
     /// The contract for the answer fed back through
     /// [`Resolver::<WaitingForResponses>::process_responses`]: for each
@@ -4519,29 +4571,48 @@ mod tests {
             f.tip_height
         );
 
-        // --- The deactivation short-circuit, observed by what was NOT asked --
+        // --- The mid-walk re-scan and the deactivation short-circuit, observed
+        // --- by what WAS and was NOT asked -----------------------------------
         //
-        // Safe to assert as a round COUNT rather than fragile, because of what
-        // the chain was minted to contain: the v2 update adds a FOURTH beacon
-        // service, and that fourth address was never funded, never announced,
-        // and is deliberately absent from the capture. A resolver that did not
-        // stop at `deactivated` would issue a second round naming it and panic
-        // inside the pump ("no captured response for address …") before reaching
-        // this line. The assertion is the readable statement of the property;
-        // the pump's panic is the enforcement.
+        // The v2 update adds a FOURTH beacon service. The beacon set is
+        // re-checked after every applied update, so the walk asks for that
+        // beacon's history right after v2 applies (round 2), before v3 is
+        // taken. The deactivating v4 then resolves the document immediately:
+        // no round follows it. Round 2's address is read off the capture — it
+        // is the one captured key the genesis round did not ask for — so a
+        // re-mint does not touch this test. A resolver that did not stop at
+        // `deactivated` would issue a third round and be caught here.
         assert_eq!(
             rounds.len(),
-            1,
-            "{id}: applying the deactivating update must resolve immediately and process no \
-             further beacon signals — rounds: {rounds:?}"
+            2,
+            "{id}: the beacon v2 adds is scanned after v2 applies, and applying the \
+             deactivating update must resolve immediately and process no further beacon \
+             signals — rounds: {rounds:?}"
         );
         let mut requested = rounds[0].clone();
         requested.sort();
         let announced: Vec<String> = addresses.iter().map(|a| (*a).to_string()).collect();
         assert_eq!(
             requested, announced,
-            "{id}: the single round must request exactly the genesis beacon addresses the \
+            "{id}: the first round must request exactly the genesis beacon addresses the \
              three updates were announced from"
+        );
+        let added: Vec<String> = f
+            .addresses
+            .keys()
+            .filter(|address| !rounds[0].contains(address))
+            .cloned()
+            .collect();
+        assert_eq!(
+            added.len(),
+            1,
+            "{id}: the capture holds exactly one address beyond the genesis beacons — the \
+             beacon v2 adds; captured keys: {:?}",
+            f.addresses.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rounds[1], added,
+            "{id}: the second round must request exactly the beacon the v2 update added"
         );
 
         // --- The genesis reference ------------------------------------------
@@ -5193,6 +5264,242 @@ mod tests {
             rounds[1],
             vec![ROTATED_BEACON_ADDRESS.to_string()],
             "round 2 asks only for the beacon the update introduced"
+        );
+    }
+
+    /// The initial document plus three chained signed updates: v2 APPENDS a
+    /// Singleton beacon at [`ROTATED_BEACON_ADDRESS`], v3 and v4 are benign.
+    /// Announcing v3 from the added beacon and v4 from a genesis beacon is the
+    /// history that only resolves if the beacon set is re-checked after every
+    /// applied update rather than after every batch.
+    fn chained_rotation_then_two_more() -> (InitialDocument, Update, Update, Update) {
+        use crate::document::Document;
+
+        let (did, initial) = chain_initial_document();
+        let vm_id = format!("{}#initialKey", did.encode());
+
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+        let update_v2 = Document::from(initial.clone())
+            .construct_signed_update(
+                chain_beacon_rotation_patch(&did),
+                v2,
+                &vm_id,
+                chain_secret_key(),
+            )
+            .expect("the rotation update constructs against the initial document");
+
+        let mut after_v2 = initial.clone();
+        after_v2
+            .apply_update(&update_v2, &AnnouncingBlock::fixed())
+            .expect("the rotation update applies to the initial document");
+
+        let v3 = NonZeroU64::new(3).expect("3 is non-zero");
+        let update_v3 = Document::from(after_v2.clone())
+            .construct_signed_update(chain_benign_patch(&vm_id), v3, &vm_id, chain_secret_key())
+            .expect("update #3 constructs against the post-rotation document");
+
+        let mut after_v3 = after_v2;
+        after_v3
+            .apply_update(&update_v3, &AnnouncingBlock::fixed())
+            .expect("update #3 applies to the post-rotation document");
+
+        let v4 = NonZeroU64::new(4).expect("4 is non-zero");
+        let update_v4 = Document::from(after_v3)
+            .construct_signed_update(chain_benign_patch(&vm_id), v4, &vm_id, chain_secret_key())
+            .expect("update #4 constructs against the post-update-3 document");
+
+        (initial, update_v2, update_v3, update_v4)
+    }
+
+    /// Genesis beacons A, B, C; v2 (from A) adds D; v3 from D; v4 from A.
+    /// resolve.md:40-46 runs Find Beacon Signals before EVERY Process Next
+    /// Update, so D is scanned right after v2 applies and v3 is found before
+    /// v4 is judged. A resolver that only re-checks the beacon set at the end
+    /// of a batch meets v4 with version 2 in force and raises LATE_PUBLISHING.
+    #[test]
+    fn interleaved_history_across_a_rotated_in_beacon_resolves() {
+        let (initial, update_v2, update_v3, update_v4) = chained_rotation_then_two_more();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2 = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0xa2);
+        let tx_v3 = confirmed_signal_tx(update_v3.hash(), 300, 1_700_000_100, 0xa3);
+        let tx_v4 = confirmed_signal_tx(update_v4.hash(), 400, 1_700_000_200, 0xa4);
+        // A's history is deliberately out of order: the sort, not the
+        // indexer's ordering, decides which tuple is taken first.
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v4, tx_v2]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, vec![tx_v3]),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update_v2, update_v3, update_v4], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/interleaved");
+
+        let result = result.expect("v3 is announced from the beacon v2 added, so v4 is not a gap");
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            4,
+            "all three updates apply once the added beacon has been scanned"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "exactly two rounds: the genesis beacons, then the added beacon — scanned \
+             before v4 is judged, not after the batch"
+        );
+    }
+
+    /// The beacon v2 adds has no history. Its round is empty, but the tuples
+    /// parked while it was fetched (v3, v4) are still waiting and must still
+    /// apply: an empty round ends the walk only when nothing is parked.
+    #[test]
+    fn parked_signals_still_apply_when_the_rotated_in_beacon_has_no_history() {
+        let (initial, update_v2, update_v3, update_v4) = chained_rotation_then_two_more();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2 = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0xb2);
+        let tx_v3 = confirmed_signal_tx(update_v3.hash(), 300, 1_700_000_100, 0xb3);
+        let tx_v4 = confirmed_signal_tx(update_v4.hash(), 400, 1_700_000_200, 0xb4);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2, tx_v4]),
+            (addresses[1].as_str(), vec![tx_v3]),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, Vec::new()),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update_v2, update_v3, update_v4], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/parked");
+
+        let result = result.expect("the parked tuples apply after the empty round");
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            4,
+            "v3 and v4 were parked behind the added beacon's round and must still apply"
+        );
+        assert_eq!(
+            rounds.len(),
+            2,
+            "the genesis round, then the added beacon's (empty) round: {rounds:?}"
+        );
+        assert_eq!(
+            rounds[1],
+            vec![ROTATED_BEACON_ADDRESS.to_string()],
+            "round 2 asks only for the beacon v2 introduced"
+        );
+    }
+
+    /// The interleaved history under a `versionTime` bound. The parked v4 is
+    /// judged against the bound on the merged pool, through the block-
+    /// mediantime request path: the merged batch asks for the one block it
+    /// does not hold yet (v3's), v3's mediantime is within the bound and v4's
+    /// is not, so the walk resolves version 3.
+    #[test]
+    fn interleaved_history_under_a_version_time_bound_requests_the_parked_tuples_blocks() {
+        let (initial, update_v2, update_v3, update_v4) = chained_rotation_then_two_more();
+        let addresses = chain_beacon_addresses(&initial);
+        let t0: i64 = 1_700_000_000;
+        let block_aa = "aa".repeat(32);
+        let block_bb = "bb".repeat(32);
+        let block_cc = "cc".repeat(32);
+        let tx_v2 = confirmed_signal_tx_in_block(update_v2.hash(), 200, t0, &block_aa, 0xc2);
+        let tx_v3 = confirmed_signal_tx_in_block(update_v3.hash(), 300, t0 + 100, &block_bb, 0xc3);
+        let tx_v4 = confirmed_signal_tx_in_block(update_v4.hash(), 400, t0 + 200, &block_cc, 0xc4);
+        let mut fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v4, tx_v2]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, vec![tx_v3]),
+        ]);
+        for (hash, mediantime) in [
+            (&block_aa, t0),
+            (&block_bb, t0 + 100),
+            (&block_cc, t0 + 200),
+        ] {
+            fixture.blocks.insert(
+                hash.clone(),
+                serde_json::json!({ "id": hash, "mediantime": mediantime }),
+            );
+        }
+
+        let sidecar = SidecarData::new(None, vec![update_v2, update_v3, update_v4], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            version_time: Some(ts(t0 + 150)),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) =
+            drive_capture_rounds(resolver, &fixture, "test/interleaved-version-time");
+
+        let result = result.expect("the bound resolves the document in effect at versionTime");
+        assert_eq!(
+            u64::from(result.document_metadata.version_id),
+            3,
+            "v4's block mediantime is after the bound; v3's is within it"
+        );
+        assert_eq!(rounds.len(), 4, "rounds: {rounds:?}");
+        assert_eq!(rounds[0], addresses, "round 1 asks for the genesis beacons");
+        let mut first_blocks = rounds[1].clone();
+        first_blocks.sort();
+        assert_eq!(
+            first_blocks,
+            vec![format!("block/{block_aa}"), format!("block/{block_cc}")],
+            "the genesis batch asks for the blocks of both tuples above the current version"
+        );
+        assert_eq!(
+            rounds[2],
+            vec![ROTATED_BEACON_ADDRESS.to_string()],
+            "the added beacon is scanned after v2 applies, with v4 parked"
+        );
+        assert_eq!(
+            rounds[3],
+            vec![format!("block/{block_bb}")],
+            "the merged pool asks only for the block it does not hold yet (v3's)"
+        );
+    }
+
+    /// v3 exists nowhere: not on the genesis beacons and not on the beacon v2
+    /// added. The added beacon is scanned BEFORE the gap is judged, and the
+    /// gap is then real, so LATE_PUBLISHING is still raised.
+    #[test]
+    fn a_genuine_version_gap_still_raises_late_publishing_after_a_rotation() {
+        let (initial, update_v2, _update_v3, update_v4) = chained_rotation_then_two_more();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2 = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0xd5);
+        let tx_v4 = confirmed_signal_tx(update_v4.hash(), 400, 1_700_000_200, 0xd6);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2, tx_v4]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, Vec::new()),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update_v2, update_v4], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/version-gap");
+
+        let err = result.expect_err("version 3 was never announced anywhere");
+        assert!(
+            matches!(err, Error::LatePublishingError),
+            "expected LatePublishingError, got {err:?}"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon was scanned before the gap was judged"
         );
     }
 

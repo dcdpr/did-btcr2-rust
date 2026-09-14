@@ -76,6 +76,12 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   Update" step 4), not only on the next version. A skipped version announced
   after `versionTime` now resolves the document in effect instead of raising
   `LATE_PUBLISHING`.
+- Resolver: the beacon set is re-checked after every applied update
+  (resolve.md "Find Beacon Signals" precedes every "Process Next Update"), so
+  an update announced from a beacon that an earlier update added is scanned
+  before later updates from the original beacons are judged. Previously such a
+  history raised `LATE_PUBLISHING`. A round can now arrive mid-batch; the
+  driver's contract is unchanged.
 - `did-btcr2-client`: address-history paging stops with
   `TransportError::Malformed` when a continuation page repeats the page it was
   keyed on, instead of looping on a server that re-serves the same page.
