@@ -15,8 +15,6 @@ use onlyerror::Error;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU64;
 
-const DEFAULT_RPC_BASE_URL: &str = "https://blockstream.info/testnet/api";
-
 /// Errors raised while the resolver FSM walks beacon signals and applies
 /// updates. A module-local sentinel enum; spec-conformant errors are produced
 /// via the [`From<Error>`] conversion into [`Btcr2Error`].
@@ -125,9 +123,11 @@ impl Resolver {
     // TODO: Why do you have `InitialDocument` here and in `resolution_options.sidecar_data`?
     /// Build a resolver over `initial_doc` with the caller's options.
     ///
-    /// `INVALID_OPTIONS` when `versionId` and `versionTime` are both set:
-    /// DID Resolution defines them as mutually exclusive and resolve.md
-    /// raises the error before any beacon is read.
+    /// `INVALID_OPTIONS` when `versionId` and `versionTime` are both set
+    /// (DID Resolution defines them as mutually exclusive and resolve.md
+    /// raises the error before any beacon is read), or when `esplora_url` is
+    /// absent or not an absolute HTTP(S) base the request URIs can be formed
+    /// from — see [`esplora_base`].
     pub(crate) fn new(
         initial_doc: InitialDocument,
         resolution_options: ResolutionOptions,
@@ -139,9 +139,7 @@ impl Resolver {
         }
         let target_condition = TargetCondition::from(&resolution_options);
         let chain_tip_height = resolution_options.chain_tip_height;
-        let rpc_host = resolution_options
-            .esplora_url
-            .unwrap_or_else(|| DEFAULT_RPC_BASE_URL.into());
+        let rpc_host = esplora_base(resolution_options.esplora_url.as_deref())?;
         let update_lookup_table = match resolution_options.sidecar_data {
             Some(SidecarData {
                 update_lookup_table,
@@ -272,13 +270,8 @@ impl Resolver {
             }
             let requests = missing
                 .iter()
-                .map(|hash| {
-                    esploda::Req::builder()
-                        .uri(format!("{}/block/{hash}", self.rpc_host))
-                        .body(())
-                        .expect("rpc_host + BlockHash hex produce a valid HTTP URI")
-                })
-                .collect();
+                .map(|hash| self.request(&format!("/block/{hash}")))
+                .collect::<Result<Vec<_>, Error>>()?;
             self.fsm = ResolverFsm::ApplySignals(signals);
             return Ok(ResolverState::BlockRequests(
                 self.with_state(WaitingForBlockTimes),
@@ -523,16 +516,7 @@ impl Resolver {
             match beacon.ty {
                 BeaconType::Singleton => {
                     // TODO: Move this to Esploda
-                    let req = esploda::Req::builder()
-                        .uri(format!(
-                            "{}/address/{}/txs",
-                            self.rpc_host, beacon.descriptor,
-                        ))
-                        .body(())
-                        .expect(
-                            "rpc_host + bitcoin Address Display produce a valid HTTP URI; \
-                             esploda::Req::body only fails on URI parse",
-                        );
+                    let req = self.request(&format!("/address/{}/txs", beacon.descriptor))?;
 
                     if !self.request_cache.contains(req.uri()) {
                         self.request_cache.insert(req.uri().clone());
@@ -604,6 +588,22 @@ impl Resolver {
 }
 
 impl<T> Resolver<T> {
+    /// A `GET {esplora_url}{path}` request. `path` is built from
+    /// document-derived values (a beacon address, a block hash), and the base
+    /// was checked by [`esplora_base`], so a failure here means the two do not
+    /// compose into a URI after all; it is reported, not assumed away.
+    fn request(&self, path: &str) -> Result<esploda::Req, Error> {
+        esploda::Req::builder()
+            .uri(format!("{}{path}", self.rpc_host))
+            .body(())
+            .map_err(|e| {
+                Error::Btcr2Error(Btcr2Error::InvalidOptions(format!(
+                    "esplora_url `{}` does not form a request URI for `{path}`: {e}",
+                    self.rpc_host
+                )))
+            })
+    }
+
     /// Move every field into a resolver in type state `state`. The type-state
     /// marker is the only thing that changes between FSM steps.
     fn with_state<U>(self, state: U) -> Resolver<U> {
@@ -650,6 +650,40 @@ impl<T> Resolver<T> {
             document_metadata,
         }
     }
+}
+
+/// Check the caller's Esplora base URL once, up front, so every request URI
+/// the resolver later formats from it is well-formed.
+///
+/// The URL is required: the resolver has no default endpoint, because the
+/// right one depends on the DID's network and a silent fallback to one chain
+/// would resolve a DID on another chain to its genesis document with no error.
+/// It must be an absolute URI with a scheme and a host and carry no query
+/// string (a query would end up in the middle of every request path). A
+/// trailing slash is dropped so `{base}/address/...` never contains `//`.
+fn esplora_base(esplora_url: Option<&str>) -> Result<String, Btcr2Error> {
+    let Some(url) = esplora_url else {
+        return Err(Btcr2Error::InvalidOptions(
+            "esplora_url is required: the resolver builds every beacon request from it and \
+             has no default endpoint"
+                .into(),
+        ));
+    };
+    let base = url.trim_end_matches('/');
+    let uri: esploda::http::Uri = base.parse().map_err(|e| {
+        Btcr2Error::InvalidOptions(format!("esplora_url `{url}` is not a valid URI: {e}"))
+    })?;
+    if uri.scheme().is_none() || uri.authority().is_none() {
+        return Err(Btcr2Error::InvalidOptions(format!(
+            "esplora_url `{url}` must be an absolute URI with a scheme and a host"
+        )));
+    }
+    if uri.query().is_some() {
+        return Err(Btcr2Error::InvalidOptions(format!(
+            "esplora_url `{url}` must not carry a query string"
+        )));
+    }
+    Ok(base.to_owned())
 }
 
 /// A beacon signal paired with the sidecar [`Update`] it resolves to, carrying
@@ -1296,7 +1330,7 @@ mod tests {
                     sidecar_data: Some(sidecar),
                     chain_tip_height: fixture.as_ref().map(|f| f.tip_height),
                     version_time,
-                    ..Default::default()
+                    ..test_options()
                 }
             };
 
@@ -2122,9 +2156,23 @@ mod tests {
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height,
-            ..Default::default()
+            ..test_options()
         };
         Some(Resolver::new(initial_document, resolution_options).expect("the options are valid"))
+    }
+
+    /// The Esplora base every offline resolver test is built against. The
+    /// resolver only ever formats request URIs from it; nothing is fetched.
+    const TEST_ESPLORA_URL: &str = "http://esplora.test/api";
+
+    /// `ResolutionOptions` for an offline resolver test: the required Esplora
+    /// base filled in, everything else default. Tests spread their own fields
+    /// over it.
+    fn test_options() -> ResolutionOptions {
+        ResolutionOptions {
+            esplora_url: Some(TEST_ESPLORA_URL.to_string()),
+            ..Default::default()
+        }
     }
 
     /// The DID of the regtest k1 qgpakaw4 vector that `resolver_with` /
@@ -2173,24 +2221,92 @@ mod tests {
         let url = "https://node.example/api".to_string();
         let Some(resolver) = resolver_from_options(ResolutionOptions {
             esplora_url: Some(url.clone()),
-            ..Default::default()
+            ..test_options()
         }) else {
             return;
         };
         assert_eq!(resolver.rpc_host, url);
     }
 
-    /// `esplora_url = None` falls back to `DEFAULT_RPC_BASE_URL` (testnet).
-    /// The const is retained as the fallback. Pure-construction, fully offline.
+    /// `esplora_url = None` is `INVALID_OPTIONS`: the resolver has no default
+    /// endpoint, because a fallback to one chain would resolve a DID of
+    /// another chain to its genesis document with no error. Pure-construction,
+    /// fully offline.
     #[test]
-    fn esplora_url_none_falls_back_to_default() {
-        let Some(resolver) = resolver_from_options(ResolutionOptions {
-            esplora_url: None,
-            ..Default::default()
-        }) else {
-            return;
+    fn esplora_url_none_is_invalid_options() {
+        let (_did, initial) = chain_initial_document();
+        let err = Resolver::new(
+            initial,
+            ResolutionOptions {
+                esplora_url: None,
+                ..Default::default()
+            },
+        )
+        .expect_err("a missing esplora_url must be rejected");
+        let Btcr2Error::InvalidOptions(detail) = &err else {
+            panic!("expected InvalidOptions, got {err:?}");
         };
-        assert_eq!(resolver.rpc_host, DEFAULT_RPC_BASE_URL);
+        assert!(
+            detail.contains("esplora_url is required"),
+            "the detail names the missing option: {detail}"
+        );
+    }
+
+    /// An `esplora_url` the request URIs cannot be formed from is
+    /// `INVALID_OPTIONS` at construction, never a panic on the request path:
+    /// a space in the host, a bare path with no scheme or host, and a query
+    /// string are each rejected by name. A trailing slash is tolerated and
+    /// dropped so the request paths carry no `//`.
+    #[test]
+    fn esplora_url_is_validated_at_construction() {
+        let (_did, initial) = chain_initial_document();
+        for (url, names) in [
+            ("http://bad host/api", "is not a valid URI"),
+            ("/api", "must be an absolute URI"),
+            (
+                "http://esplora.test/api?x=1",
+                "must not carry a query string",
+            ),
+        ] {
+            let err = Resolver::new(
+                initial.clone(),
+                ResolutionOptions {
+                    esplora_url: Some(url.to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("an unusable esplora_url must be rejected");
+            let Btcr2Error::InvalidOptions(detail) = &err else {
+                panic!("expected InvalidOptions for `{url}`, got {err:?}");
+            };
+            assert!(
+                detail.contains(url) && detail.contains(names),
+                "`{url}`: the detail names the URL and the reason: {detail}"
+            );
+        }
+
+        let resolver = Resolver::new(
+            initial,
+            ResolutionOptions {
+                esplora_url: Some("http://esplora.test/api/".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("a trailing slash is tolerated");
+        assert_eq!(resolver.rpc_host, "http://esplora.test/api");
+        let ResolverState::Requests(_next, beacons) = resolver
+            .resolve()
+            .expect("Init step yields beacon requests")
+        else {
+            panic!("expected Requests from Init step");
+        };
+        for req in beacons.values().flatten() {
+            let uri = req.uri().to_string();
+            assert!(
+                uri.starts_with("http://esplora.test/api/address/") && !uri.contains("//address"),
+                "the request URI is the base plus the path, got {uri}"
+            );
+        }
     }
 
     /// `versionId` and `versionTime` together are `INVALID_OPTIONS`, raised
@@ -2210,7 +2326,7 @@ mod tests {
             ResolutionOptions {
                 version_id: Some(NonZeroU64::new(2).expect("2 is non-zero")),
                 version_time: Some(ts(1_700_000_000)),
-                ..Default::default()
+                ..test_options()
             },
         )
         .expect_err("versionId and versionTime together must be rejected");
@@ -2232,7 +2348,7 @@ mod tests {
             initial.clone(),
             ResolutionOptions {
                 version_id: Some(NonZeroU64::new(2).expect("2 is non-zero")),
-                ..Default::default()
+                ..test_options()
             },
         )
         .expect("versionId alone is valid");
@@ -2240,7 +2356,7 @@ mod tests {
             initial,
             ResolutionOptions {
                 version_time: Some(ts(1_700_000_000)),
-                ..Default::default()
+                ..test_options()
             },
         )
         .expect("versionTime alone is valid");
@@ -2256,7 +2372,7 @@ mod tests {
             ResolutionOptions {
                 version_id: Some(NonZeroU64::MIN),
                 version_time: Some(ts(1_700_000_000)),
-                ..Default::default()
+                ..test_options()
             },
         )
         .expect_err("versionId and versionTime together must be rejected");
@@ -2712,7 +2828,7 @@ mod tests {
         let sidecar = SidecarData::new(None, sidecar_updates, None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         assert!(
@@ -2996,7 +3112,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         assert!(resolver.block_mediantimes.is_empty());
@@ -3278,7 +3394,7 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             version_time: Some(ts(version_time)),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
@@ -3316,7 +3432,7 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             version_time: Some(ts(version_time)),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_v2, tx_v2_dup, tx_v3]);
@@ -3348,7 +3464,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             version_id: None,
             version_time: None,
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         assert!(
@@ -3382,7 +3498,7 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height: Some(300),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
@@ -3426,7 +3542,7 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height: Some(300),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_low, tx_high]);
@@ -3484,7 +3600,7 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height: Some(300),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let err = try_drive_to_resolved(resolver, vec![tx])
@@ -3564,7 +3680,7 @@ mod tests {
                 chain_tip_height: Some(f.tip_height),
                 version_id,
                 version_time,
-                ..Default::default()
+                ..test_options()
             }
         };
         let resolver_for = |version_id, version_time| {
@@ -3890,7 +4006,7 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height: Some(f.tip_height),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Document::resolve(&did, options)
             .unwrap_or_else(|e| panic!("{id}: the resolver must accept the minted DID: {e}"));
@@ -4214,7 +4330,7 @@ mod tests {
     #[test]
     fn routing_by_address_from_txs_uri_ignores_the_host() {
         let uri = test_uri(&format!(
-            "{DEFAULT_RPC_BASE_URL}/address/{ROTATED_BEACON_ADDRESS}/txs"
+            "https://blockstream.info/testnet/api/address/{ROTATED_BEACON_ADDRESS}/txs"
         ));
         assert_eq!(address_from_txs_uri(&uri), ROTATED_BEACON_ADDRESS);
     }
@@ -4252,8 +4368,7 @@ mod tests {
                 .collect(),
         );
 
-        let resolver =
-            Resolver::new(initial, ResolutionOptions::default()).expect("the options are valid");
+        let resolver = Resolver::new(initial, test_options()).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/all-empty");
 
         let result = result.expect("a capture with no signals resolves to the genesis document");
@@ -4287,7 +4402,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update1, update2], None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved_from_capture(resolver, &fixture, "test/two-beacons")
@@ -4318,7 +4433,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update], None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/rotation");
@@ -4358,7 +4473,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update], None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let _ = drive_capture_rounds(resolver, &fixture, "minted/late-publishing-fork");
@@ -4378,8 +4493,7 @@ mod tests {
         ]);
 
         // No sidecar: the announced update hash resolves to no update data.
-        let resolver =
-            Resolver::new(initial, ResolutionOptions::default()).expect("the options are valid");
+        let resolver = Resolver::new(initial, test_options()).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/missing-update");
 
         let err = result.expect_err("an announcement with no update data must error");
@@ -4414,7 +4528,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update], None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
-            ..Default::default()
+            ..test_options()
         };
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let _ = drive_capture_within(resolver, &fixture, "test/rotation", 1);
@@ -4432,8 +4546,7 @@ mod tests {
                 .collect(),
         );
 
-        let resolver =
-            Resolver::new(initial, ResolutionOptions::default()).expect("the options are valid");
+        let resolver = Resolver::new(initial, test_options()).expect("the options are valid");
         let result = drive_to_resolved_from_capture(resolver, &fixture, "test/all-empty")
             .expect("a capture with no signals resolves");
         assert_eq!(u64::from(result.document_metadata.version_id), 1);

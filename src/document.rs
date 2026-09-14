@@ -486,10 +486,16 @@ pub struct ResolutionOptions {
     /// did-btcr2-cli client crate owns the `/blocks/tip/height` call.
     pub chain_tip_height: Option<u32>,
 
-    /// Esplora base URL override (network selector). `None` => resolver falls
-    /// back to `DEFAULT_RPC_BASE_URL` (testnet). Sans-I/O caller-injected config
-    /// same category as `chain_tip_height`. NO trailing slash: the
-    /// resolver appends `/address/{descriptor}/txs`.
+    /// Esplora base URL the resolver formats every request from
+    /// (`{base}/address/{descriptor}/txs`, `{base}/block/{hash}`). REQUIRED
+    /// for resolution: `None` is `INVALID_OPTIONS` from [`Document::resolve`],
+    /// because the resolver has no default endpoint — the right one depends
+    /// on the DID's network, and a silent fallback would resolve a DID of
+    /// another chain to its genesis document with no error. Must be an
+    /// absolute HTTP(S) URI with no query string; a trailing slash is
+    /// dropped. Sans-I/O caller-injected config, same category as
+    /// `chain_tip_height`; the `did-btcr2-client` crate fills it from the
+    /// network name.
     pub esplora_url: Option<String>,
 }
 
@@ -3079,6 +3085,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update.clone()], None, None);
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
+            esplora_url: Some("http://esplora.test/api".into()),
             ..Default::default()
         };
         let resolver =
@@ -3202,6 +3209,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update1.clone(), update2.clone()], None, None);
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
+            esplora_url: Some("http://esplora.test/api".into()),
             ..Default::default()
         };
         let resolver =
@@ -3313,6 +3321,7 @@ mod tests {
         let sidecar = SidecarData::new(None, vec![update1.clone(), deactivate.clone()], None, None);
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
+            esplora_url: Some("http://esplora.test/api".into()),
             ..Default::default()
         };
         let resolver =
