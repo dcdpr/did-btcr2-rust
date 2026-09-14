@@ -218,9 +218,9 @@ impl Resolver {
                 // Step 4. (Assignment)
                 let next_signals = self.find_next_signals(responses)?;
 
-                // Step 5.
+                // Process Next Update step 2: `updates` is empty.
                 if next_signals.is_empty() {
-                    return Ok(ResolverState::Resolved(self.terminal_state()));
+                    return self.history_exhausted();
                 }
 
                 // Find Beacon Signals (resolve.md:122-146): build the tuples
@@ -412,22 +412,24 @@ impl Resolver {
                 self.applied_block_height = Some(block_height);
                 most_recent_applied_version = Some(update.target_version_id);
 
-                // resolve.md §"Process Next Update" step 2 (resolve.md:164-166)
-                // — once the document is deactivated, resolve it as the
-                // final didDocument and process no further beacon
-                // signals. (The spec raises NOT_FOUND here when a versionId
-                // was requested; this resolver still returns the document.)
-                if self.contemporary_doc.fields.deactivated {
-                    return Ok(ResolverState::Resolved(self.terminal_state()));
-                }
-
-                // resolve.md §"Process Next Update" step 1 (resolve.md:163):
-                // the spec re-checks the requested versionId at the top of
-                // every iteration, so the check has to run after each apply.
+                // resolve.md "Process Next Update" step 1: the spec re-checks
+                // the requested versionId at the top of every iteration, so
+                // the check has to run after each apply — and BEFORE the
+                // deactivation check below, because step 1 precedes step 2:
+                // a versionId equal to the version a deactivating update
+                // produced resolves that (deactivated) document.
                 if let TargetCondition::VersionId(version_id) = self.target_condition
                     && version_id == self.current_version_id
                 {
                     return Ok(ResolverState::Resolved(self.terminal_state()));
+                }
+
+                // resolve.md "Process Next Update" step 2 — once the document
+                // is deactivated, resolve it as the final didDocument and
+                // process no further beacon signals; a versionId still in
+                // force names a version that will never exist (NOT_FOUND).
+                if self.contemporary_doc.fields.deactivated {
+                    return self.history_exhausted();
                 }
 
                 // Step 10.2.5 - 10.2.6.
@@ -458,10 +460,35 @@ impl Resolver {
             unreachable!()
         };
         if signals.is_empty() {
-            Ok(ResolverState::Resolved(fsm.terminal_state()))
+            // Every beacon has been scanned and every update applied: the
+            // history is exhausted (Process Next Update step 2).
+            Resolver::from_waiting_for_responses(fsm).history_exhausted()
         } else {
             Ok(ResolverState::Requests(fsm, signals))
         }
+    }
+
+    /// The walk has nothing left to apply — no more signals, or the document
+    /// is deactivated (resolve.md "Process Next Update" step 2). The
+    /// document resolves as it stands, unless a `versionId` was requested:
+    /// step 1 already resolved an equal one, so a `versionId` still in force
+    /// here names a version the history never reached, which is `NOT_FOUND`
+    /// rather than a silently earlier document.
+    fn history_exhausted(self) -> Result<ResolverState, Error> {
+        if let TargetCondition::VersionId(version_id) = self.target_condition
+            && version_id != self.current_version_id
+        {
+            return Err(Error::Btcr2Error(Btcr2Error::NotFound(format!(
+                "versionId {version_id} was requested but the DID's history ends at version {}{}",
+                self.current_version_id,
+                if self.contemporary_doc.fields.deactivated {
+                    ", where it is deactivated"
+                } else {
+                    ""
+                }
+            ))));
+        }
+        Ok(ResolverState::Resolved(self.terminal_state()))
     }
 
     // Spec section 7.2.2.2
@@ -3879,6 +3906,114 @@ mod tests {
             2,
             "an update in a block timestamped ahead of the resolver's clock must still apply"
         );
+    }
+
+    /// A `versionId` the history never reaches is `NOT_FOUND`, not a silently
+    /// earlier document: on a three-version chain, `versionId: 5` fails once
+    /// every beacon has been scanned, while `versionId: 3` (the last version)
+    /// and `versionId: 2` (mid-walk) resolve.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" steps
+    /// 1 and 2 (raise `NOT_FOUND` if `updates` is empty and `versionId` is
+    /// provided).
+    #[test]
+    fn version_id_beyond_the_history_is_not_found() {
+        use crate::error::ProblemDetails as _;
+
+        let (initial, update1, update2) = chained_two_updates();
+        let make = |version_id: u64| {
+            let tx_v2 = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xe5);
+            let tx_v3 = confirmed_signal_tx(update2.hash(), 200, 1_700_000_100, 0xe6);
+            let sidecar =
+                SidecarData::new(None, vec![update1.clone(), update2.clone()], None, None);
+            let options = ResolutionOptions {
+                sidecar_data: Some(sidecar),
+                version_id: NonZeroU64::new(version_id),
+                ..test_options()
+            };
+            let resolver = Resolver::new(initial.clone(), options).expect("the options are valid");
+            try_drive_to_resolved(resolver, vec![tx_v2, tx_v3])
+        };
+
+        for reachable in [2u64, 3] {
+            let result = make(reachable).expect("a version the history reaches resolves");
+            assert_eq!(result.document_metadata.version_id.get(), reachable);
+        }
+
+        let err = make(5).expect_err("a version the history never reaches is NOT_FOUND");
+        let Error::Btcr2Error(spec @ Btcr2Error::NotFound(detail)) = &err else {
+            panic!("expected NotFound, got {err:?}");
+        };
+        assert!(
+            detail.contains("versionId 5") && detail.contains("version 3"),
+            "the detail names the requested and the reached version: {detail}"
+        );
+        assert_eq!(
+            spec.details().expect("NotFound yields problem details")["type"],
+            "https://www.w3.org/ns/did#NOT_FOUND"
+        );
+    }
+
+    /// On a DID deactivated at version 2, `versionId: 2` resolves the
+    /// deactivated document (step 1 runs before step 2) and `versionId: 3` is
+    /// `NOT_FOUND` — the deactivation is terminal, so that version never
+    /// exists and the walk says so instead of returning version 2.
+    #[test]
+    fn version_id_past_a_deactivation_is_not_found() {
+        let (did, initial) = chain_initial_document();
+        let vm_id = format!("{}#initialKey", did.encode());
+        let deactivate = Document::from(initial.clone())
+            .deactivate(
+                &vm_id,
+                chain_secret_key(),
+                NonZeroU64::new(2).expect("2 is non-zero"),
+            )
+            .expect("the deactivation constructs against the initial document");
+
+        let make = |version_id: u64| {
+            let tx = confirmed_signal_tx(deactivate.hash(), 100, 1_700_000_000, 0xe7);
+            let sidecar = SidecarData::new(None, vec![deactivate.clone()], None, None);
+            let options = ResolutionOptions {
+                sidecar_data: Some(sidecar),
+                version_id: NonZeroU64::new(version_id),
+                ..test_options()
+            };
+            let resolver = Resolver::new(initial.clone(), options).expect("the options are valid");
+            try_drive_to_resolved(resolver, vec![tx])
+        };
+
+        let at_two = make(2).expect("the version the deactivation produced resolves");
+        assert_eq!(at_two.document_metadata.version_id.get(), 2);
+        assert!(
+            at_two.document_metadata.deactivated,
+            "versionId 2 is the deactivated document itself"
+        );
+
+        let err = make(3).expect_err("no version follows a deactivation");
+        match &err {
+            Error::Btcr2Error(Btcr2Error::NotFound(detail)) => assert!(
+                detail.contains("versionId 3") && detail.contains("deactivated"),
+                "the detail says the history ended deactivated: {detail}"
+            ),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        // And with no versionId the deactivated document resolves as before.
+        let latest = {
+            let tx = confirmed_signal_tx(deactivate.hash(), 100, 1_700_000_000, 0xe8);
+            let sidecar = SidecarData::new(None, vec![deactivate.clone()], None, None);
+            let resolver = Resolver::new(
+                initial,
+                ResolutionOptions {
+                    sidecar_data: Some(sidecar),
+                    ..test_options()
+                },
+            )
+            .expect("the options are valid");
+            drive_to_resolved(resolver, vec![tx])
+        };
+        assert!(latest.document_metadata.deactivated);
+        assert_eq!(latest.document_metadata.version_id.get(), 2);
     }
 
     /// The `minConf` boundary, with the default of six: a signal at height
