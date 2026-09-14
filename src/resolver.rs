@@ -216,10 +216,11 @@ impl Resolver {
     /// Apply a sorted batch of matched signals (resolve.md "Process updates
     /// Array"), then ask for the next beacon round or resolve.
     ///
-    /// `may_request` is `true` on the first pass over a batch: if any proof in
-    /// it carries `expires` and the confirming block's mediantime is not yet
-    /// held, the batch is parked in [`ResolverFsm::ApplySignals`] and a
-    /// [`ResolverState::BlockRequests`] is returned. The second pass (after
+    /// `may_request` is `true` on the first pass over a batch: if any proof of
+    /// a signal that can still apply carries `expires` and the confirming
+    /// block's mediantime is not yet held, the batch is parked in
+    /// [`ResolverFsm::ApplySignals`] and a [`ResolverState::BlockRequests`] is
+    /// returned. The second pass (after
     /// [`Resolver::<WaitingForBlockTimes>::process_block_times`]) runs with
     /// `false`: a still-missing mediantime is then the caller's error.
     fn apply_signals(
@@ -231,8 +232,22 @@ impl Resolver {
         // confirming block's mediantime, which the transaction status does not
         // carry. Ask for every block still missing, once; a second pass without
         // it is the caller's error.
+        //
+        // The mediantime is only read in the apply branch of the loop below.
+        // A signal whose targetVersionId is already at or below the current
+        // version at loop entry goes through `confirm_duplicate` only and
+        // never reaches it, so its block is not requested. Every
+        // higher-version signal is kept: under the ascending version sort it
+        // may still apply later in this same batch once the lower versions
+        // have. Version is the only exclusion; no time-based cutoff, because a
+        // wrongly excluded block becomes a hard `MissingBlockMediantime` on
+        // the second pass. Defense in depth: `Document::apply_update`
+        // independently rejects an `expires` proof whose mediantime is
+        // unavailable, so a mis-filtered block would surface as
+        // INVALID_DID_UPDATE, never as a silently skipped check.
         let missing: BTreeSet<BlockHash> = signals
             .iter()
+            .filter(|s| s.update.target_version_id > self.current_version_id)
             .filter(|s| s.update.proof.inner.expires.is_some())
             .map(|s| s.block_hash)
             .filter(|hash| !self.block_mediantimes.contains_key(hash))
@@ -2468,6 +2483,24 @@ mod tests {
         block_time: i64,
         txid_seed: u8,
     ) -> Transaction {
+        confirmed_signal_tx_in_block(
+            signal,
+            block_height,
+            block_time,
+            &"00".repeat(32),
+            txid_seed,
+        )
+    }
+
+    /// `confirmed_signal_tx` with the confirming block's hash chosen by the
+    /// caller, for tests that need signals in distinct blocks.
+    fn confirmed_signal_tx_in_block(
+        signal: Sha256Hash,
+        block_height: u32,
+        block_time: i64,
+        block_hash_hex: &str,
+        txid_seed: u8,
+    ) -> Transaction {
         // OP_RETURN (0x6a) + OP_PUSHBYTES_32 (0x20) + 32-byte hash.
         let script_pubkey = format!("6a20{}", hex::encode(signal.as_bytes()));
         let txid = format!("{txid_seed:02x}").repeat(32);
@@ -2483,8 +2516,7 @@ mod tests {
             "status": {
                 "confirmed": true,
                 "block_height": block_height,
-                "block_hash":
-                    "0000000000000000000000000000000000000000000000000000000000000000",
+                "block_hash": block_hash_hex,
                 "block_time": block_time,
             },
         });
@@ -2517,29 +2549,56 @@ mod tests {
         let (did, initial) = chain_initial_document();
         let document = Document::from(initial.clone());
         let vm_id = format!("{}#initialKey", did.encode());
-        let (unsigned, _, _) = document
-            .construct_unsigned_update(
-                &chain_benign_patch(&vm_id),
-                NonZeroU64::new(2).expect("2 is non-zero"),
-            )
-            .expect("v2 update constructs against the initial document");
-        let update = crate::test_signing::sign_unsigned_update_for_test(
-            &unsigned,
+        let update = signed_update_with_expires(
+            &document,
             &did,
             &vm_id,
-            &chain_secret_key(),
-            None,
-            Some(ts(EXPIRES)),
+            &chain_benign_patch(&vm_id),
+            NonZeroU64::new(2).expect("2 is non-zero"),
         );
         let tx = confirmed_signal_tx(update.hash(), 100, HEADER_TIME, 0xd1);
         (initial, update, tx)
+    }
+
+    /// Sign `patch` against `document` targeting `target`, with the proof
+    /// carrying `expires` (= `EXPIRES`) and no `created`.
+    fn signed_update_with_expires(
+        document: &Document,
+        did: &crate::identifier::Did,
+        vm_id: &str,
+        patch: &json_patch::Patch,
+        target: NonZeroU64,
+    ) -> Update {
+        let (unsigned, _, _) = document
+            .construct_unsigned_update(patch, target)
+            .expect("update constructs against the given document");
+        crate::test_signing::sign_unsigned_update_for_test(
+            &unsigned,
+            did,
+            vm_id,
+            &chain_secret_key(),
+            None,
+            Some(ts(EXPIRES)),
+        )
     }
 
     /// Drive `update_with_expires` from Init through the first signal round and
     /// return the `BlockRequests` the resolver must raise for it.
     fn drive_to_block_requests() -> (Resolver<WaitingForBlockTimes>, Vec<esploda::Req>) {
         let (initial, update, tx) = update_with_expires();
-        let sidecar = SidecarData::new(None, vec![update], None, None);
+        drive_first_round_to_block_requests(initial, vec![update], tx)
+    }
+
+    /// Drive `initial` (with `sidecar_updates` as the sidecar) from Init through
+    /// a first signal round carrying `tx` and return the `BlockRequests` the
+    /// resolver must raise for it. The sidecar is fixed at `Resolver::new`, so
+    /// every update a later round will announce must already be in it.
+    fn drive_first_round_to_block_requests(
+        initial: InitialDocument,
+        sidecar_updates: Vec<Update>,
+        tx: Transaction,
+    ) -> (Resolver<WaitingForBlockTimes>, Vec<esploda::Req>) {
+        let sidecar = SidecarData::new(None, sidecar_updates, None, None);
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             ..Default::default()
@@ -2583,6 +2642,174 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Answer the first-round block request for the all-zero block with a
+    /// mediantime `expires` is not before, and step the resolver once: the v2
+    /// apply happens and the FSM asks for the next beacon round.
+    fn answer_first_block_and_expect_next_round(
+        next: Resolver<WaitingForBlockTimes>,
+    ) -> Resolver<WaitingForResponses> {
+        let mut mediantimes = HashMap::new();
+        mediantimes.insert(zero_block_hash(), ts(HEADER_TIME - 3600));
+        match next
+            .process_block_times(mediantimes)
+            .resolve()
+            .expect("the first-round update applies once its block time is known")
+        {
+            ResolverState::Requests(next, _requests) => next,
+            other => panic!("expected the next beacon round after the first apply, got {other:?}"),
+        }
+    }
+
+    /// A v2 update whose proof carries `expires` AND appends the rotated
+    /// beacon, with its confirmed Singleton signal at `HEADER_TIME` in the
+    /// all-zero block. The beacon-set change is what gives the resolver a
+    /// second beacon round to announce more signals in; a benign v2 would
+    /// resolve straight after round 1 (every address is queried once).
+    fn rotating_update_with_expires()
+    -> (crate::identifier::Did, InitialDocument, Update, Transaction) {
+        let (did, initial) = chain_initial_document();
+        let document = Document::from(initial.clone());
+        let vm_id = format!("{}#initialKey", did.encode());
+        let update = signed_update_with_expires(
+            &document,
+            &did,
+            &vm_id,
+            &chain_beacon_rotation_patch(&did),
+            NonZeroU64::new(2).expect("2 is non-zero"),
+        );
+        let tx = confirmed_signal_tx(update.hash(), 100, HEADER_TIME, 0xd1);
+        (did, initial, update, tx)
+    }
+
+    /// A duplicate announcement of an already-applied update never costs a
+    /// block request, even when its proof carries `expires`: a signal with
+    /// `targetVersionId <= current_version_id` only runs the duplicate check
+    /// and never reads the block time, so there is nothing to fetch.
+    ///
+    /// The duplicate sits in a DIFFERENT block from the first announcement: a
+    /// same-block duplicate would pass vacuously because the resolver already
+    /// holds that block's mediantime from round 1.
+    #[test]
+    fn resolver_never_requests_blocks_for_duplicate_announcements() {
+        let (_did, initial, update, tx) = rotating_update_with_expires();
+        let (next, requests) =
+            drive_first_round_to_block_requests(initial, vec![update.clone()], tx);
+        assert_eq!(
+            requests.len(),
+            1,
+            "round 1: one confirming block, one request"
+        );
+        let next = answer_first_block_and_expect_next_round(next);
+
+        let duplicate = confirmed_signal_tx_in_block(
+            update.hash(),
+            105,
+            HEADER_TIME + 600,
+            &"11".repeat(32),
+            0xd2,
+        );
+        let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![duplicate]);
+        let result = match next
+            .process_responses(transactions)
+            .resolve()
+            .expect("a duplicate announcement is not an error")
+        {
+            ResolverState::Resolved(result) => result,
+            ResolverState::Requests(next, _requests) => {
+                drive_after_block_times(next.process_responses(HashMap::new()))
+                    .expect("empty rounds resolve")
+            }
+            other @ ResolverState::BlockRequests(..) => {
+                panic!("a duplicate announcement must not ask for its block, got {other:?}")
+            }
+        };
+        assert_eq!(result.document_metadata.version_id.get(), 2);
+    }
+
+    /// A round mixing a duplicate announcement (already applied v2, block
+    /// `11..11`) with an applicable v3 update whose proof carries `expires`
+    /// (block `22..22`) asks for exactly ONE block — the applicable signal's —
+    /// and, once answered, applies v3.
+    #[test]
+    fn resolver_requests_only_the_applicable_block_in_a_mixed_round() {
+        let (did, initial, update1, tx1) = rotating_update_with_expires();
+        let vm_id = format!("{}#initialKey", did.encode());
+
+        let mut after1 = initial.clone();
+        after1
+            .apply_update(&update1, &AnnouncingBlock::fixed())
+            .expect("update #1 applies to the initial document");
+        let update2 = signed_update_with_expires(
+            &Document::from(after1),
+            &did,
+            &vm_id,
+            &chain_benign_patch(&vm_id),
+            NonZeroU64::new(3).expect("3 is non-zero"),
+        );
+
+        let (next, requests) = drive_first_round_to_block_requests(
+            initial,
+            vec![update1.clone(), update2.clone()],
+            tx1,
+        );
+        assert_eq!(
+            requests.len(),
+            1,
+            "round 1: one confirming block, one request"
+        );
+        let next = answer_first_block_and_expect_next_round(next);
+
+        let duplicate = confirmed_signal_tx_in_block(
+            update1.hash(),
+            105,
+            HEADER_TIME + 600,
+            &"11".repeat(32),
+            0xd3,
+        );
+        let applicable = confirmed_signal_tx_in_block(
+            update2.hash(),
+            106,
+            HEADER_TIME + 1200,
+            &"22".repeat(32),
+            0xd4,
+        );
+        let mut transactions: HashMap<BeaconType, Vec<Transaction>> = HashMap::new();
+        transactions.insert(BeaconType::Singleton, vec![duplicate, applicable]);
+        let (next, requests) = match next
+            .process_responses(transactions)
+            .resolve()
+            .expect("an applicable proof carrying expires asks for its block")
+        {
+            ResolverState::BlockRequests(next, requests) => (next, requests),
+            other => panic!("expected BlockRequests for the applicable signal, got {other:?}"),
+        };
+        assert_eq!(
+            requests.len(),
+            1,
+            "only the applicable signal's block is requested, got {:?}",
+            requests
+                .iter()
+                .map(|r| r.uri().path().to_string())
+                .collect::<Vec<_>>()
+        );
+        let path = requests[0].uri().path().to_string();
+        assert!(
+            path.ends_with(&format!("/block/{}", "22".repeat(32))),
+            "the request is for the applicable signal's block, got {path}"
+        );
+
+        let block_22: BlockHash = "22"
+            .repeat(32)
+            .parse()
+            .expect("64 hex digits parse as a block hash");
+        let mut mediantimes = HashMap::new();
+        mediantimes.insert(block_22, ts(HEADER_TIME - 3600));
+        let result = drive_after_block_times(next.process_block_times(mediantimes))
+            .expect("expires after the mediantime applies");
+        assert_eq!(result.document_metadata.version_id.get(), 3);
     }
 
     /// A sidecar update whose proof carries `expires` makes the resolver ask
@@ -3788,6 +4015,21 @@ mod tests {
         }
     }
 
+    /// A patch that APPENDS a Singleton beacon at [`ROTATED_BEACON_ADDRESS`] —
+    /// the beacon-set change that forces the resolver into a second request
+    /// round (every address is queried once, so an unchanged beacon set
+    /// resolves after the first round).
+    fn chain_beacon_rotation_patch(did: &crate::identifier::Did) -> json_patch::Patch {
+        serde_json::from_value(serde_json::json!([
+            {"op": "add", "path": "/service/-", "value": {
+                "id": format!("{}#rotatedBeacon", did.encode()),
+                "type": "SingletonBeacon",
+                "serviceEndpoint": format!("bitcoin:{ROTATED_BEACON_ADDRESS}"),
+            }}
+        ]))
+        .expect("the rotation patch is a valid RFC 6902 op array")
+    }
+
     /// The initial document plus a signed v2 update that APPENDS a Singleton
     /// beacon at [`ROTATED_BEACON_ADDRESS`] — the beacon-set change that forces
     /// the resolver into a second request round.
@@ -3797,14 +4039,7 @@ mod tests {
         let (did, initial) = chain_initial_document();
         let document = Document::from(initial.clone());
         let vm_id = format!("{}#initialKey", did.encode());
-        let patch: json_patch::Patch = serde_json::from_value(serde_json::json!([
-            {"op": "add", "path": "/service/-", "value": {
-                "id": format!("{}#rotatedBeacon", did.encode()),
-                "type": "SingletonBeacon",
-                "serviceEndpoint": format!("bitcoin:{ROTATED_BEACON_ADDRESS}"),
-            }}
-        ]))
-        .expect("the rotation patch is a valid RFC 6902 op array");
+        let patch = chain_beacon_rotation_patch(&did);
 
         let v2 = NonZeroU64::new(2).expect("2 is non-zero");
         let update = document
