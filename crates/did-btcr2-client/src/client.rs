@@ -135,18 +135,17 @@ impl<T: BtcTransport> Client<T> {
         let result = loop {
             match fsm.resolve()? {
                 ResolverState::Requests(next_state, beacons) => {
+                    // Each request is one beacon address; the core expects the
+                    // address's COMPLETE confirmed history back, which Esplora
+                    // serves a page at a time. Paging is the facade's job
+                    // because the page size is Esplora's, not the spec's.
                     let mut responses = HashMap::new();
                     for (beacon_type, requests) in beacons {
                         for req in requests {
-                            let resp = self.transport.execute(req.map(|()| Vec::new()))?;
-                            let status = resp.status().as_u16();
-                            if !(200..300).contains(&status) {
-                                return Err(Error::Transport(TransportError::Status {
-                                    status,
-                                    body: String::from_utf8_lossy(resp.body()).into_owned(),
-                                }));
-                            }
-                            let txs: Vec<Transaction> = serde_json::from_slice(resp.body())?;
+                            let txs = esplora::address_history(
+                                &self.transport,
+                                req.map(|()| Vec::new()),
+                            )?;
                             let entry: &mut Vec<Transaction> =
                                 responses.entry(beacon_type).or_default();
                             entry.extend(txs);
@@ -462,6 +461,9 @@ mod tests {
         seen_paths: RefCell<Vec<String>>,
         /// Body served for `GET /address/{a}/txs` (a JSON tx array).
         txs_body: Vec<u8>,
+        /// Bodies served for `GET /address/{a}/txs/chain/{last_seen_txid}`,
+        /// keyed by `last_seen_txid`. Absent keys serve an empty page.
+        chain_pages: HashMap<String, Vec<u8>>,
         /// Chain-tip height served as a bare integer. Two hundred: every
         /// served announcement sits at height 100, so under the resolver's
         /// default `minConf` of six it is long settled.
@@ -497,6 +499,7 @@ mod tests {
                 post_tx_calls: std::cell::Cell::new(0),
                 seen_paths: RefCell::new(Vec::new()),
                 txs_body: txs_body.as_bytes().to_vec(),
+                chain_pages: HashMap::new(),
                 tip: 200,
                 utxo_value: 100_000,
                 utxo_values: Vec::new(),
@@ -646,6 +649,14 @@ mod tests {
                 self.tip.to_string().into_bytes()
             } else if path.contains("/address/") && path.ends_with("/txs") {
                 self.txs_body.clone()
+            } else if let Some((_, last_seen)) = path
+                .split_once("/txs/chain/")
+                .filter(|(head, _)| head.contains("/address/"))
+            {
+                self.chain_pages
+                    .get(last_seen)
+                    .cloned()
+                    .unwrap_or_else(|| b"[]".to_vec())
             } else if path.contains("/address/") && path.ends_with("/utxo") {
                 self.utxo_body()
             } else if path.ends_with("/fee-estimates") {
@@ -1050,6 +1061,136 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with(&block_path)),
             "the resolver fetched the announcing block through the transport: {:?}",
+            client.transport.seen_paths()
+        );
+    }
+
+    /// A confirmed transaction paying `address_spk` that announces nothing:
+    /// its last output is not an `OP_RETURN`, so the resolver skips it. Filler
+    /// for an address history longer than one Esplora page.
+    fn filler_tx_json(seed: u32, block_height: u32) -> serde_json::Value {
+        serde_json::json!({
+            "txid": format!("{seed:08x}").repeat(8),
+            "version": 2,
+            "locktime": 0,
+            "vin": [],
+            "vout": [{ "scriptpubkey": "0014".to_string() + &"ab".repeat(20), "value": 546 }],
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": block_height,
+                "block_hash": "00".repeat(32),
+                "block_time": 1_700_000_000 + i64::from(block_height),
+            },
+        })
+    }
+
+    /// The facade reads a beacon address's COMPLETE confirmed history, not
+    /// Esplora's first page. The announcement of v2 is the OLDEST of 26
+    /// confirmed transactions: 25 newer non-announcing transactions fill the
+    /// first page exactly, and the announcement sits alone on the
+    /// `/txs/chain/{last_seen_txid}` continuation. A resolver that stopped at
+    /// the first page would resolve to version 1 with no error.
+    #[test]
+    fn resolve_pages_through_the_address_history() {
+        let (did, update, txs) = announced_expiring_update();
+        let announcement: serde_json::Value = serde_json::from_str::<serde_json::Value>(&txs)
+            .expect("the served body is JSON")[0]
+            .clone();
+
+        // Newest first, as Esplora orders them; all at heights above the
+        // announcement's (100), all settled against the fake's tip of 200.
+        let first_page: Vec<serde_json::Value> = (0..esplora::ESPLORA_PAGE_SIZE as u32)
+            .map(|i| filler_tx_json(0x1000 + i, 150 - i))
+            .collect();
+        let last_seen = first_page
+            .last()
+            .and_then(|tx| tx["txid"].as_str())
+            .expect("the page's oldest transaction has a txid")
+            .to_string();
+        // A continuation page of exactly one: the page is short, so paging
+        // stops after it rather than asking for a third.
+        let second_page = serde_json::Value::Array(vec![announcement]);
+
+        let transport = FakeTransport {
+            chain_pages: HashMap::from([(last_seen.clone(), second_page.to_string().into_bytes())]),
+            ..FakeTransport::new(&serde_json::Value::Array(first_page).to_string())
+        };
+        let client = Client::new("http://fake".to_string(), transport);
+
+        let result = client
+            .resolve(
+                &did,
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::new(None, vec![update], None, None)),
+                    ..Default::default()
+                },
+            )
+            .expect("the announcement on the second page applies");
+
+        assert_eq!(
+            result.document_metadata.version_id.get(),
+            2,
+            "the oldest announcement, beyond the first Esplora page, is applied"
+        );
+        // The fake serves the same history for every beacon address, so each
+        // of the three is paged the same way: one first page, one
+        // continuation keyed on that page's oldest confirmed txid, and — the
+        // continuation being short — no third page.
+        let paths = client.transport.seen_paths();
+        let first_pages = paths.iter().filter(|p| p.ends_with("/txs")).count();
+        let continuations: Vec<&String> =
+            paths.iter().filter(|p| p.contains("/txs/chain/")).collect();
+        assert_eq!(first_pages, 3, "one first page per beacon: {paths:?}");
+        assert_eq!(
+            continuations.len(),
+            first_pages,
+            "exactly one continuation per beacon; a short page ends the walk: {paths:?}"
+        );
+        assert!(
+            continuations
+                .iter()
+                .all(|p| p.ends_with(&format!("/txs/chain/{last_seen}"))),
+            "each continuation is keyed on its first page's oldest confirmed txid: {paths:?}"
+        );
+    }
+
+    /// A first page short of [`esplora::ESPLORA_PAGE_SIZE`] confirmed
+    /// transactions is the whole history: no continuation is requested, and
+    /// mempool entries on that page do not count toward the page size.
+    #[test]
+    fn resolve_does_not_page_past_a_short_first_page() {
+        let (did, update, txs) = announced_expiring_update();
+        let mut page: Vec<serde_json::Value> =
+            serde_json::from_str(&txs).expect("the served body is JSON");
+        // Mempool traffic on the same address: carried through, not counted.
+        let mut pending = filler_tx_json(0x2000, 0);
+        pending["status"] = serde_json::json!({ "confirmed": false });
+        page.insert(0, pending);
+
+        let client = Client::new(
+            "http://fake".to_string(),
+            FakeTransport::new(&serde_json::Value::Array(page).to_string()),
+        );
+        let result = client
+            .resolve(
+                &did,
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::new(None, vec![update], None, None)),
+                    ..Default::default()
+                },
+            )
+            .expect("a one-page history resolves");
+        assert_eq!(result.document_metadata.version_id.get(), 2);
+        assert!(
+            !client
+                .transport
+                .seen_paths()
+                .iter()
+                .any(|p| p.contains("/txs/chain/")),
+            "a short first page is the whole history: {:?}",
             client.transport.seen_paths()
         );
     }

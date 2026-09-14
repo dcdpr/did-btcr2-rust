@@ -7,9 +7,76 @@
 
 use chrono::{DateTime, Utc};
 use esploda::bitcoin::BlockHash;
+use esploda::esplora::{Status, Transaction};
 
 use crate::error::{Error, TransportError};
 use crate::transport::BtcTransport;
+
+/// Confirmed transactions per page of an Esplora address history. Esplora's
+/// own number: `GET /address/{a}/txs` returns up to 50 mempool transactions
+/// plus the first 25 confirmed ones, newest first, and each
+/// `GET /address/{a}/txs/chain/{last_seen_txid}` returns the next 25
+/// confirmed ones.
+pub const ESPLORA_PAGE_SIZE: usize = 25;
+
+/// Execute a `GET` for a JSON transaction list, mapping a non-2xx status to
+/// [`TransportError::Status`].
+fn fetch_txs<T: BtcTransport>(
+    transport: &T,
+    req: http::Request<Vec<u8>>,
+) -> Result<Vec<Transaction>, Error> {
+    let resp = transport.execute(req)?;
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(Error::Transport(TransportError::Status {
+            status,
+            body: String::from_utf8_lossy(resp.body()).into_owned(),
+        }));
+    }
+    Ok(serde_json::from_slice(resp.body())?)
+}
+
+/// Fetch the COMPLETE confirmed history behind a core `GET
+/// {base}/address/{a}/txs` request, following Esplora's pagination.
+///
+/// The sans-I/O core asks for an address once and treats the answer as the
+/// whole history; Esplora answers the first page only. A beacon address that
+/// is also the funding and change address gathers two transactions per
+/// update, so after a dozen updates — or any unrelated traffic — the oldest
+/// announcements fall off that page, and a resolver that stopped there would
+/// see only the newest signals and raise `LATE_PUBLISHING` for a valid
+/// history, or resolve to the genesis document. So: page on
+/// `/txs/chain/{last_seen_txid}` from the oldest confirmed transaction of each
+/// page until a page carries fewer than [`ESPLORA_PAGE_SIZE`] confirmed
+/// transactions. Mempool entries (first page only) are carried through
+/// unchanged; the core skips them itself.
+pub fn address_history<T: BtcTransport>(
+    transport: &T,
+    first: http::Request<Vec<u8>>,
+) -> Result<Vec<Transaction>, Error> {
+    let txs_uri = first.uri().to_string();
+    let mut page = fetch_txs(transport, first)?;
+    let mut history = Vec::new();
+    loop {
+        let confirmed = page
+            .iter()
+            .filter(|tx| matches!(tx.status, Status::Confirmed { .. }))
+            .count();
+        let last_seen = page
+            .iter()
+            .rev()
+            .find(|tx| matches!(tx.status, Status::Confirmed { .. }))
+            .map(|tx| tx.txid);
+        history.append(&mut page);
+        let (Some(last_seen), true) = (last_seen, confirmed >= ESPLORA_PAGE_SIZE) else {
+            return Ok(history);
+        };
+        let next = http::Request::get(format!("{txs_uri}/chain/{last_seen}"))
+            .body(Vec::new())
+            .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
+        page = fetch_txs(transport, next)?;
+    }
+}
 
 /// Fetch the current chain-tip height via `GET {base}/blocks/tip/height`.
 ///

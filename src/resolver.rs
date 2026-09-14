@@ -735,7 +735,9 @@ impl Resolver<WaitingForResponses> {
 
     /// Feed the blockchain transactions requested by a
     /// [`ResolverState::Requests`] back into the FSM, returning a [`Resolver`]
-    /// ready to be driven another step.
+    /// ready to be driven another step. Each address's list must be its
+    /// complete confirmed history (see [`ResolverState::Requests`]); the
+    /// resolver cannot tell a truncated page from a short history.
     pub fn process_responses(
         mut self,
         transactions: HashMap<BeaconType, Vec<Transaction>>,
@@ -785,7 +787,23 @@ enum ResolverFsm {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ResolverState {
-    /// Requests need to be sent to the blockchain.
+    /// Requests need to be sent to the blockchain: one
+    /// `GET {esplora_url}/address/{address}/txs` per beacon address not yet
+    /// scanned, grouped by beacon type.
+    ///
+    /// The contract for the answer fed back through
+    /// [`Resolver::<WaitingForResponses>::process_responses`]: for each
+    /// request, the COMPLETE confirmed transaction history of that address —
+    /// every transaction that spends from it, oldest included — not only the
+    /// first page an indexer serves. Esplora answers `/txs` with the first 25
+    /// confirmed transactions and pages the rest on
+    /// `/txs/chain/{last_seen_txid}`; a driver that fed back a single page
+    /// would hide the oldest announcements from the resolver, which would
+    /// then see only the newest signals and raise `LATE_PUBLISHING` for a
+    /// valid history, or resolve to the genesis document. Paging is the
+    /// driver's job because the page size is the indexer's, not the spec's
+    /// (`did-btcr2-client` does it). Mempool entries may be included; the
+    /// resolver skips them.
     Requests(
         Resolver<WaitingForResponses>,
         HashMap<BeaconType, Vec<esploda::Req>>,

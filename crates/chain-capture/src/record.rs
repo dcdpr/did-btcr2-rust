@@ -15,7 +15,10 @@ use std::rc::Rc;
 /// What one capture session observed.
 #[derive(Debug, Default)]
 pub struct Recording {
-    /// `GET /address/{a}/txs` bodies, keyed by the address in the request path.
+    /// `GET /address/{a}/txs` bodies, keyed by the address in the request path,
+    /// with every `GET /address/{a}/txs/chain/{last_seen_txid}` continuation
+    /// page the client fetched appended in order — so an address's entry is
+    /// its complete history as the resolver saw it, not Esplora's first page.
     ///
     /// A key present with an empty list is a captured-and-empty address; an
     /// absent key was never asked for.
@@ -76,7 +79,8 @@ impl<T: BtcTransport> BtcTransport for RecordingTransport<T> {
         let resp = self.inner.execute(req)?;
         let status = resp.status().as_u16();
 
-        if let Some(address) = address_from_txs_path(&path) {
+        if let Some(page) = txs_page_from_path(&path) {
+            let address = page.address();
             if !(200..300).contains(&status) {
                 return Err(TransportError::Io(std::io::Error::other(format!(
                     "capture of `{address}` failed: HTTP {status} from {path} — \
@@ -89,10 +93,22 @@ impl<T: BtcTransport> BtcTransport for RecordingTransport<T> {
                      transactions ({e}) — check that {path} points at an Esplora endpoint"
                 ))
             })?;
-            self.recording
-                .borrow_mut()
-                .addresses
-                .insert(address.to_string(), txs);
+            let mut recording = self.recording.borrow_mut();
+            match page {
+                // The first page starts the address's entry (and restarts it
+                // on a re-fetch); a continuation extends it, so the entry
+                // holds the whole history in the order the client walked it.
+                TxsPage::First(address) => {
+                    recording.addresses.insert(address.to_string(), txs);
+                }
+                TxsPage::Continuation { address, .. } => {
+                    recording
+                        .addresses
+                        .entry(address.to_string())
+                        .or_default()
+                        .extend(txs);
+                }
+            }
         } else if path.ends_with("/blocks/tip/height") {
             if !(200..300).contains(&status) {
                 return Err(TransportError::Io(std::io::Error::other(format!(
@@ -174,6 +190,54 @@ fn json_kind(value: &Value) -> &'static str {
     }
 }
 
+/// Which page of an address history a request path asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TxsPage<'a> {
+    /// `/address/{a}/txs`: mempool entries plus the first confirmed page.
+    First(&'a str),
+    /// `/address/{a}/txs/chain/{last_seen_txid}`: the confirmed page after
+    /// `last_seen`.
+    Continuation {
+        /// The address whose history is being paged.
+        address: &'a str,
+        /// The txid the page continues from.
+        last_seen: &'a str,
+    },
+}
+
+impl<'a> TxsPage<'a> {
+    /// The address the page belongs to.
+    pub fn address(&self) -> &'a str {
+        match self {
+            Self::First(address) | Self::Continuation { address, .. } => address,
+        }
+    }
+}
+
+/// Classify an Esplora address-history request path: the first page
+/// ([`address_from_txs_path`]) or a continuation page
+/// `/address/{a}/txs/chain/{last_seen_txid}`. Anything else is `None`.
+pub fn txs_page_from_path(path: &str) -> Option<TxsPage<'_>> {
+    if let Some(address) = address_from_txs_path(path) {
+        return Some(TxsPage::First(address));
+    }
+    let path = path.split('?').next().unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let n = segments.len();
+    if n >= 5
+        && segments[n - 5] == "address"
+        && segments[n - 3] == "txs"
+        && segments[n - 2] == "chain"
+    {
+        Some(TxsPage::Continuation {
+            address: segments[n - 4],
+            last_seen: segments[n - 1],
+        })
+    } else {
+        None
+    }
+}
+
 /// Extract the beacon address from an Esplora `/address/{a}/txs` request path.
 ///
 /// Splits the query string off first, then requires the last three segments to
@@ -235,6 +299,8 @@ mod tests {
     struct FakeInner {
         /// Address → response body for `/address/{a}/txs`.
         txs: BTreeMap<String, Vec<u8>>,
+        /// `last_seen_txid` → response body for `/address/{a}/txs/chain/{txid}`.
+        pages: BTreeMap<String, Vec<u8>>,
         /// Body for `/blocks/tip/height`.
         tip: Option<Vec<u8>>,
         /// Block hash → response body for `/block/{hash}`.
@@ -247,6 +313,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 txs: BTreeMap::new(),
+                pages: BTreeMap::new(),
                 tip: None,
                 blocks: BTreeMap::new(),
                 seen: RefCell::new(Vec::new()),
@@ -256,6 +323,12 @@ mod tests {
         fn with_txs(mut self, address: &str, body: &str) -> Self {
             self.txs
                 .insert(address.to_string(), body.as_bytes().to_vec());
+            self
+        }
+
+        fn with_page(mut self, last_seen: &str, body: &str) -> Self {
+            self.pages
+                .insert(last_seen.to_string(), body.as_bytes().to_vec());
             self
         }
 
@@ -281,6 +354,9 @@ mod tests {
 
             let answer: Option<Vec<u8>> = if let Some(address) = address_from_txs_path(&path) {
                 self.txs.get(address).cloned()
+            } else if let Some(TxsPage::Continuation { last_seen, .. }) = txs_page_from_path(&path)
+            {
+                self.pages.get(last_seen).cloned()
             } else if path.ends_with("/blocks/tip/height") {
                 self.tip.clone()
             } else if let Some(hash) = block_hash_from_path(&path) {
@@ -559,6 +635,71 @@ mod tests {
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0]["status"]["block_height"], json!(120));
         assert_eq!(recording.tip, None);
+    }
+
+    #[test]
+    fn a_continuation_page_extends_the_address_entry_in_order() {
+        let first = one_tx_body();
+        let older = json!([{
+            "txid": "22".repeat(32),
+            "version": 2, "locktime": 0, "vin": [], "vout": [], "size": 0, "weight": 0, "fee": 0,
+            "status": { "confirmed": true, "block_height": 90, "block_hash": "00".repeat(32), "block_time": 1_700_000_000 },
+        }])
+        .to_string();
+        let inner = FakeInner::new()
+            .with_txs(ADDR, &first)
+            .with_page(&"11".repeat(32), &older);
+        let transport = RecordingTransport::new(inner);
+        let handle = transport.recording();
+
+        get(&transport, &format!("{BASE}/address/{ADDR}/txs")).expect("the first page fetches");
+        get(
+            &transport,
+            &format!("{BASE}/address/{ADDR}/txs/chain/{}", "11".repeat(32)),
+        )
+        .expect("the continuation fetches");
+
+        let recording = handle.borrow();
+        let txs = recording
+            .addresses
+            .get(ADDR)
+            .expect("the address was recorded");
+        assert_eq!(
+            txs.iter()
+                .map(|tx| tx["status"]["block_height"].as_u64())
+                .collect::<Vec<_>>(),
+            vec![Some(120), Some(90)],
+            "the continuation's transactions follow the first page's, under ONE key"
+        );
+        assert_eq!(
+            recording.addresses.len(),
+            1,
+            "a continuation is not a second address"
+        );
+    }
+
+    #[test]
+    fn txs_page_from_path_classifies_first_and_continuation_pages() {
+        assert_eq!(
+            txs_page_from_path("/address/bcrt1qa/txs"),
+            Some(TxsPage::First("bcrt1qa"))
+        );
+        assert_eq!(
+            txs_page_from_path("/api/address/bcrt1qa/txs/chain/abcd?x=1"),
+            Some(TxsPage::Continuation {
+                address: "bcrt1qa",
+                last_seen: "abcd"
+            })
+        );
+        for other in [
+            "/address/bcrt1qa/utxo",
+            "/address/bcrt1qa/txs/mempool",
+            "/address/bcrt1qa/txs/chain",
+            "/blocks/tip/height",
+            "/tx",
+        ] {
+            assert_eq!(txs_page_from_path(other), None, "{other}");
+        }
     }
 
     #[test]
