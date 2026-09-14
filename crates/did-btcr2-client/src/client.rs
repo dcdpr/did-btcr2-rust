@@ -459,7 +459,9 @@ mod tests {
         seen_paths: RefCell<Vec<String>>,
         /// Body served for `GET /address/{a}/txs` (a JSON tx array).
         txs_body: Vec<u8>,
-        /// Chain-tip height served as a bare integer.
+        /// Chain-tip height served as a bare integer. Two hundred: every
+        /// served announcement sits at height 100, so under the resolver's
+        /// default `minConf` of six it is long settled.
         tip: u32,
         /// A funding UTXO value (sats) served for `GET /address/{a}/utxo` when
         /// `utxo_values` is empty (the single-UTXO default).
@@ -488,7 +490,7 @@ mod tests {
                 post_tx_calls: std::cell::Cell::new(0),
                 seen_paths: RefCell::new(Vec::new()),
                 txs_body: txs_body.as_bytes().to_vec(),
-                tip: 100,
+                tip: 200,
                 utxo_value: 100_000,
                 utxo_values: Vec::new(),
                 broadcast_status: 200,
@@ -1033,6 +1035,44 @@ mod tests {
             "the resolver fetched the announcing block through the transport: {:?}",
             client.transport.seen_paths()
         );
+    }
+
+    /// `ResolutionOptions::min_conf` reaches the core unchanged: with the tip
+    /// in the announcement's own block (one confirmation) the default of six
+    /// skips the update and the DID resolves to version 1, and `minConf: 1`
+    /// applies it. The tip the facade fetched is what the count is measured
+    /// against.
+    #[test]
+    fn resolve_honours_min_conf_against_the_fetched_tip() {
+        let (did, update, txs) = announced_expiring_update();
+        for (min_conf, expected_version) in [(None, 1u64), (Some(std::num::NonZeroU32::MIN), 2u64)]
+        {
+            let transport = FakeTransport {
+                tip: 100,
+                ..FakeTransport::new(&txs)
+            };
+            let client = Client::new("http://fake".to_string(), transport);
+            let result = client
+                .resolve(
+                    &did,
+                    ResolutionOptions {
+                        sidecar_data: Some(SidecarData::new(
+                            None,
+                            vec![update.clone()],
+                            None,
+                            None,
+                        )),
+                        min_conf,
+                        ..Default::default()
+                    },
+                )
+                .expect("a signal short of minConf is skipped, not an error");
+            assert_eq!(
+                result.document_metadata.version_id.get(),
+                expected_version,
+                "minConf {min_conf:?} against a one-confirmation announcement"
+            );
+        }
     }
 
     /// The served block's mediantime is one second after the proof's

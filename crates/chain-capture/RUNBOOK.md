@@ -414,7 +414,17 @@ three announcements therefore land at three heights the tool **chose** rather
 than raced for, and the two height gaps are what give the replay something to
 sequence. Expect the whole scenario to take seconds, not minutes.
 
-#### 5. Resuming
+#### 5. Settling
+
+After the last step confirms, the tool brings the tip five blocks past it
+(`SETTLEMENT_BLOCKS`), so the last announcement has six confirmations — the
+resolver's default `minConf` — by the time the fixture is captured. On this
+chain that is five blocks mined on demand; a re-run of a completed session
+finds the tip already there and mines nothing. A fixture captured before this
+step existed replays only with `minConf` lowered to one, which is why the two
+committed fixtures' tests pin it until the scenarios are re-minted.
+
+#### 6. Resuming
 
 Re-running the same command with the same `--state-file` continues where it
 stopped. It never mints a second DID: a step already confirmed is skipped, and a
@@ -454,6 +464,10 @@ Use a **different key file** from scenario A. If both scenarios are handed the
 same key they derive the same DID, and the tool refuses — publishing a
 conflicting announcement on the clean DID would abort its resolution and destroy
 that scenario's coverage permanently.
+
+The session settles the chain five blocks past the second branch before it
+proves the fork, exactly as scenario A does, and the proof runs under the
+resolver's default `minConf`: what is proved is what the fixture's replay sees.
 
 The two announcements must land in **different blocks**: the resolver orders
 signals by `(targetVersionId, block height)`, and two version 2 announcements in
@@ -499,6 +513,11 @@ they are:
   — minted on the same chain at blocks 766 / 768, two conflicting version 2
   announcements from one beacon.
 
+Both were captured before the settling step existed, with the tip in the last
+announcement's block (764 and 768). Re-minting them on a fresh unpack of the
+export — the same two commands above, on new keys — records tips 769 and 773
+and lets the replay tests drop their `min_conf: 1` pins.
+
 The second one is a **deliberately malformed DID history, published for
 testing**. Resolving it raises the spec's late-publishing error, which is the
 entire point of it; it is not a defect and it is not to be repaired.
@@ -521,7 +540,9 @@ What changes:
 - **Funding.** The tool prints the addresses to fund and the faucet URL where it
   knows one, then polls instead of mining. Fund every listed beacon in one visit;
   the plan is printed before anything is broadcast for exactly that reason.
-- **Cadence.** A confirmation takes a block interval instead of a moment.
+- **Cadence.** A confirmation takes a block interval instead of a moment, and
+  settling five blocks past the last announcement is a wait of five intervals
+  (the tool allows about an hour) rather than five blocks mined on demand.
 - **Permanence.** The broadcast prompt says so: on any chain but regtest a
   broadcast cannot be recalled.
 - **Endpoints.** `mutinynet` has a default Esplora endpoint; `testnet4` does not,

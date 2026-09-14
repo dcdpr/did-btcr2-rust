@@ -276,8 +276,12 @@ SAMPLE  wrote sidecar: ./update-v2.sidecar.json
 
 ### 5a. Sidecar path (default) — USER-run, SAMPLE output
 
-Once the step-4 transaction confirms, resolve with the sidecar file emitted in
-Step 4 to reach `versionId "2"`. The on-chain beacon signal is only a 32-byte
+Once the step-4 transaction has **six confirmations** (~3 minutes on mutinynet),
+resolve with the sidecar file emitted in Step 4 to reach `versionId "2"`. Six is
+the resolver's default `minConf`: a signal with fewer confirmations is not yet
+processed and the resolve stays at `versionId "1"` — not an error, just not yet
+settled. To see the update sooner pass `--min-conf 1` (one confirmation), at the
+cost of reorganisation exposure. The on-chain beacon signal is only a 32-byte
 commitment — the update payload itself lives in the sidecar, so `resolve` needs it:
 
 ```bash
@@ -323,7 +327,11 @@ is whether the update payload reaches the resolver at all, not merely *how*.
 ## Step 6 — Deactivate, then resolve (USER-run write, SAMPLE output)
 
 `deactivate` takes the same key/fee/broadcast flags as `update`, with no
-`--patch`. It broadcasts a beacon signal marking the DID deactivated — user-run,
+`--patch`. Both write commands resolve the current document first, under the
+same default `minConf` of six: a deactivation built straight after Step 4 would
+resolve `versionId "1"` and target version 2 again. Wait for six confirmations
+on the update, or pass `--min-conf 1` to build on the one-confirmation state.
+It broadcasts a beacon signal marking the DID deactivated — user-run,
 SAMPLE output. Pass the Step-4 sidecar as **input**
 (`--sidecar ./update-v2.sidecar.json`) and a new **output** file
 (`--sidecar-out ./deactivate-v3.sidecar.json`) so the emitted file accumulates the
@@ -347,8 +355,9 @@ SAMPLE  txid: 2222222222222222222222222222222222222222222222222222222222222222
 SAMPLE  wrote sidecar: ./deactivate-v3.sidecar.json
 ```
 
-Resolve once the deactivation confirms, passing the accumulated sidecar —
-`deactivated` flips to `true` and `versionId` reaches `"3"`:
+Resolve once the deactivation has six confirmations (or pass `--min-conf 1`),
+passing the accumulated sidecar — `deactivated` flips to `true` and `versionId`
+reaches `"3"`:
 
 ```bash
 cargo run -p did-btcr2-cli -- resolve --sidecar ./deactivate-v3.sidecar.json \

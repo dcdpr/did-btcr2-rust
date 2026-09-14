@@ -14,7 +14,7 @@ coverage status:
 - **Gap** — applies to the Singleton scope and is not implemented; the reason names what is
   missing.
 
-**Totals:** 81 requirements — 61 Covered, 13 DeferredAggregation, 5 NotApplicable, 2 Gap.
+**Totals:** 81 requirements — 62 Covered, 13 DeferredAggregation, 5 NotApplicable, 1 Gap.
 
 ## Requirement Matrix
 
@@ -86,7 +86,7 @@ coverage status:
 | `resolve.md:process-genesis-document-placeholder` | MUST | Covered | `document::tests::test_from_external_intermediate` |
 | `resolve.md:render-initial-did-document-bitcoin-uri` | MUST | Covered | `document::tests::beacons_accessor` |
 | `resolve.md:parse-rendered-template-conformant-doc` | MUST | Covered | `document::tests::test_document_parse` |
-| `resolve.md:signal-confirmed-min-conf` | MUST | Gap | `minConf` is not implemented — `ResolutionOptions` has no `min_conf` field and the resolver applies any confirmed signal regardless of its confirmation count; only the unconfirmed-mempool half of this MUST is tested (`resolver::tests::unconfirmed_needed_signal_returns_err`) |
+| `resolve.md:signal-confirmed-min-conf` | MUST | Covered | `resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies` |
 | `resolve.md:late-publishing-raised` | MUST | Covered | `update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing` |
 | `resolve.md:capability-invocation-entry-identifies-proof-vm` | MUST | Covered | `document::tests::apply_update_accepts_embedded_capability_invocation` |
 | `update.md:apply-patch-invalid-did-update-on-failure` | MUST | Covered | `document::tests::construct_signed_update_rejects_failing_patch` |
@@ -104,11 +104,10 @@ coverage status:
 
 ## Gap List
 
-2 Singleton-applicable MUST/SHALL row(s) are not implemented and are listed here so
+1 Singleton-applicable MUST/SHALL row(s) are not implemented and are listed here so
 this matrix does not overstate conformance:
 
 - `resolve.md:version-id-parsed-as-integer-invalid-options` (MUST) — Gap: `INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / `version_time: Option<DateTime>` values, so there is no path that parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying `versionId` and `versionTime` together is not rejected
-- `resolve.md:signal-confirmed-min-conf` (MUST) — Gap: `minConf` is not implemented — `ResolutionOptions` has no `min_conf` field and the resolver applies any confirmed signal regardless of its confirmation count; only the unconfirmed-mempool half of this MUST is tested (`resolver::tests::unconfirmed_needed_signal_returns_err`)
 
 The justified non-gaps are:
 

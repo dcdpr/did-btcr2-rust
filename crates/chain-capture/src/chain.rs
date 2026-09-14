@@ -67,6 +67,16 @@ impl Poll {
         }
     }
 
+    /// The loop for waiting on a self-mining chain to settle several blocks
+    /// past an announcement: block intervals rather than a single
+    /// confirmation, so it is allowed about an hour.
+    const fn settling() -> Self {
+        Self {
+            interval: Duration::from_secs(30),
+            attempts: 120,
+        }
+    }
+
     /// The bound, rendered for a timeout message, so the operator is told how
     /// long the tool actually waited rather than being left to guess.
     fn budget(&self) -> String {
@@ -139,6 +149,22 @@ pub enum ChainError {
         waited: String,
     },
 
+    /// The settlement wait gave up: the tip did not reach the height that
+    /// gives the last announcement its confirmations.
+    #[error(
+        "settlement timed out on {network}: the tip is {tip}, still short of {height}, after {waited} — the announcements are on chain, so re-running resumes the wait rather than re-broadcasting"
+    )]
+    SettlementTimeout {
+        /// The chain being minted on.
+        network: String,
+        /// The height the tip had to reach.
+        height: u32,
+        /// The tip that was last observed.
+        tip: u32,
+        /// The bound that was exhausted.
+        waited: String,
+    },
+
     /// A chain the tool must mine on was named without an RPC endpoint.
     #[error(
         "--network regtest needs --bitcoind-url and --bitcoind-auth — nothing else can produce a block on a chain started with autoMineMode: 0. For the shipped Polar export these are --bitcoind-url http://127.0.0.1:18443 --bitcoind-auth polaruser:polarpass (see RUNBOOK.md Part 3)."
@@ -182,6 +208,19 @@ pub trait ChainOps {
 
     /// Block until `txid` is confirmed. Returns `(block_height, block_time)`.
     fn await_confirmation(&self, txid: &str) -> Result<(u32, i64), ChainError>;
+
+    /// Bring the chain tip to at least `height` and return the tip reached.
+    ///
+    /// An announcement confirmed at height `h` has `tip - h + 1`
+    /// confirmations, and a resolver processes it only once that reaches its
+    /// `minConf` (six by default). A fixture captured with the tip still in
+    /// the last announcement's block would replay only under a lowered
+    /// `minConf`, so a session settles the chain past its last announcement
+    /// before the fixture is captured. On a chain this tool mines that is the
+    /// missing blocks produced now; on a chain that mines itself it is a
+    /// wait. Idempotent: a tip already at or past `height` is left alone, so
+    /// a re-run of a completed session does not keep moving it.
+    fn settle(&self, height: u32) -> Result<u32, ChainError>;
 }
 
 /// A minimal bitcoind JSON-RPC client over the existing transport seam.
@@ -393,6 +432,59 @@ fn confirmed_sats<T: BtcTransport>(
     Ok(confirmed_total(&utxos))
 }
 
+/// The height of the chain tip as the Esplora index reports it.
+fn tip_height<T: BtcTransport>(reads: &T, esplora_base: &str) -> Result<u32, ChainError> {
+    let request = http::Request::get(format!("{esplora_base}/blocks/tip/height"))
+        .body(Vec::new())
+        .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
+    let response = reads.execute(request)?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(TransportError::Status {
+            status,
+            body: String::from_utf8_lossy(response.body()).into_owned(),
+        }
+        .into());
+    }
+    let body = String::from_utf8_lossy(response.body());
+    body.trim().parse().map_err(|_| {
+        TransportError::Malformed(format!(
+            "`/blocks/tip/height` answered `{}`, not a block height",
+            body.trim()
+        ))
+        .into()
+    })
+}
+
+/// Poll the Esplora index until its tip is at least `height`, returning the
+/// tip reached or the named timeout. Shared by both chain families: on a
+/// chain this tool mines the blocks already exist and only the index has to
+/// catch up; on a chain that mines itself this IS the wait.
+fn await_tip<T: BtcTransport>(
+    reads: &T,
+    esplora_base: &str,
+    network: &str,
+    height: u32,
+    poll: &Poll,
+) -> Result<u32, ChainError> {
+    let mut last_tip = 0;
+    for attempt in 0..poll.attempts {
+        last_tip = tip_height(reads, esplora_base)?;
+        if last_tip >= height {
+            return Ok(last_tip);
+        }
+        if attempt + 1 < poll.attempts {
+            std::thread::sleep(poll.interval);
+        }
+    }
+    Err(ChainError::SettlementTimeout {
+        network: network.to_string(),
+        height,
+        tip: last_tip,
+        waited: poll.budget(),
+    })
+}
+
 /// `(block_height, block_time)` for `txid`, or `None` while it is unconfirmed or
 /// not yet indexed.
 ///
@@ -528,6 +620,26 @@ impl<T: BtcTransport> ChainOps for RegtestOps<T> {
             waited: self.poll.budget(),
         })
     }
+
+    fn settle(&self, height: u32) -> Result<u32, ChainError> {
+        let tip = tip_height(&self.reads, &self.esplora_base)?;
+        if tip >= height {
+            return Ok(tip);
+        }
+        // Exactly the blocks that are missing, so a re-run that finds the tip
+        // already past `height` produces none (the early return above) and a
+        // partial catch-up produces only the remainder.
+        let addr = self.rpc.get_new_address()?;
+        self.rpc.generate_to_address(height - tip, &addr)?;
+        // The blocks exist; the index catches up asynchronously.
+        await_tip(
+            &self.reads,
+            &self.esplora_base,
+            &self.network,
+            height,
+            &self.poll,
+        )
+    }
 }
 
 /// A chain that mines itself: fund from a faucet, confirm by polling.
@@ -536,6 +648,8 @@ pub struct PublicChainOps<T: BtcTransport> {
     esplora_base: String,
     reads: T,
     poll: Poll,
+    /// The longer loop for settling several blocks past the last announcement.
+    settle_poll: Poll,
 }
 
 impl<T: BtcTransport> PublicChainOps<T> {
@@ -546,13 +660,15 @@ impl<T: BtcTransport> PublicChainOps<T> {
             esplora_base,
             reads,
             poll: Poll::self_mining(),
+            settle_poll: Poll::settling(),
         }
     }
 
-    /// Shorten the wait loop so a timeout is reachable in a unit test.
+    /// Shorten both wait loops so a timeout is reachable in a unit test.
     #[cfg(test)]
     fn with_poll(mut self, poll: Poll) -> Self {
         self.poll = poll;
+        self.settle_poll = poll;
         self
     }
 }
@@ -605,6 +721,25 @@ impl<T: BtcTransport> ChainOps for PublicChainOps<T> {
             txid: txid.to_string(),
             waited: self.poll.budget(),
         })
+    }
+
+    fn settle(&self, height: u32) -> Result<u32, ChainError> {
+        let tip = tip_height(&self.reads, &self.esplora_base)?;
+        if tip >= height {
+            return Ok(tip);
+        }
+        eprintln!(
+            "waiting for {} to reach height {height} (tip {tip}) — polling every {}s",
+            self.network,
+            self.settle_poll.interval.as_secs()
+        );
+        await_tip(
+            &self.reads,
+            &self.esplora_base,
+            &self.network,
+            height,
+            &self.settle_poll,
+        )
     }
 }
 
@@ -1202,6 +1337,129 @@ mod tests {
             fake.rpc_calls(),
             vec!["getnewaddress", "generatetoaddress"],
             "one block, produced once"
+        );
+    }
+
+    /// Queue a `/blocks/tip/height` reply.
+    fn tip(fake: &FakeChain, height: u32) {
+        fake.get("/blocks/tip/height", 200, json!(height));
+    }
+
+    #[test]
+    fn regtest_settle_mines_exactly_the_missing_blocks_and_waits_for_the_index() {
+        let fake = FakeChain::new();
+        // Tip 764, target 769: five blocks. The index then reports the old tip
+        // once more before it catches up.
+        tip(&fake, 764);
+        tip(&fake, 764);
+        tip(&fake, 769);
+        fake.rpc_ok("getnewaddress", json!("bcrt1qminer"));
+        fake.rpc_ok("generatetoaddress", json!(vec!["00".repeat(32); 5]));
+
+        let ops = RegtestOps::new(
+            "regtest".to_string(),
+            "http://localhost:3000".to_string(),
+            fake.clone(),
+            rpc(fake.clone()),
+        )
+        .with_poll(instant_poll(5));
+        assert_eq!(
+            ops.settle(769).expect("the chain settles"),
+            769,
+            "the tip reached is reported"
+        );
+        assert_eq!(fake.rpc_calls(), vec!["getnewaddress", "generatetoaddress"]);
+        let mined = fake
+            .requests()
+            .into_iter()
+            .find(|r| r.rpc_method.as_deref() == Some("generatetoaddress"))
+            .expect("a block was produced");
+        assert_eq!(
+            mined.params[0],
+            json!(5),
+            "exactly the missing blocks are produced: {}",
+            mined.params
+        );
+    }
+
+    #[test]
+    fn regtest_settle_is_a_no_op_once_the_tip_is_past_the_height() {
+        let fake = FakeChain::new();
+        tip(&fake, 773);
+
+        let ops = RegtestOps::new(
+            "regtest".to_string(),
+            "http://localhost:3000".to_string(),
+            fake.clone(),
+            rpc(fake.clone()),
+        )
+        .with_poll(instant_poll(5));
+        assert_eq!(ops.settle(769).expect("nothing to do"), 773);
+        assert!(
+            fake.rpc_calls().is_empty(),
+            "a settled chain is not mined on again: {:?}",
+            fake.rpc_calls()
+        );
+    }
+
+    #[test]
+    fn public_chain_settle_waits_without_mining_and_times_out_by_name() {
+        let fake = FakeChain::new();
+        tip(&fake, 3_302_500);
+
+        let ops = PublicChainOps::new(
+            "mutinynet".to_string(),
+            "http://esplora.test".to_string(),
+            fake.clone(),
+        )
+        .with_poll(instant_poll(3));
+        let error = ops
+            .settle(3_302_505)
+            .expect_err("a chain that stops producing blocks times out");
+        match &error {
+            ChainError::SettlementTimeout {
+                network,
+                height,
+                tip,
+                ..
+            } => {
+                assert_eq!(network, "mutinynet");
+                assert_eq!(*height, 3_302_505);
+                assert_eq!(*tip, 3_302_500);
+            }
+            other => panic!("expected SettlementTimeout, got {other:?}"),
+        }
+        assert!(
+            fake.rpc_calls().is_empty(),
+            "a self-mining chain is never mined on: {:?}",
+            fake.rpc_calls()
+        );
+        assert!(
+            error.to_string().contains("resumes"),
+            "the message says a re-run is safe: {error}"
+        );
+
+        // And it returns as soon as the chain gets there on its own.
+        let fake = FakeChain::new();
+        tip(&fake, 3_302_500);
+        tip(&fake, 3_302_505);
+        let ops = PublicChainOps::new(
+            "mutinynet".to_string(),
+            "http://esplora.test".to_string(),
+            fake.clone(),
+        )
+        .with_poll(instant_poll(3));
+        assert_eq!(ops.settle(3_302_505).expect("the chain settles"), 3_302_505);
+    }
+
+    #[test]
+    fn a_tip_that_is_not_a_height_is_a_malformed_response() {
+        let fake = FakeChain::new();
+        fake.get("/blocks/tip/height", 200, json!("<html>proxy</html>"));
+        let error = tip_height(&fake, "http://esplora.test").expect_err("not a height");
+        assert!(
+            matches!(error, ChainError::Transport(TransportError::Malformed(_))),
+            "got {error:?}"
         );
     }
 

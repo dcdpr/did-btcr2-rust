@@ -27,7 +27,13 @@ use nonempty::NonEmpty;
 use onlyerror::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, fs, num::NonZeroU64, path::Path, str::FromStr};
+use std::{
+    collections::HashMap,
+    fs,
+    num::{NonZeroU32, NonZeroU64},
+    path::Path,
+    str::FromStr,
+};
 
 const DID_CORE_V1_1_CONTEXT: &str = "https://www.w3.org/ns/did/v1.1";
 const DID_BTC1_CONTEXT: &str = "https://btcr2.dev/context/v1";
@@ -477,14 +483,30 @@ pub struct ResolutionOptions {
     /// Data necessary for resolving a DID such as DID Update Payloads and SMT proofs
     pub sidecar_data: Option<SidecarData>,
 
-    /// Chain tip height for computing `confirmations` in `DocumentMetadata`.
-    /// `None` means the caller did not supply the tip and
-    /// `DocumentMetadata.confirmations` will be `None` (fail-closed rather
-    /// than misleadingly returning 0).
+    /// Chain tip height, the basis for every confirmation count: the
+    /// `minConf` gate on each beacon signal (`tip - height + 1` against
+    /// [`ResolutionOptions::min_conf`]) and `DocumentMetadata.confirmations`.
+    /// `None` means the caller did not supply the tip: a walk that meets no
+    /// confirmed signal still resolves (with `confirmations: None`, fail-closed
+    /// rather than misleadingly `0`), but the first confirmed signal is a
+    /// typed [`resolver::Error::MissingChainTip`](crate::resolver::Error::MissingChainTip),
+    /// because its confirmations cannot be counted.
     ///
     /// Sans-I/O: the resolver does NOT fetch the tip. The
-    /// did-btcr2-cli client crate owns the `/blocks/tip/height` call.
+    /// did-btcr2-client crate owns the `/blocks/tip/height` call.
     pub chain_tip_height: Option<u32>,
+
+    /// `resolutionOptions.minConf`: the confirmations a beacon signal's
+    /// transaction must have before the resolver processes it; `6` when not
+    /// provided ([`ResolutionOptions::DEFAULT_MIN_CONF`]). A signal with fewer
+    /// is skipped, whether or not the sidecar holds its update — the same
+    /// rule as an unconfirmed transaction. Lowering it trades reorganisation
+    /// exposure for latency; the returned `confirmations` lets a consumer
+    /// judge the result.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals" and
+    /// data-structures.md (resolution options).
+    pub min_conf: Option<NonZeroU32>,
 
     /// Esplora base URL the resolver formats every request from
     /// (`{base}/address/{descriptor}/txs`, `{base}/block/{hash}`). REQUIRED
@@ -497,6 +519,16 @@ pub struct ResolutionOptions {
     /// `chain_tip_height`; the `did-btcr2-client` crate fills it from the
     /// network name.
     pub esplora_url: Option<String>,
+}
+
+impl ResolutionOptions {
+    /// The `minConf` in force when the option is not provided: six, the
+    /// industry threshold for treating a Bitcoin transaction as settled
+    /// (resolve.md "Find Beacon Signals", footnote 3).
+    pub const DEFAULT_MIN_CONF: NonZeroU32 = match NonZeroU32::new(6) {
+        Some(n) => n,
+        None => unreachable!(),
+    };
 }
 
 /// Spec triple per did-btcr2/src/operations/resolve.md:16-17:
@@ -3086,6 +3118,7 @@ mod tests {
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             esplora_url: Some("http://esplora.test/api".into()),
+            chain_tip_height: Some(1_000),
             ..Default::default()
         };
         let resolver =
@@ -3210,6 +3243,7 @@ mod tests {
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             esplora_url: Some("http://esplora.test/api".into()),
+            chain_tip_height: Some(1_000),
             ..Default::default()
         };
         let resolver =
@@ -3322,6 +3356,7 @@ mod tests {
         let resolution_options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             esplora_url: Some("http://esplora.test/api".into()),
+            chain_tip_height: Some(1_000),
             ..Default::default()
         };
         let resolver =

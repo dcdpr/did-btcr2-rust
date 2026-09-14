@@ -21,6 +21,7 @@ use onlyerror::Error;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write as _;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -51,6 +52,9 @@ enum Command {
         network: Option<String>,
         esplora_url: Option<String>,
         sidecar: Option<PathBuf>,
+        /// `--min-conf <n>`: confirmations a beacon signal needs before the
+        /// resolver processes it (the resolver's default of six when absent).
+        min_conf: Option<NonZeroU32>,
     },
     Update {
         did: String,
@@ -72,6 +76,8 @@ enum Command {
         /// newly-signed update) to this path AFTER a successful broadcast, so a
         /// later `resolve --sidecar` completes the round-trip.
         sidecar_out: Option<PathBuf>,
+        /// `--min-conf <n>` for the resolve the update is built against.
+        min_conf: Option<NonZeroU32>,
     },
     Deactivate {
         did: String,
@@ -92,6 +98,8 @@ enum Command {
         /// newly-signed deactivation update) to this path AFTER a successful
         /// broadcast, so a later `resolve --sidecar` completes the round-trip.
         sidecar_out: Option<PathBuf>,
+        /// `--min-conf <n>` for the resolve the deactivation is built against.
+        min_conf: Option<NonZeroU32>,
     },
 }
 
@@ -226,6 +234,8 @@ impl OnlyArgs for Args {
             "                                or mutinynet.\n",
             "    --esplora-url <url>         Esplora base URL override (no trailing slash).\n",
             "    --sidecar <file>            Path to a sidecar data JSON file.\n",
+            "    --min-conf <n>              Confirmations a beacon signal needs before it\n",
+            "                                is processed (default 6; must be at least 1).\n",
             "\n",
             "  update <did>                 Update a did:btcr2 document via a beacon signal.\n",
             "    --patch <file.json>         REQUIRED. RFC-6902 JSON Patch to apply.\n",
@@ -243,7 +253,7 @@ impl OnlyArgs for Args {
             "    --beacon <type>             Beacon to fund: P2PKH, P2WPKH (default), P2TR.\n",
             "    --dry-run                   Build and print the tx without broadcasting.\n",
             "    --yes                       Skip the broadcast confirm prompt.\n",
-            "    --network / --esplora-url / --sidecar   As for resolve.\n",
+            "    --network / --esplora-url / --sidecar / --min-conf   As for resolve.\n",
             "\n",
             "  deactivate <did>             Deactivate a did:btcr2 document via a beacon\n",
             "                               signal. Same key/fee/broadcast flags as update.\n",
@@ -404,11 +414,18 @@ fn parse_resolve(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command
     let mut network: Option<String> = None;
     let mut esplora_url: Option<String> = None;
     let mut sidecar: Option<PathBuf> = None;
+    let mut min_conf: Option<NonZeroU32> = None;
     while let Some(arg) = sub_args.next() {
         match arg.to_str() {
             Some(p @ "--network") => network = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--esplora-url") => esplora_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--sidecar") => sidecar = Some(sub_args.next().parse_path(p)?),
+            // `NonZeroU32`'s parser rejects `0` as an integer parse error, so a
+            // zero — which would let an unconfirmed-by-any-block signal count —
+            // is refused at the flag rather than laundered into "unset".
+            Some(p @ "--min-conf") => {
+                min_conf = Some(sub_args.next().parse_int::<NonZeroU32, _>(p)?)
+            }
             Some(s) if !s.starts_with('-') => {
                 if did.is_some() {
                     return Err(CliError::Unknown(arg));
@@ -423,6 +440,7 @@ fn parse_resolve(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command
         network,
         esplora_url,
         sidecar,
+        min_conf,
     })
 }
 
@@ -455,6 +473,7 @@ fn parse_write(
     let mut esplora_url: Option<String> = None;
     let mut sidecar: Option<PathBuf> = None;
     let mut sidecar_out: Option<PathBuf> = None;
+    let mut min_conf: Option<NonZeroU32> = None;
 
     while let Some(arg) = sub_args.next() {
         match arg.to_str() {
@@ -474,6 +493,9 @@ fn parse_write(
             Some(p @ "--esplora-url") => esplora_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--sidecar") => sidecar = Some(sub_args.next().parse_path(p)?),
             Some(p @ "--sidecar-out") => sidecar_out = Some(sub_args.next().parse_path(p)?),
+            Some(p @ "--min-conf") => {
+                min_conf = Some(sub_args.next().parse_int::<NonZeroU32, _>(p)?)
+            }
             Some(s) if !s.starts_with('-') => {
                 if did.is_some() {
                     return Err(CliError::Unknown(arg));
@@ -505,6 +527,7 @@ fn parse_write(
                 esplora_url,
                 sidecar,
                 sidecar_out,
+                min_conf,
             })
         }
         WriteKind::Deactivate => Ok(Command::Deactivate {
@@ -523,6 +546,7 @@ fn parse_write(
             esplora_url,
             sidecar,
             sidecar_out,
+            min_conf,
         }),
     }
 }
@@ -554,8 +578,12 @@ fn beacon_index(beacon: Option<&str>) -> Result<usize, CliRunError> {
     }
 }
 
-/// Build a sidecar resolution options bundle from the optional sidecar file.
-fn load_sidecar(sidecar: Option<PathBuf>) -> Result<ResolutionOptions, CliRunError> {
+/// Build the resolution options from the optional sidecar file and the
+/// `--min-conf` flag.
+fn load_sidecar(
+    sidecar: Option<PathBuf>,
+    min_conf: Option<NonZeroU32>,
+) -> Result<ResolutionOptions, CliRunError> {
     let sidecar_data = match sidecar {
         Some(path) => {
             let file = File::open(path)?;
@@ -565,6 +593,7 @@ fn load_sidecar(sidecar: Option<PathBuf>) -> Result<ResolutionOptions, CliRunErr
     };
     Ok(ResolutionOptions {
         sidecar_data,
+        min_conf,
         ..Default::default()
     })
 }
@@ -576,9 +605,10 @@ fn run_resolve(
     network: Option<&str>,
     esplora_url: Option<String>,
     sidecar: Option<PathBuf>,
+    min_conf: Option<NonZeroU32>,
 ) -> Result<(), CliRunError> {
     let did: did_btcr2::identifier::Did = did_str.parse()?;
-    let opts = load_sidecar(sidecar)?;
+    let opts = load_sidecar(sidecar, min_conf)?;
     let client = Client::with_network(
         network.unwrap_or("testnet"),
         esplora_url,
@@ -781,6 +811,7 @@ struct WriteDispatch {
     esplora_url: Option<String>,
     sidecar: Option<PathBuf>,
     sidecar_out: Option<PathBuf>,
+    min_conf: Option<NonZeroU32>,
 }
 
 /// Run a write operation (`update` or `deactivate`) through the facade.
@@ -870,6 +901,7 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
             yes: d.yes,
             sidecar: d.sidecar,
             sidecar_out: d.sidecar_out,
+            min_conf: d.min_conf,
         },
     )
 }
@@ -891,6 +923,8 @@ struct WriteParams {
     yes: bool,
     sidecar: Option<PathBuf>,
     sidecar_out: Option<PathBuf>,
+    /// `--min-conf` for the resolve the update is built against.
+    min_conf: Option<NonZeroU32>,
 }
 
 /// Dispatch a write operation into the facade. Generic over the transport so a
@@ -927,6 +961,7 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
     };
     let opts = ResolutionOptions {
         sidecar_data: resolve_sidecar,
+        min_conf: p.min_conf,
         ..Default::default()
     };
     let current = client.resolve(&p.did, opts)?;
@@ -1128,7 +1163,8 @@ fn run() -> Result<(), CliRunError> {
             network,
             esplora_url,
             sidecar,
-        } => run_resolve(&did, network.as_deref(), esplora_url, sidecar),
+            min_conf,
+        } => run_resolve(&did, network.as_deref(), esplora_url, sidecar, min_conf),
         Command::Update {
             did,
             patch,
@@ -1146,6 +1182,7 @@ fn run() -> Result<(), CliRunError> {
             esplora_url,
             sidecar,
             sidecar_out,
+            min_conf,
         } => run_write(WriteDispatch {
             did,
             patch: Some(patch),
@@ -1166,6 +1203,7 @@ fn run() -> Result<(), CliRunError> {
             esplora_url,
             sidecar,
             sidecar_out,
+            min_conf,
         }),
         Command::Deactivate {
             did,
@@ -1183,6 +1221,7 @@ fn run() -> Result<(), CliRunError> {
             esplora_url,
             sidecar,
             sidecar_out,
+            min_conf,
         } => run_write(WriteDispatch {
             did,
             patch: None,
@@ -1203,6 +1242,7 @@ fn run() -> Result<(), CliRunError> {
             esplora_url,
             sidecar,
             sidecar_out,
+            min_conf,
         }),
     };
     // Surface a subcommand error first, then flush any residual buffered stdout so
@@ -1287,6 +1327,58 @@ mod tests {
             panic!("expected Resolve");
         };
         assert_eq!(esplora_url, Some("https://node.example/api".to_string()));
+    }
+
+    #[test]
+    fn test_parse_min_conf() {
+        let parsed = Args::parse(args_from_strings(&[
+            "resolve",
+            "--min-conf",
+            "1",
+            SAMPLE_DID,
+        ]))
+        .unwrap();
+        let Command::Resolve { min_conf, .. } = parsed.command else {
+            panic!("expected Resolve");
+        };
+        assert_eq!(min_conf, Some(NonZeroU32::MIN));
+
+        // Absent: the resolver's default applies, the CLI pins nothing.
+        let parsed = Args::parse(args_from_strings(&["resolve", SAMPLE_DID])).unwrap();
+        let Command::Resolve { min_conf, .. } = parsed.command else {
+            panic!("expected Resolve");
+        };
+        assert_eq!(min_conf, None);
+
+        // Zero and non-numbers are refused at the flag.
+        for bad in ["0", "six", "-1"] {
+            let err = Args::parse(args_from_strings(&[
+                "resolve",
+                "--min-conf",
+                bad,
+                SAMPLE_DID,
+            ]))
+            .expect_err("a minConf that is not a positive integer is refused");
+            assert!(
+                matches!(err, CliError::ParseIntError(ref flag, ..) if flag == "--min-conf"),
+                "`{bad}`: got {err:?}"
+            );
+        }
+
+        // The write subcommands take it for the resolve they build against.
+        let parsed = Args::parse(args_from_strings(&[
+            "deactivate",
+            "--min-conf",
+            "2",
+            "--key-stdin",
+            "--yes",
+            SAMPLE_DID,
+        ]))
+        .unwrap();
+        let Command::Deactivate { min_conf, .. } = parsed.command else {
+            panic!("expected Deactivate");
+        };
+        assert_eq!(min_conf, NonZeroU32::new(2));
     }
 
     #[test]
@@ -1779,6 +1871,7 @@ mod tests {
                 yes: true,
                 sidecar: None,
                 sidecar_out: Some(sc_path.clone()),
+                min_conf: None,
             },
         );
 
@@ -1852,6 +1945,7 @@ mod tests {
                 yes: true, // skip the interactive confirm
                 sidecar: None,
                 sidecar_out: None,
+                min_conf: None,
             },
         );
 
@@ -1928,6 +2022,7 @@ mod tests {
                 yes: true,
                 sidecar: None,
                 sidecar_out: Some(v2_path.clone()),
+                min_conf: None,
             },
         )
         .expect("the update write broadcasts and emits v2.json");
@@ -1936,7 +2031,7 @@ mod tests {
         let r2 = client
             .resolve(
                 &did,
-                load_sidecar(Some(v2_path.clone())).expect("v2 sidecar loads"),
+                load_sidecar(Some(v2_path.clone()), None).expect("v2 sidecar loads"),
             )
             .expect("the v2 sidecar resolves (no MISSING_UPDATE_DATA)");
         assert_eq!(
@@ -1967,6 +2062,7 @@ mod tests {
                 yes: true,
                 sidecar: Some(v2_path.clone()),
                 sidecar_out: Some(v3_path.clone()),
+                min_conf: None,
             },
         )
         .expect("the deactivate write broadcasts and emits v3.json");
@@ -1975,7 +2071,7 @@ mod tests {
         let r3 = client
             .resolve(
                 &did,
-                load_sidecar(Some(v3_path.clone())).expect("v3 sidecar loads"),
+                load_sidecar(Some(v3_path.clone()), None).expect("v3 sidecar loads"),
             )
             .expect("the v3 sidecar resolves");
         assert_eq!(
@@ -2033,6 +2129,7 @@ mod tests {
                 yes: false, // decline: cargo-test stdin is EOF → confirm returns false
                 sidecar: None,
                 sidecar_out: Some(sc_path.clone()),
+                min_conf: None,
             },
         );
 
@@ -2085,12 +2182,13 @@ mod tests {
                 yes: true,
                 sidecar: None,
                 sidecar_out: Some(p.clone()),
+                min_conf: None,
             },
         )
         .expect("the update write emits v2 at p");
 
         let r2 = client
-            .resolve(&did, load_sidecar(Some(p.clone())).expect("p loads"))
+            .resolve(&did, load_sidecar(Some(p.clone()), None).expect("p loads"))
             .expect("p resolves to v2");
         assert_eq!(r2.document_metadata.version_id.get(), 2, "p is at v2");
 
@@ -2111,12 +2209,13 @@ mod tests {
                 yes: true,
                 sidecar: Some(p.clone()),
                 sidecar_out: Some(p.clone()),
+                min_conf: None,
             },
         )
         .expect("the same-path deactivate write succeeds");
 
         let r3 = client
-            .resolve(&did, load_sidecar(Some(p.clone())).expect("p loads"))
+            .resolve(&did, load_sidecar(Some(p.clone()), None).expect("p loads"))
             .expect("p resolves to v3");
         assert_eq!(
             r3.document_metadata.version_id.get(),
@@ -2529,7 +2628,15 @@ mod tests {
         // 2. Feed the written sidecar back through load_sidecar + the facade's
         //    resolve (offline, empty /txs → genesis version 1). This exercises the
         //    REAL serde/CLI path and the resolve-side genesis→initial bridge.
-        let opts = load_sidecar(Some(sidecar_path.clone())).expect("load_sidecar");
+        let opts = load_sidecar(Some(sidecar_path.clone()), None).expect("load_sidecar");
+        assert_eq!(opts.min_conf, None, "no --min-conf pins nothing");
+        assert_eq!(
+            load_sidecar(None, NonZeroU32::new(3))
+                .expect("load_sidecar")
+                .min_conf,
+            NonZeroU32::new(3),
+            "--min-conf reaches the resolution options"
+        );
         let result = client
             .resolve(&did, opts)
             .expect("x1 resolve via genesisDocument sidecar succeeds");

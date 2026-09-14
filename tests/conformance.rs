@@ -878,11 +878,13 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "a transaction must be included in a bitcoin block and have at least `resolutiono",
-        status: Status::Gap(
-            "`minConf` is not implemented — `ResolutionOptions` has no `min_conf` field and the \
-             resolver applies any confirmed signal regardless of its confirmation count; only the \
-             unconfirmed-mempool half of this MUST is tested \
-             (`resolver::tests::unconfirmed_needed_signal_returns_err`)",
+        // The 5-vs-6 boundary under the default `minConf`; the `minConf: 1`
+        // override (`min_conf_one_applies_a_one_confirmation_signal`) and the
+        // unconfirmed-mempool half (`unconfirmed_needed_signal_is_skipped`,
+        // `pending_announcement_resolves_to_the_confirmed_version`) are
+        // exercised beside it.
+        status: Status::Covered(
+            "resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies",
         ),
     },
     ConformanceRow {
@@ -1083,7 +1085,8 @@ const KNOWN_TESTS: &[&str] = &[
     "resolver::tests::resolver_requests_block_mediantime_when_a_proof_carries_expires",
     "resolver::tests::resolver_requests_only_the_applicable_block_in_a_mixed_round",
     "resolver::tests::source_hash_mismatch_raises_invalid_did_update",
-    "resolver::tests::unconfirmed_needed_signal_returns_err",
+    "resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies",
+    "resolver::tests::unconfirmed_needed_signal_is_skipped",
     "resolver::tests::unknown_signal_hash_raises_missing_update_data",
     "update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing",
     "update::tests::ensure_pinned_context_rejects_old_reordered_short_and_proof_mismatch",

@@ -10,18 +10,19 @@ use crate::error::{Btcr2Error, ProblemDetails};
 use crate::update::UnsecuredUpdate;
 use crate::{identifier::Sha256Hash, update::Update};
 use chrono::{DateTime, Utc};
-use esploda::bitcoin::{BlockHash, opcodes::all::OP_RETURN, script::Instruction};
+use esploda::bitcoin::{BlockHash, Txid, opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
 use onlyerror::Error;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 /// Errors raised while the resolver FSM walks beacon signals and applies
 /// updates.
 ///
 /// Two kinds live here. Spec errors — the [`Btcr2Error`] pass-through and the
 /// two sentinels the walk raises itself — carry a problem-details body via
-/// [`ProblemDetails`]. Driver preconditions (`MissingBlockMediantime`) do not:
+/// [`ProblemDetails`]. Driver preconditions (`MissingBlockMediantime`,
+/// `MissingChainTip`) do not:
 /// they mean the caller driving the sans-I/O loop did not supply what a
 /// request asked for, which is a bug in the driver and not a statement about
 /// the DID, so they are deliberately not folded into the spec vocabulary.
@@ -46,6 +47,22 @@ pub enum Error {
         /// Hash of the block whose mediantime is missing.
         block_hash: BlockHash,
     },
+
+    /// A confirmed beacon signal was met but the caller supplied no chain
+    /// tip (`ResolutionOptions::chain_tip_height`), so the signal's
+    /// confirmations cannot be counted against `minConf`. A driver
+    /// precondition, not a spec error: the tip is the driver's to fetch, and
+    /// applying the signal unchecked would silently ignore the gate.
+    #[error(
+        "beacon signal {txid} confirmed at height {block_height} was met with no chain tip \
+         supplied, so its confirmations cannot be counted against minConf"
+    )]
+    MissingChainTip {
+        /// Transaction id of the confirmed beacon signal.
+        txid: Txid,
+        /// Height of the block that confirmed it.
+        block_height: u32,
+    },
 }
 
 /// Problem details for the spec-level outcomes of a walk; `None` for a driver
@@ -69,7 +86,7 @@ impl ProblemDetails for Error {
             .details(),
             // Pass-through: the inner spec error is already authoritative.
             Error::Btcr2Error(e) => e.details(),
-            Error::MissingBlockMediantime { .. } => None,
+            Error::MissingBlockMediantime { .. } | Error::MissingChainTip { .. } => None,
         }
     }
 }
@@ -85,9 +102,15 @@ pub struct Resolver<T = ()> {
     /// Replaces the old txid-keyed `signals_metadata` HashMap. The hot path is
     /// `update_lookup_table.get(&signal_bytes)`.
     update_lookup_table: HashMap<Sha256Hash, Update>,
-    /// Caller-supplied chain tip height for computing `confirmations`.
-    /// `None` => `DocumentMetadata.confirmations` is `None` (fail-closed).
+    /// Caller-supplied chain tip height, the basis for every confirmation
+    /// count: the `minConf` gate in `find_next_signals` and the terminal
+    /// `confirmations`. `None` => no confirmed signal can be processed
+    /// (`Error::MissingChainTip`) and `DocumentMetadata.confirmations` is
+    /// `None` (fail-closed).
     chain_tip_height: Option<u32>,
+    /// `resolutionOptions.minConf` (default 6): a signal with fewer
+    /// confirmations than this is skipped by `find_next_signals`.
+    min_conf: NonZeroU32,
     /// Block height of the MOST-RECENTLY-APPLIED unique update, the basis for
     /// `confirmations` (resolve.md:38,57). Overwritten on each unique apply; under
     /// the ascending (target_version_id, block_height) sort this ends as the
@@ -126,6 +149,9 @@ impl Resolver {
         }
         let target_condition = TargetCondition::from(&resolution_options);
         let chain_tip_height = resolution_options.chain_tip_height;
+        let min_conf = resolution_options
+            .min_conf
+            .unwrap_or(ResolutionOptions::DEFAULT_MIN_CONF);
         let rpc_host = esplora_base(resolution_options.esplora_url.as_deref())?;
         let update_lookup_table = match resolution_options.sidecar_data {
             Some(SidecarData {
@@ -142,6 +168,7 @@ impl Resolver {
             update_hash_history: vec![],
             update_lookup_table,
             chain_tip_height,
+            min_conf,
             applied_block_height: None,
             rpc_host,
             request_cache: HashSet::new(),
@@ -478,6 +505,24 @@ impl Resolver {
                     } => (block_time, block_height, block_hash),
                 };
 
+                // resolve.md "Find Beacon Signals": the transaction must have
+                // at least `minConf` confirmations (6 when not provided).
+                // Confirmations are `tip - height + 1` against the caller's
+                // tip; a tip behind the block (indexer lag) saturates to one.
+                // Fewer than `minConf` is skipped whether or not the sidecar
+                // holds the update — the same rule as an unconfirmed
+                // transaction — never an error: the signal is not yet part of
+                // the settled history. No tip at all is the driver's omission
+                // and is reported rather than guessed around.
+                let tip = self.chain_tip_height.ok_or(Error::MissingChainTip {
+                    txid: tx.txid,
+                    block_height,
+                })?;
+                let confirmations = tip.saturating_sub(block_height).saturating_add(1);
+                if confirmations < self.min_conf.get() {
+                    continue;
+                }
+
                 signals.push(NextSignal {
                     beacon_type,
                     signal_bytes,
@@ -594,6 +639,7 @@ impl<T> Resolver<T> {
             update_hash_history: self.update_hash_history,
             update_lookup_table: self.update_lookup_table,
             chain_tip_height: self.chain_tip_height,
+            min_conf: self.min_conf,
             applied_block_height: self.applied_block_height,
             rpc_host: self.rpc_host,
             request_cache: self.request_cache,
@@ -1986,7 +2032,7 @@ mod tests {
         // request *generation* in `next_signals_requests`). The resolver doc is
         // re-homed onto the regtest k1 qgpakaw4 vector purely so a valid resolver
         // exists.
-        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
+        let Some(mut resolver) = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP)) else {
             return;
         };
 
@@ -2095,7 +2141,7 @@ mod tests {
     /// is still extracted.
     #[test]
     fn malformed_op_return_tail_is_rejected_as_signal() {
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
+        let Some(resolver) = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP)) else {
             return;
         };
 
@@ -2170,12 +2216,20 @@ mod tests {
     /// resolver only ever formats request URIs from it; nothing is fetched.
     const TEST_ESPLORA_URL: &str = "http://esplora.test/api";
 
+    /// The chain tip every offline resolver test measures confirmations
+    /// against unless it pins its own. Far above every synthetic height (100
+    /// to 700) and above the regtest fixture heights (2.2 million), so under
+    /// the default `minConf` of six every confirmed signal in these tests is
+    /// settled; the tests OF the gate pin a tip of their own.
+    const TEST_CHAIN_TIP: u32 = 3_000_000;
+
     /// `ResolutionOptions` for an offline resolver test: the required Esplora
-    /// base filled in, everything else default. Tests spread their own fields
-    /// over it.
+    /// base and a settled chain tip filled in, everything else default. Tests
+    /// spread their own fields over it.
     fn test_options() -> ResolutionOptions {
         ResolutionOptions {
             esplora_url: Some(TEST_ESPLORA_URL.to_string()),
+            chain_tip_height: Some(TEST_CHAIN_TIP),
             ..Default::default()
         }
     }
@@ -3536,6 +3590,129 @@ mod tests {
         );
     }
 
+    /// The `minConf` boundary, with the default of six: a signal at height
+    /// 100 has five confirmations against tip 104 and is skipped (the walk
+    /// resolves to version 1, and skipping a NEEDED signal is not an error),
+    /// and six against tip 105, at which it applies.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals" (at
+    /// least `resolutionOptions.minConf` confirmations, 6 when not provided).
+    #[test]
+    fn signal_below_min_conf_is_skipped_and_at_min_conf_applies() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let announced_at = 100;
+
+        for (tip, expected_version) in [(104, 1), (105, 2)] {
+            let tx = confirmed_signal_tx(update1.hash(), announced_at, 1_700_000_000, 0xc5);
+            let sidecar = SidecarData::new(None, vec![update1.clone()], None, None);
+            let options = ResolutionOptions {
+                sidecar_data: Some(sidecar),
+                chain_tip_height: Some(tip),
+                min_conf: None,
+                ..test_options()
+            };
+            let resolver = Resolver::new(initial.clone(), options).expect("the options are valid");
+            assert_eq!(
+                resolver.min_conf,
+                ResolutionOptions::DEFAULT_MIN_CONF,
+                "no minConf supplied is the default of six"
+            );
+            let result = try_drive_to_resolved(resolver, vec![tx])
+                .expect("a signal short of minConf is skipped, never an error");
+            assert_eq!(
+                u64::from(result.document_metadata.version_id),
+                expected_version,
+                "tip {tip}: {} confirmations against minConf 6",
+                tip - announced_at + 1
+            );
+        }
+    }
+
+    /// `minConf: 1` applies a signal in the tip block itself (one
+    /// confirmation), which the default would skip. The same chain, the same
+    /// tip; only the option differs.
+    #[test]
+    fn min_conf_one_applies_a_one_confirmation_signal() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let tip = 100;
+
+        for (min_conf, expected_version) in [(None, 1), (Some(NonZeroU32::MIN), 2)] {
+            let tx = confirmed_signal_tx(update1.hash(), tip, 1_700_000_000, 0xc6);
+            let sidecar = SidecarData::new(None, vec![update1.clone()], None, None);
+            let options = ResolutionOptions {
+                sidecar_data: Some(sidecar),
+                chain_tip_height: Some(tip),
+                min_conf,
+                ..test_options()
+            };
+            let resolver = Resolver::new(initial.clone(), options).expect("the options are valid");
+            let result = drive_to_resolved(resolver, vec![tx]);
+            assert_eq!(
+                u64::from(result.document_metadata.version_id),
+                expected_version,
+                "minConf {min_conf:?}: a one-confirmation signal"
+            );
+            if expected_version == 2 {
+                assert_eq!(
+                    result.document_metadata.confirmations,
+                    Some(1),
+                    "the applied signal sits in the tip block"
+                );
+            }
+        }
+    }
+
+    /// A confirmed signal met with no chain tip is a typed driver error
+    /// naming the transaction and its height — not an apply, not a skip: the
+    /// gate cannot be evaluated and the resolver does not guess. It carries
+    /// no spec problem-details body, because it is not a resolution result.
+    #[test]
+    fn confirmed_signal_without_chain_tip_is_a_driver_error() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let tx = confirmed_signal_tx(update1.hash(), 100, 1_700_000_000, 0xc7);
+        let expected_txid = tx.txid;
+        let sidecar = SidecarData::new(None, vec![update1], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: None,
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+
+        let err = try_drive_to_resolved(resolver, vec![tx])
+            .expect_err("a confirmed signal with no tip to count against must not resolve");
+        match &err {
+            Error::MissingChainTip { txid, block_height } => {
+                assert_eq!(*txid, expected_txid);
+                assert_eq!(*block_height, 100);
+            }
+            other => panic!("expected MissingChainTip, got {other:?}"),
+        }
+        assert!(
+            err.details().is_none(),
+            "a missing tip is a driver error with no spec code"
+        );
+    }
+
+    /// With no chain tip a walk that meets no confirmed signal still resolves
+    /// (the genesis document, `confirmations: None`): the tip is required to
+    /// count a signal, not to start.
+    #[test]
+    fn no_signals_resolve_without_a_chain_tip() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let pending = unconfirmed_signal_tx(update1.hash(), 0xc8);
+        let sidecar = SidecarData::new(None, vec![update1], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: None,
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let result = drive_to_resolved(resolver, vec![pending]);
+        assert_eq!(u64::from(result.document_metadata.version_id), 1);
+        assert_eq!(result.document_metadata.confirmations, None);
+    }
+
     /// `confirmations` derives from the MOST-RECENTLY-APPLIED unique
     /// update's block height, not the running min across distinct updates. Two
     /// distinct updates apply at heights 100 (v2) then 200 (v3); with chain tip
@@ -3734,6 +3911,13 @@ mod tests {
             ResolutionOptions {
                 sidecar_data: Some(sidecar),
                 chain_tip_height: Some(f.tip_height),
+                // The committed capture predates the mint tool's settlement
+                // step: its tip is the block of the last announcement, so
+                // that signal has ONE confirmation. Pinned to one until the
+                // scenario is re-minted with the tip settled five blocks past
+                // the last announcement, after which this line goes and the
+                // replay runs under the default of six.
+                min_conf: Some(NonZeroU32::MIN),
                 version_id,
                 version_time,
                 ..test_options()
@@ -4062,6 +4246,11 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height: Some(f.tip_height),
+            // See `minted_chain_sequences_updates_across_rotating_beacons`:
+            // the committed capture's tip is the last announcement's block, so
+            // `minConf` is pinned to one until the scenario is re-minted with
+            // the tip settled past it.
+            min_conf: Some(NonZeroU32::MIN),
             ..test_options()
         };
         let resolver = Document::resolve(&did, options)

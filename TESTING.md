@@ -396,6 +396,22 @@ The three mutinynet captures share tip 3307267 and all announce at height
 confirmations by provenance — derived from the most-recently-applied update's
 captured block — rather than against a stated number.
 
+### `minConf` and the minted captures
+
+The resolver processes a beacon signal only once it has
+`resolutionOptions.minConf` confirmations — six by default — measured as
+`tip - signal_height + 1` against the tip the fixture pins. Every vendor capture
+clears that by a wide margin. The two minted captures do not: they were taken
+with the tip **in the block of the last announcement** (764 and 768), so that
+signal has one confirmation and the walk under the default would stop short.
+Their replay tests therefore pin `min_conf: 1`, with a comment saying so, until
+the scenarios are re-minted. The mint tool now settles the chain
+`SETTLEMENT_BLOCKS` (5) past the last announcement before it captures, so a
+re-mint records tips 769 and 773, the last signal has exactly six confirmations,
+and the `min_conf: 1` pins come out of `minted_chain_sequences_updates_across_rotating_beacons`
+and `minted_fork_raises_late_publishing`. Re-mint with the Part 3 commands in
+[crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
+
 To re-capture, see [crates/chain-capture/README.md](./crates/chain-capture/README.md)
 and [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
 

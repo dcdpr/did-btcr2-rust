@@ -48,7 +48,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
@@ -84,6 +84,19 @@ pub const CLEAN_SCENARIO: &str = "clean-rotating-beacons";
 /// The scenario that publishes two conflicting version 2 announcements, so the
 /// resolver's refusal to resolve them is a fact about a real chain.
 pub const FORK_SCENARIO: &str = "late-publishing-fork";
+
+/// Confirmations a resolve INSIDE a session requires of the announcement it
+/// has just seen confirmed: one, because the session produces (or waits for)
+/// exactly one block per step and the point of the resolve is to prove that
+/// block carries the announcement. The resolver's default of six is what the
+/// emitted fixture is resolved under, after the chain has been settled.
+const IN_SESSION_MIN_CONF: NonZeroU32 = NonZeroU32::MIN;
+
+/// Blocks the chain is settled past the last announcement before its fixture
+/// is captured, so the last announcement has six confirmations — the
+/// resolver's default `minConf` — and the fixture replays under it. Five on
+/// top of the announcement's own block.
+pub const SETTLEMENT_BLOCKS: u32 = 5;
 
 /// How much each announcing beacon is funded above the announcement fee.
 ///
@@ -337,6 +350,10 @@ pub enum MintError {
 
     /// A core `did:btcr2` operation failed.
     Btcr2(#[from] did_btcr2::error::Btcr2Error),
+
+    /// A settlement was asked for with no confirmed step to settle past.
+    #[error("nothing to settle: the state file records no confirmed step")]
+    NothingToSettle,
 
     /// The chain named on the command line is not one this crate models.
     Target(#[from] targets::TargetError),
@@ -928,9 +945,17 @@ fn confirm_step(
 /// interrupted run are gone. It is also the same assembly the capture path and
 /// the replay driver use, so a scenario is proved against the code path its
 /// fixture will later be replayed through.
-fn options_for(updates: &[Value]) -> Result<ResolutionOptions, MintError> {
+///
+/// `min_conf` is [`IN_SESSION_MIN_CONF`] for the resolves a session makes
+/// between steps and `None` (the resolver's default) for the resolve a fixture
+/// is emitted from, which runs after the chain has been settled.
+fn options_for(
+    updates: &[Value],
+    min_conf: Option<NonZeroU32>,
+) -> Result<ResolutionOptions, MintError> {
     Ok(ResolutionOptions {
         sidecar_data: Some(SidecarData::from_json_value(json!({ "updates": updates }))?),
+        min_conf,
         ..Default::default()
     })
 }
@@ -1245,9 +1270,10 @@ impl<T: BtcTransport> MintSession<'_, T> {
         step: &ScenarioStep,
     ) -> Result<ResolutionResult, MintError> {
         let expected = confirmed_version_id(state).unwrap_or(step.target_version_id);
-        let result = self
-            .client
-            .resolve(did, options_for(&recorded_updates(state))?)?;
+        let result = self.client.resolve(
+            did,
+            options_for(&recorded_updates(state), Some(IN_SESSION_MIN_CONF))?,
+        )?;
         let got = result.document_metadata.version_id.get();
         if got < expected {
             return Err(MintError::StepDidNotLand {
@@ -1257,6 +1283,30 @@ impl<T: BtcTransport> MintSession<'_, T> {
             });
         }
         Ok(result)
+    }
+
+    /// Settle the chain [`SETTLEMENT_BLOCKS`] past the last confirmed step, so
+    /// the last announcement has the resolver's default `minConf` worth of
+    /// confirmations by the time the fixture is captured.
+    ///
+    /// Runs after the scenario's last step and again on every re-run of a
+    /// completed session; [`ChainOps::settle`] leaves a tip that is already
+    /// past the target alone, so the re-run moves nothing.
+    fn settle(&self, state: &MintState) -> Result<(), MintError> {
+        let last = state
+            .steps
+            .iter()
+            .filter(|step| step.is_confirmed())
+            .map(|step| step.block_height)
+            .max()
+            .ok_or(MintError::NothingToSettle)?;
+        let target = last + SETTLEMENT_BLOCKS;
+        let tip = self.ops.settle(target)?;
+        eprintln!(
+            "  settled: tip {tip}, {} block(s) past the last announcement at {last}",
+            tip - last
+        );
+        Ok(())
     }
 }
 
@@ -1373,6 +1423,7 @@ pub fn mint_clean<T: BtcTransport>(
         contemporary = result.document.clone();
         latest = Some(result);
     }
+    session.settle(state)?;
 
     // The on-chain deactivation is a coverage goal of this scenario, not a
     // side-effect of its last patch: a scenario that ended active would let a
@@ -1524,12 +1575,15 @@ fn is_late_publishing(error: &did_btcr2_client::Error) -> bool {
 ///
 /// A scenario minted to carry an anomaly that then resolves cleanly is worse than
 /// no scenario at all: a replay test built on it would assert nothing.
+///
+/// Resolved under the resolver's default `minConf`, after the chain has been
+/// settled, so what is proved here is what the fixture's replay will see.
 fn prove_late_publishing<T: BtcTransport>(
     client: &Client<T>,
     did: &Did,
     state: &MintState,
 ) -> Result<(), MintError> {
-    match client.resolve(did, options_for(&recorded_updates(state))?) {
+    match client.resolve(did, options_for(&recorded_updates(state), None)?) {
         Ok(result) => Err(MintError::AnomalyResolvedCleanly {
             version: result.document_metadata.version_id.get(),
         }),
@@ -1588,6 +1642,7 @@ pub fn mint_fork<T: BtcTransport>(
     }
 
     require_distinct_heights(state)?;
+    session.settle(state)?;
     prove_late_publishing(session.client, &did, state)?;
     eprintln!(
         "{FORK_SCENARIO} complete: {} carries two conflicting version 2 announcements and no longer resolves",
@@ -1820,8 +1875,11 @@ fn emit_minted_in<T: BtcTransport>(
 
     // No `chain_tip_height` is supplied: the client fetches `/blocks/tip/height`
     // itself and the recorder captures whatever the chain reported, so the tip in
-    // the fixture is the chain's own number and never one this tool chose.
-    let options = options_for(&recorded_updates(state))?;
+    // the fixture is the chain's own number and never one this tool chose. No
+    // `min_conf` either: the scenario settled the chain past its last
+    // announcement, and resolving under the resolver's default here is what
+    // proves the fixture replays under it.
+    let options = options_for(&recorded_updates(state), None)?;
     let expected = expectation_of(&client, &did, state, options)?;
 
     let recorded = recording.borrow();
@@ -1974,6 +2032,10 @@ mod tests {
     struct FakeOps {
         network: String,
         mines_on_demand: bool,
+        /// The in-memory Esplora a `settle` moves the tip of, when the test
+        /// drives a session against one. `None` records the call and moves
+        /// nothing.
+        chain: Option<FakeEsplora>,
         /// Every call, in order.
         calls: RefCell<Vec<String>>,
         /// `(height, time)` for the next confirmations, in order. Once it runs
@@ -1992,6 +2054,7 @@ mod tests {
             Self {
                 network: "regtest".to_string(),
                 mines_on_demand: true,
+                chain: None,
                 calls: RefCell::new(Vec::new()),
                 scripted: RefCell::new(VecDeque::new()),
                 next_height: RefCell::new(760),
@@ -2015,6 +2078,14 @@ mod tests {
         /// what makes the step resumable rather than lost.
         fn giving_up_after(self, successes: usize) -> Self {
             *self.waits_before_giving_up.borrow_mut() = Some(successes);
+            self
+        }
+
+        /// Let `settle` move the tip of the in-memory Esplora the session's
+        /// client reads, the way the regtest backend's mining moves the real
+        /// one.
+        fn backed_by(mut self, chain: &FakeEsplora) -> Self {
+            self.chain = Some(chain.clone());
             self
         }
 
@@ -2069,6 +2140,14 @@ mod tests {
             let confirmed = (*height, 1_700_000_000 + i64::from(*height));
             *height += 1;
             Ok(confirmed)
+        }
+
+        fn settle(&self, height: u32) -> Result<u32, ChainError> {
+            self.calls.borrow_mut().push(format!("settle {height}"));
+            match &self.chain {
+                Some(chain) => Ok(chain.settle_to(height)),
+                None => Ok(height),
+            }
         }
     }
 
@@ -2157,6 +2236,20 @@ mod tests {
                 data.next_height = first_height;
             }
             fake
+        }
+
+        /// Move the tip to at least `height` — empty blocks, nothing confirms
+        /// — and report it, the way the regtest backend's settlement does.
+        fn settle_to(&self, height: u32) -> u32 {
+            let mut data = self.inner.borrow_mut();
+            data.tip = data.tip.max(height);
+            data.next_height = data.next_height.max(data.tip + 1);
+            data.tip
+        }
+
+        /// The tip as the chain reports it.
+        fn tip(&self) -> u32 {
+            self.inner.borrow().tip
         }
 
         /// Give `address` a confirmed output to announce from.
@@ -4195,7 +4288,7 @@ mod tests {
         // so nothing exercised it. Driving a scenario and then emitting from the
         // state file it left is the whole production path, offline.
         let driven = DrivenSession::new("clean-emit", CLEAN_SCENARIO, &CLEAN_STEPS);
-        let ops = FakeOps::on_demand();
+        let ops = FakeOps::on_demand().backed_by(&driven.chain);
         let mut state = driven.state_clone();
         mint_clean(
             &driven.session(&ops, &always_yes),
@@ -4204,6 +4297,12 @@ mod tests {
             Network::Regtest,
         )
         .expect("a fresh clean session runs to completion");
+        assert_eq!(
+            ops.calls().last().map(String::as_str),
+            Some("settle 767"),
+            "the scenario ends by settling the chain five blocks past its last              announcement (762): {:?}",
+            ops.calls()
+        );
 
         let root = scratch_dir("clean-emit-fixtures");
         let path = emit_minted_in(&root, &driven.persisted(), driven.chain.clone())
@@ -4236,9 +4335,22 @@ mod tests {
             "and the expectation that replay asserts against"
         );
         assert_eq!(
-            written.tip_height, 762,
-            "the tip is the chain's own number — the block the last announcement \
-             confirmed in — captured by the recorder rather than chosen by this tool"
+            written.tip_height, 767,
+            "the tip is the chain's own number — five blocks past the block the last \
+             announcement confirmed in — captured by the recorder rather than chosen \
+             by this tool"
+        );
+        let last_height = written
+            .signals
+            .iter()
+            .map(|signal| signal.block_height)
+            .max()
+            .expect("three signals");
+        assert_eq!(
+            written.tip_height - last_height + 1,
+            ResolutionOptions::DEFAULT_MIN_CONF.get(),
+            "the last announcement has exactly the resolver's default minConf worth of \
+             confirmations, so the fixture replays without lowering it"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -4757,7 +4869,7 @@ mod tests {
     #[test]
     fn a_fresh_fork_session_publishes_two_conflicting_version_twos_from_one_beacon() {
         let driven = DrivenSession::new("fork-fresh", FORK_SCENARIO, &FORK_STEPS);
-        let ops = FakeOps::on_demand();
+        let ops = FakeOps::on_demand().backed_by(&driven.chain);
         let mut state = driven.state_clone();
 
         mint_fork(
@@ -4766,6 +4878,11 @@ mod tests {
             &driven.genesis,
         )
         .expect("a fresh fork session reaches the late-publishing anomaly");
+        assert_eq!(
+            driven.chain.tip(),
+            761 + SETTLEMENT_BLOCKS,
+            "the fork is settled past its second branch (761) before it is proved"
+        );
 
         let persisted = driven.persisted();
         assert_eq!(
@@ -4794,6 +4911,36 @@ mod tests {
             addresses.len(),
             1,
             "both branches announce from the SAME beacon: {announced:?}"
+        );
+
+        driven.cleanup();
+    }
+
+    #[test]
+    fn a_fork_proved_before_the_chain_settled_is_refused() {
+        // The proof runs under the resolver's default minConf. Against a chain
+        // whose tip is still the second branch's block, both announcements are
+        // short of it, the resolve reports the genesis version, and the session
+        // refuses rather than writing a fixture the replay could not reproduce.
+        let driven = DrivenSession::new("fork-unsettled", FORK_SCENARIO, &FORK_STEPS);
+        let ops = FakeOps::on_demand();
+        let mut state = driven.state_clone();
+
+        let error = mint_fork(
+            &driven.session(&ops, &always_yes),
+            &mut state,
+            &driven.genesis,
+        )
+        .expect_err("an unsettled fork does not prove its anomaly");
+        assert!(
+            matches!(error, MintError::AnomalyResolvedCleanly { version: 1 }),
+            "got {error:?}"
+        );
+        assert_eq!(
+            ops.calls().last().map(String::as_str),
+            Some("settle 766"),
+            "settlement was asked for: {:?}",
+            ops.calls()
         );
 
         driven.cleanup();
