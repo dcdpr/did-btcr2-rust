@@ -22,26 +22,32 @@ pub enum Btcr2Error {
     // Errors from DID Resolution Spec
     //
     /// An invalid DID was detected during DID Resolution.
+    #[error("An invalid DID was detected during DID Resolution: {0}")]
     InvalidDid(String),
 
     /// The DID document was malformed.
+    #[error("The DID document was malformed: {0}")]
     InvalidDidDocument(String),
 
     /// The Genesis Document could not be retrieved.
+    #[error("The Genesis Document could not be retrieved: {0}")]
     NotFound(String),
 
     /// One or more resolution options are invalid: `versionId` and
     /// `versionTime` supplied together (DID Resolution defines them as
     /// mutually exclusive), or a caller-supplied option that cannot be used
     /// as given.
+    #[error("One or more resolution options are invalid: {0}")]
     InvalidOptions(String),
 
     // Errors from DID BTCR2 Spec
     //
     /// Sidecar data was invalid
+    #[error("Sidecar data was invalid: {0}")]
     InvalidSidecarData(String),
 
     /// Update payload was published late
+    #[error("Update payload was published late: {0}")]
     LatePublishingError(String),
 
     /// Update payload could not be located in either the supplied sidecar
@@ -49,26 +55,34 @@ pub enum Btcr2Error {
     //
     // Spec reference: did-btcr2/src/errors.md:21-23. Added for exactly this
     // variant; the other non-spec error variants are handled separately.
+    #[error(
+        "Update payload could not be located in the sidecar data or CAS: update_hash={update_hash:?}"
+    )]
     MissingUpdateData {
         /// JSON Document Hash of the update payload that could not be located.
         update_hash: Sha256Hash,
     },
 
     /// Invalid Update Proof
+    #[error("Invalid Update Proof: {0}")]
     InvalidUpdateProof(String),
 
     /// Problems when creating or applying a DID Update
+    #[error("Problems when creating or applying a DID Update: {0}")]
     InvalidDidUpdate(String),
 
     // Errors from Verifiable Credentials Data Integrity Spec
     //
     /// Proof verification error
+    #[error("Proof verification error: {0}")]
     ProofVerification(String),
 
     /// Proof transformation error
+    #[error("Proof transformation error: {0}")]
     ProofTransformation(String),
 
     /// Proof generation error
+    #[error("Proof generation error: {0}")]
     ProofGeneration(String),
 
     /// A subject-controlled beacon/CAS path (CAS Map / Sparse Merkle Tree)
@@ -81,10 +95,34 @@ pub enum Btcr2Error {
     // The problem-details code is provisional and subject to a later
     // error-vocabulary audit, which replaces these arms with real
     // implementations and may keep or rename this variant and its code.
+    #[error("Not yet implemented: {0}")]
     Unsupported(String),
 }
 
 impl Btcr2Error {
+    /// The fixed, per-variant summary: the problem-details `title` (RFC 9457
+    /// — the same for every occurrence of a type) and the leading clause of
+    /// `Display`, which appends the occurrence's detail after a colon.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::InvalidDid(_) => "An invalid DID was detected during DID Resolution",
+            Self::InvalidDidDocument(_) => "The DID document was malformed",
+            Self::NotFound(_) => "The Genesis Document could not be retrieved",
+            Self::InvalidOptions(_) => "One or more resolution options are invalid",
+            Self::InvalidSidecarData(_) => "Sidecar data was invalid",
+            Self::LatePublishingError(_) => "Update payload was published late",
+            Self::MissingUpdateData { .. } => {
+                "Update payload could not be located in the sidecar data or CAS"
+            }
+            Self::InvalidUpdateProof(_) => "Invalid Update Proof",
+            Self::InvalidDidUpdate(_) => "Problems when creating or applying a DID Update",
+            Self::ProofVerification(_) => "Proof verification error",
+            Self::ProofTransformation(_) => "Proof transformation error",
+            Self::ProofGeneration(_) => "Proof generation error",
+            Self::Unsupported(_) => "Not yet implemented",
+        }
+    }
+
     pub(crate) fn late_publishing(found_hash: Sha256Hash, expected_hash: Sha256Hash) -> Self {
         Self::LatePublishingError(format!(
             "Found hash `{}`, expected `{}`",
@@ -138,7 +176,7 @@ impl ProblemDetails for Btcr2Error {
 
         Some(json!({
             "type": format!("{prefix}#{name}"),
-            "title": self.to_string(),
+            "title": self.title(),
             "detail": match self {
                 Self::InvalidDid(detail) => detail.clone(),
                 Self::InvalidDidDocument(detail) => detail.clone(),
@@ -196,18 +234,65 @@ mod tests {
         assert_eq!(details["detail"], message);
         assert_eq!(
             details["title"],
-            "The Genesis Document could not be retrieved."
+            "The Genesis Document could not be retrieved"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("The Genesis Document could not be retrieved: {message}"),
+            "Display carries the occurrence detail after the fixed title"
         );
     }
 
+    /// Every variant's `Display` opens with its fixed `title()` and carries
+    /// the occurrence's detail after it: an error chain printed with
+    /// `Display` names what went wrong, not only which kind of thing did.
+    /// The problem-details `title` stays the fixed summary (RFC 9457), never
+    /// the occurrence text.
+    #[test]
+    fn display_is_title_then_detail_for_every_variant() {
+        let detail = "the specific thing that went wrong";
+        let variants = [
+            Btcr2Error::InvalidDid(detail.into()),
+            Btcr2Error::InvalidDidDocument(detail.into()),
+            Btcr2Error::NotFound(detail.into()),
+            Btcr2Error::InvalidOptions(detail.into()),
+            Btcr2Error::InvalidSidecarData(detail.into()),
+            Btcr2Error::LatePublishingError(detail.into()),
+            Btcr2Error::InvalidUpdateProof(detail.into()),
+            Btcr2Error::InvalidDidUpdate(detail.into()),
+            Btcr2Error::ProofVerification(detail.into()),
+            Btcr2Error::ProofTransformation(detail.into()),
+            Btcr2Error::ProofGeneration(detail.into()),
+            Btcr2Error::Unsupported(detail.into()),
+        ];
+        for err in &variants {
+            assert_eq!(
+                err.to_string(),
+                format!("{}: {detail}", err.title()),
+                "{err:?}"
+            );
+            let d = err.details().expect("every variant yields problem details");
+            assert_eq!(d["title"], err.title(), "{err:?}");
+            assert_eq!(d["detail"], detail, "{err:?}");
+        }
+        let err = Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash::from([0u8; 32]),
+        };
+        assert!(
+            err.to_string().starts_with(&format!("{}: ", err.title())),
+            "{err}"
+        );
+        assert_eq!(err.details().expect("details")["title"], err.title());
+    }
+
     /// `InvalidDid` carries the W3C `did` namespace prefix, the `INVALID_DID`
-    /// code, a Display-wired `title`, and the plain carried detail string.
+    /// code, a fixed `title`, and the plain carried detail string.
     #[test]
     fn invalid_did_problem_details_shape() {
         let err = Btcr2Error::InvalidDid("bad did".into());
         let d = err.details().expect("InvalidDid yields problem details");
         assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_DID");
-        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["title"], err.title());
         assert_eq!(d["detail"], "bad did");
     }
 
@@ -221,7 +306,7 @@ mod tests {
             .details()
             .expect("InvalidOptions yields problem details");
         assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_OPTIONS");
-        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["title"], err.title());
         assert_eq!(d["detail"], "versionId and versionTime together");
     }
 
@@ -234,7 +319,7 @@ mod tests {
             .details()
             .expect("InvalidDidDocument yields problem details");
         assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_DID_DOCUMENT");
-        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["title"], err.title());
         assert_eq!(d["detail"], "bad doc");
     }
 
@@ -254,7 +339,7 @@ mod tests {
             d["type"],
             "https://btcr2.dev/context/v1#MISSING_UPDATE_DATA"
         );
-        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["title"], err.title());
         // detail is the formatted hex of the 32-byte hash (all-zero here).
         assert_eq!(
             d["detail"],
