@@ -886,7 +886,7 @@ impl Document {
     pub fn resolve(did: &Did, resolution_options: ResolutionOptions) -> Result<Resolver, Error> {
         let initial_document = InitialDocument::from_did(did, &resolution_options)?;
 
-        Ok(Resolver::new(initial_document, resolution_options))
+        Ok(Resolver::new(initial_document, resolution_options)?)
     }
 
     /// Build the unsigned BTCR2 update for `patch` against this document,
@@ -3081,7 +3081,8 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial.clone(), resolution_options);
+        let resolver =
+            Resolver::new(initial.clone(), resolution_options).expect("the options are valid");
 
         // Drive the FSM: Init -> feed the bridged tx on the matching beacon ->
         // resolve. The beacon the signal arrives on must be the one we announced
@@ -3203,7 +3204,8 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(genesis.clone(), resolution_options);
+        let resolver =
+            Resolver::new(genesis.clone(), resolution_options).expect("the options are valid");
 
         let ResolverState::Requests(next_state, _requests) = resolver
             .resolve()
@@ -3313,7 +3315,8 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(genesis.clone(), resolution_options);
+        let resolver =
+            Resolver::new(genesis.clone(), resolution_options).expect("the options are valid");
 
         let ResolverState::Requests(next_state, _requests) = resolver
             .resolve()

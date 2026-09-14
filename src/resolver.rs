@@ -123,7 +123,20 @@ pub struct Resolver<T = ()> {
 
 impl Resolver {
     // TODO: Why do you have `InitialDocument` here and in `resolution_options.sidecar_data`?
-    pub(crate) fn new(initial_doc: InitialDocument, resolution_options: ResolutionOptions) -> Self {
+    /// Build a resolver over `initial_doc` with the caller's options.
+    ///
+    /// `INVALID_OPTIONS` when `versionId` and `versionTime` are both set:
+    /// DID Resolution defines them as mutually exclusive and resolve.md
+    /// raises the error before any beacon is read.
+    pub(crate) fn new(
+        initial_doc: InitialDocument,
+        resolution_options: ResolutionOptions,
+    ) -> Result<Self, Btcr2Error> {
+        if resolution_options.version_id.is_some() && resolution_options.version_time.is_some() {
+            return Err(Btcr2Error::InvalidOptions(
+                "versionId and versionTime are mutually exclusive; supply at most one".into(),
+            ));
+        }
         let target_condition = TargetCondition::from(&resolution_options);
         let chain_tip_height = resolution_options.chain_tip_height;
         let rpc_host = resolution_options
@@ -137,7 +150,7 @@ impl Resolver {
             None => HashMap::new(),
         };
 
-        Self {
+        Ok(Self {
             contemporary_doc: initial_doc,
             current_version_id: NonZeroU64::MIN,
             target_condition,
@@ -150,7 +163,7 @@ impl Resolver {
             block_mediantimes: HashMap::new(),
             fsm: ResolverFsm::Init,
             _type_state: (),
-        }
+        })
     }
 
     fn from_waiting_for_responses(resolver: Resolver<WaitingForResponses>) -> Self {
@@ -2111,7 +2124,7 @@ mod tests {
             chain_tip_height,
             ..Default::default()
         };
-        Some(Resolver::new(initial_document, resolution_options))
+        Some(Resolver::new(initial_document, resolution_options).expect("the options are valid"))
     }
 
     /// The DID of the regtest k1 qgpakaw4 vector that `resolver_with` /
@@ -2149,7 +2162,7 @@ mod tests {
         let did_document = resolve_output["didDocument"].to_string();
         let initial_document = InitialDocument::from_json_string(&did_document)
             .expect("regtest k1 qgpakaw4 resolved didDocument parses");
-        Some(Resolver::new(initial_document, resolution_options))
+        Some(Resolver::new(initial_document, resolution_options).expect("the options are valid"))
     }
 
     /// `ResolutionOptions.esplora_url = Some(url)` overrides the resolver's
@@ -2178,6 +2191,82 @@ mod tests {
             return;
         };
         assert_eq!(resolver.rpc_host, DEFAULT_RPC_BASE_URL);
+    }
+
+    /// `versionId` and `versionTime` together are `INVALID_OPTIONS`, raised
+    /// by `Resolver::new` before any beacon request is built; either one on
+    /// its own is accepted. Pure construction, fully offline.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Process" (raise
+    /// `INVALID_OPTIONS` if both are provided; DID Resolution defines them as
+    /// mutually exclusive).
+    #[test]
+    fn version_id_and_version_time_together_are_invalid_options() {
+        use crate::error::ProblemDetails as _;
+
+        let (_did, initial) = chain_initial_document();
+        let err = Resolver::new(
+            initial.clone(),
+            ResolutionOptions {
+                version_id: Some(NonZeroU64::new(2).expect("2 is non-zero")),
+                version_time: Some(ts(1_700_000_000)),
+                ..Default::default()
+            },
+        )
+        .expect_err("versionId and versionTime together must be rejected");
+        let Btcr2Error::InvalidOptions(detail) = &err else {
+            panic!("expected InvalidOptions, got {err:?}");
+        };
+        assert!(
+            detail.contains("versionId") && detail.contains("versionTime"),
+            "the detail names both options: {detail}"
+        );
+        assert_eq!(
+            err.details()
+                .expect("InvalidOptions yields problem details")["type"],
+            "https://www.w3.org/ns/did#INVALID_OPTIONS"
+        );
+
+        // Each option alone is a valid resolution.
+        Resolver::new(
+            initial.clone(),
+            ResolutionOptions {
+                version_id: Some(NonZeroU64::new(2).expect("2 is non-zero")),
+                ..Default::default()
+            },
+        )
+        .expect("versionId alone is valid");
+        Resolver::new(
+            initial,
+            ResolutionOptions {
+                version_time: Some(ts(1_700_000_000)),
+                ..Default::default()
+            },
+        )
+        .expect("versionTime alone is valid");
+    }
+
+    /// The same rejection reaches a `Document::resolve` caller as the
+    /// document-level error wrapping `INVALID_OPTIONS`.
+    #[test]
+    fn document_resolve_surfaces_invalid_options() {
+        let (did, _initial) = chain_initial_document();
+        let err = Document::resolve(
+            &did,
+            ResolutionOptions {
+                version_id: Some(NonZeroU64::MIN),
+                version_time: Some(ts(1_700_000_000)),
+                ..Default::default()
+            },
+        )
+        .expect_err("versionId and versionTime together must be rejected");
+        assert!(
+            matches!(
+                err,
+                crate::document::Error::Btcr2Error(Btcr2Error::InvalidOptions(_))
+            ),
+            "expected InvalidOptions, got {err:?}"
+        );
     }
 
     /// A spec-form sidecar JSON deserializes into `SidecarData`;
@@ -2625,7 +2714,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         assert!(
             resolver.block_mediantimes.is_empty(),
             "a fresh resolver holds no block mediantimes"
@@ -2909,7 +2998,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         assert!(resolver.block_mediantimes.is_empty());
 
         let result = drive_to_resolved(resolver, vec![tx1, tx2]);
@@ -3191,7 +3280,7 @@ mod tests {
             version_time: Some(ts(version_time)),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
 
         assert_eq!(
@@ -3229,7 +3318,7 @@ mod tests {
             version_time: Some(ts(version_time)),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_v2, tx_v2_dup, tx_v3]);
 
         assert_eq!(
@@ -3261,7 +3350,7 @@ mod tests {
             version_time: None,
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         assert!(
             matches!(resolver.target_condition, TargetCondition::Latest),
             "no versionId and no versionTime is the unbounded walk"
@@ -3295,7 +3384,7 @@ mod tests {
             chain_tip_height: Some(300),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_v2, tx_v3]);
 
         assert_eq!(
@@ -3339,7 +3428,7 @@ mod tests {
             chain_tip_height: Some(300),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved(resolver, vec![tx_low, tx_high]);
 
         assert_eq!(
@@ -3397,7 +3486,7 @@ mod tests {
             chain_tip_height: Some(300),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let err = try_drive_to_resolved(resolver, vec![tx])
             .expect_err("a sourceHash mismatch must reject the update");
         match err {
@@ -4163,7 +4252,8 @@ mod tests {
                 .collect(),
         );
 
-        let resolver = Resolver::new(initial, ResolutionOptions::default());
+        let resolver =
+            Resolver::new(initial, ResolutionOptions::default()).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/all-empty");
 
         let result = result.expect("a capture with no signals resolves to the genesis document");
@@ -4199,7 +4289,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let result = drive_to_resolved_from_capture(resolver, &fixture, "test/two-beacons")
             .expect("both announcements apply");
 
@@ -4230,7 +4320,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/rotation");
 
         let result = result.expect("the rotation resolves");
@@ -4270,7 +4360,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let _ = drive_capture_rounds(resolver, &fixture, "minted/late-publishing-fork");
     }
 
@@ -4288,7 +4378,8 @@ mod tests {
         ]);
 
         // No sidecar: the announced update hash resolves to no update data.
-        let resolver = Resolver::new(initial, ResolutionOptions::default());
+        let resolver =
+            Resolver::new(initial, ResolutionOptions::default()).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/missing-update");
 
         let err = result.expect_err("an announcement with no update data must error");
@@ -4325,7 +4416,7 @@ mod tests {
             sidecar_data: Some(sidecar),
             ..Default::default()
         };
-        let resolver = Resolver::new(initial, options);
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
         let _ = drive_capture_within(resolver, &fixture, "test/rotation", 1);
     }
 
@@ -4341,7 +4432,8 @@ mod tests {
                 .collect(),
         );
 
-        let resolver = Resolver::new(initial, ResolutionOptions::default());
+        let resolver =
+            Resolver::new(initial, ResolutionOptions::default()).expect("the options are valid");
         let result = drive_to_resolved_from_capture(resolver, &fixture, "test/all-empty")
             .expect("a capture with no signals resolves");
         assert_eq!(u64::from(result.document_metadata.version_id), 1);

@@ -30,6 +30,12 @@ pub enum Btcr2Error {
     /// The Genesis Document could not be retrieved.
     NotFound(String),
 
+    /// One or more resolution options are invalid: `versionId` and
+    /// `versionTime` supplied together (DID Resolution defines them as
+    /// mutually exclusive), or a caller-supplied option that cannot be used
+    /// as given.
+    InvalidOptions(String),
+
     // Errors from DID BTCR2 Spec
     //
     /// Sidecar data was invalid
@@ -91,9 +97,10 @@ impl Btcr2Error {
 impl ProblemDetails for Btcr2Error {
     fn details(&self) -> Option<Value> {
         let prefix = match self {
-            Self::InvalidDid(_) | Self::InvalidDidDocument(_) | Self::NotFound(_) => {
-                "https://www.w3.org/ns/did"
-            }
+            Self::InvalidDid(_)
+            | Self::InvalidDidDocument(_)
+            | Self::NotFound(_)
+            | Self::InvalidOptions(_) => "https://www.w3.org/ns/did",
             // TODO: Is this the right error namespace?
             // From: https://github.com/dcdpr/did-btcr2/issues/71#issuecomment-3179550385
             Self::InvalidSidecarData(_)
@@ -111,6 +118,7 @@ impl ProblemDetails for Btcr2Error {
             Self::InvalidDid(_) => "INVALID_DID",
             Self::InvalidDidDocument(_) => "INVALID_DID_DOCUMENT",
             Self::NotFound(_) => "NOT_FOUND",
+            Self::InvalidOptions(_) => "INVALID_OPTIONS",
             Self::InvalidSidecarData(_) => "INVALID_SIDECAR_DATA",
             Self::LatePublishingError(_) => "LATE_PUBLISHING",
             Self::MissingUpdateData { .. } => "MISSING_UPDATE_DATA",
@@ -132,6 +140,7 @@ impl ProblemDetails for Btcr2Error {
                 Self::InvalidDid(detail) => detail.clone(),
                 Self::InvalidDidDocument(detail) => detail.clone(),
                 Self::NotFound(detail) => detail.clone(),
+                Self::InvalidOptions(detail) => detail.clone(),
                 Self::InvalidSidecarData(detail) => detail.clone(),
                 Self::LatePublishingError(detail) => detail.clone(),
                 Self::MissingUpdateData { update_hash } => {
@@ -197,6 +206,20 @@ mod tests {
         assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_DID");
         assert_eq!(d["title"], err.to_string());
         assert_eq!(d["detail"], "bad did");
+    }
+
+    /// `InvalidOptions` is the DID Resolution `INVALID_OPTIONS` error: the
+    /// standard `https://www.w3.org/ns/did#INVALID_OPTIONS` type, a
+    /// Display-wired `title`, and the carried detail.
+    #[test]
+    fn invalid_options_problem_details_shape() {
+        let err = Btcr2Error::InvalidOptions("versionId and versionTime together".into());
+        let d = err
+            .details()
+            .expect("InvalidOptions yields problem details");
+        assert_eq!(d["type"], "https://www.w3.org/ns/did#INVALID_OPTIONS");
+        assert_eq!(d["title"], err.to_string());
+        assert_eq!(d["detail"], "versionId and versionTime together");
     }
 
     /// `InvalidDidDocument` is the second variant on the W3C `did` prefix; its
