@@ -80,7 +80,7 @@ coverage status:
 | `create.md:genesis-document-hashed` | MUST | Covered | `document::tests::test_from_external_intermediate` |
 | `deactivate.md:add-deactivated-true` | MUST | Covered | `resolver::tests::metadata_deactivated_follows_the_document` |
 | `resolve.md:input-through-decode-and-sidecar` | MUST | Covered | `resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash` |
-| `resolve.md:version-id-parsed-as-integer-invalid-options` | MUST | Gap | `INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / `version_time: Option<DateTime>` values, so there is no path that parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying `versionId` and `versionTime` together is not rejected |
+| `resolve.md:version-id-parsed-as-integer-invalid-options` | MUST | Gap | the parse half is not exercised: the core takes typed `version_id: Option<NonZeroU64>` / `version_time: Option<DateTime>` values and the CLI accepts neither, so no shipped front end parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value; that lands with the HTTP binding. The companion rule — `versionId` and `versionTime` together are `INVALID_OPTIONS` — is modelled (`Btcr2Error::InvalidOptions`) and covered by `resolver::tests::version_id_and_version_time_together_are_invalid_options` |
 | `resolve.md:parse-did-with-decoding-algorithm` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
 | `resolve.md:invalid-did-on-decode-error` | MUST | Covered | `identifier::tests::test_invalid_prefix` |
 | `resolve.md:process-genesis-document-placeholder` | MUST | Covered | `document::tests::test_from_external_intermediate` |
@@ -107,7 +107,7 @@ coverage status:
 1 Singleton-applicable MUST/SHALL row(s) are not implemented and are listed here so
 this matrix does not overstate conformance:
 
-- `resolve.md:version-id-parsed-as-integer-invalid-options` (MUST) — Gap: `INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / `version_time: Option<DateTime>` values, so there is no path that parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying `versionId` and `versionTime` together is not rejected
+- `resolve.md:version-id-parsed-as-integer-invalid-options` (MUST) — Gap: the parse half is not exercised: the core takes typed `version_id: Option<NonZeroU64>` / `version_time: Option<DateTime>` values and the CLI accepts neither, so no shipped front end parses a string `versionId` and raises `INVALID_OPTIONS` on an unparseable value; that lands with the HTTP binding. The companion rule — `versionId` and `versionTime` together are `INVALID_OPTIONS` — is modelled (`Btcr2Error::InvalidOptions`) and covered by `resolver::tests::version_id_and_version_time_together_are_invalid_options`
 
 The justified non-gaps are:
 

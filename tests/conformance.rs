@@ -832,10 +832,13 @@ const CURATED: &[ConformanceRow] = &[
         keyword: "MUST",
         prefix: "when provided, `resolutionoptions.versionid` must be parsed as an integer and `r",
         status: Status::Gap(
-            "`INVALID_OPTIONS` is not modelled — the core takes typed `version_id: Option<u64>` / \
-             `version_time: Option<DateTime>` values, so there is no path that parses a string \
-             `versionId` and raises `INVALID_OPTIONS` on an unparseable value, and supplying \
-             `versionId` and `versionTime` together is not rejected",
+            "the parse half is not exercised: the core takes typed `version_id: \
+             Option<NonZeroU64>` / `version_time: Option<DateTime>` values and the CLI accepts \
+             neither, so no shipped front end parses a string `versionId` and raises \
+             `INVALID_OPTIONS` on an unparseable value; that lands with the HTTP binding. The \
+             companion rule — `versionId` and `versionTime` together are `INVALID_OPTIONS` — is \
+             modelled (`Btcr2Error::InvalidOptions`) and covered by \
+             `resolver::tests::version_id_and_version_time_together_are_invalid_options`",
         ),
     },
     ConformanceRow {
