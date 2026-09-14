@@ -55,6 +55,10 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   any method.
 - `resolver::Error` no longer converts into `Btcr2Error`; it implements
   `ProblemDetails` directly, and driver preconditions yield no body.
+- The two minted chain fixtures are re-minted with settled tips (six
+  confirmations on the last announcement) and carry their announcements'
+  blocks; their replay tests run under the default `minConf` and their
+  `versionTime` probes run.
 
 ### Deprecated
 

@@ -4422,13 +4422,6 @@ mod tests {
             ResolutionOptions {
                 sidecar_data: Some(sidecar),
                 chain_tip_height: Some(f.tip_height),
-                // The committed capture predates the mint tool's settlement
-                // step: its tip is the block of the last announcement, so
-                // that signal has ONE confirmation. Pinned to one until the
-                // scenario is re-minted with the tip settled five blocks past
-                // the last announcement, after which this line goes and the
-                // replay runs under the default of six.
-                min_conf: Some(NonZeroU32::MIN),
                 version_id,
                 version_time,
                 ..test_options()
@@ -4756,11 +4749,6 @@ mod tests {
         let options = ResolutionOptions {
             sidecar_data: Some(sidecar),
             chain_tip_height: Some(f.tip_height),
-            // See `minted_chain_sequences_updates_across_rotating_beacons`:
-            // the committed capture's tip is the last announcement's block, so
-            // `minConf` is pinned to one until the scenario is re-minted with
-            // the tip settled past it.
-            min_conf: Some(NonZeroU32::MIN),
             ..test_options()
         };
         let resolver = Document::resolve(&did, options)

@@ -373,8 +373,8 @@ addresses captured; `signals` is the number of OP_RETURN announcements found.
 | regtest/k1/qgpy0hmm.json | regtest | http://localhost:3000 | 758 | 4 | 1 | 681 |
 | regtest/x1/q26jeds9.json | regtest | http://localhost:3000 | 758 | 2 | 1 | 694 |
 | regtest/x1/qfl7se8f.json | regtest | http://localhost:3000 | 758 | 1 | 1 | 706 |
-| minted/clean-rotating-beacons.json | regtest | http://localhost:3000 | 764 | 3 | 3 | 760, 762, 764 |
-| minted/late-publishing-fork.json | regtest | http://localhost:3000 | 768 | 3 | 2 | 766, 768 |
+| minted/clean-rotating-beacons.json | regtest | http://localhost:3000 | 769 | 3 | 3 | 760, 762, 764 |
+| minted/late-publishing-fork.json | regtest | http://localhost:3000 | 778 | 3 | 2 | 771, 773 |
 
 The other 4 driven vectors (`q5puld7y`, `q5g3smvu`, `qgpakaw4`, `q2fz9mz6`) are
 genesis-only and need no capture.
@@ -400,31 +400,34 @@ captured block — rather than against a stated number.
 
 A `versionTime` bound is compared against the announcing block's `mediantime`
 (resolve.md "Process Next Update" step 4, footnote 5), which only a
-`/block/{hash}` body carries. The capture tool now records that body for every
-announcement it finds, whether or not the resolve asked for it. Every
-committed capture predates that and holds no `blocks`, so the replay tests'
-versionTime probe skips on each of them — printing `SKIP: … no /block/{hash}
-body` — and the set is pinned in `test_vectors::FIXTURES_WITHOUT_SIGNAL_BLOCKS`,
-checked in both directions by `chain_fixture_signal_block_ledger_is_exact`. A
-re-capture fills the blocks in and fails that ledger test by name; delete the
-id from the list and the probe runs again. The versionTime rule itself is
-covered by the in-memory resolver tests (`version_time_*`) and the client's
-`resolve_evaluates_version_time_against_the_fetched_mediantime`.
+`/block/{hash}` body carries. The capture tool records that body for every
+announcement it finds, whether or not the resolve asked for it. The two minted
+captures carry their blocks, so their versionTime probes run. The seven vendor
+captures predate that and hold no `blocks`, so the replay tests' versionTime
+probe skips on each of them — printing `SKIP: … no /block/{hash} body` — and
+the set is pinned in `test_vectors::FIXTURES_WITHOUT_SIGNAL_BLOCKS`, checked in
+both directions by `chain_fixture_signal_block_ledger_is_exact`. Those seven
+cannot be re-captured until the upstream regeneration lands: they are in
+`STALE_UPDATE_CONTEXT`, and a live capture rejects their pre-pin update
+`@context`. Once re-captured, the blocks fill in and the ledger test fails by
+name; delete the id from the list and the probe runs again. The versionTime
+rule itself is covered by the in-memory resolver tests (`version_time_*`) and
+the client's `resolve_evaluates_version_time_against_the_fetched_mediantime`.
 
 ### `minConf` and the minted captures
 
 The resolver processes a beacon signal only once it has
 `resolutionOptions.minConf` confirmations — six by default — measured as
 `tip - signal_height + 1` against the tip the fixture pins. Every vendor capture
-clears that by a wide margin. The two minted captures do not: they were taken
-with the tip **in the block of the last announcement** (764 and 768), so that
-signal has one confirmation and the walk under the default would stop short.
-Their replay tests therefore pin `min_conf: 1`, with a comment saying so, until
-the scenarios are re-minted. The mint tool now settles the chain
-`SETTLEMENT_BLOCKS` (5) past the last announcement before it captures, so a
-re-mint records tips 769 and 773, the last signal has exactly six confirmations,
-and the `min_conf: 1` pins come out of `minted_chain_sequences_updates_across_rotating_beacons`
-and `minted_fork_raises_late_publishing`. Re-mint with the Part 3 commands in
+clears that by a wide margin. The two minted captures are settled: the mint
+tool mines `SETTLEMENT_BLOCKS` (5) past the last announcement before it
+captures, so the committed tips (769 for the clean chain, whose last
+announcement is at 764; 778 for the fork, whose last announcement is at 773)
+give the last signal exactly six confirmations, and
+`minted_chain_sequences_updates_across_rotating_beacons` and
+`minted_fork_raises_late_publishing` run under the default. A re-mint that
+skipped the settling step would stop the walk short under the default and fail
+those replays. Re-mint with the Part 3 commands in
 [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
 
 To re-capture, see [crates/chain-capture/README.md](./crates/chain-capture/README.md)

@@ -425,9 +425,9 @@ After the last step confirms, the tool brings the tip five blocks past it
 (`SETTLEMENT_BLOCKS`), so the last announcement has six confirmations — the
 resolver's default `minConf` — by the time the fixture is captured. On this
 chain that is five blocks mined on demand; a re-run of a completed session
-finds the tip already there and mines nothing. A fixture captured before this
-step existed replays only with `minConf` lowered to one, which is why the two
-committed fixtures' tests pin it until the scenarios are re-minted.
+finds the tip already there and mines nothing. A fixture captured without this
+step replays only with `minConf` lowered to one; both committed fixtures were
+minted with it and replay under the default.
 
 #### 6. Resuming
 
@@ -512,18 +512,18 @@ Record them here after the session, so anyone who encounters them knows what
 they are:
 
 - `clean-rotating-beacons`:
-  `did:btcr2:k1qgpjt50lartreh0z4k9c39eaq3n0724ysjs3m7mveyunlmuh55mrh2qnrajuw`
+  `did:btcr2:k1qgp08t8dgqtnrtw22uchlm5lqkjr06kxttuvq2lnztn53w9vsv04t6sf422fm`
   — minted on the disposable Polar regtest chain at blocks 760 / 762 / 764,
-  resolves to version 4 and is deactivated.
+  captured at tip 769, resolves to version 4 and is deactivated.
 - `late-publishing-fork`:
-  `did:btcr2:k1qgpgf9lpvpxqrgjdcsd64w6jvwehf6zyk0mpxm7j0nrahmgs62xs54s6epzvn`
-  — minted on the same chain at blocks 766 / 768, two conflicting version 2
-  announcements from one beacon.
+  `did:btcr2:k1qgp8yf8ekephjva0atcepjn9ym2fks0dnxje3385sjdhfpx6vtywpzcw922ye`
+  — minted on the same chain at blocks 771 / 773, captured at tip 778, two
+  conflicting version 2 announcements from one beacon.
 
-Both were captured before the settling step existed, with the tip in the last
-announcement's block (764 and 768). Re-minting them on a fresh unpack of the
-export — the same two commands above, on new keys — records tips 769 and 773
-and lets the replay tests drop their `min_conf: 1` pins.
+Both were minted with the settling step, so each tip sits five blocks past the
+last announcement and the replay tests run under the default `minConf`. The
+fork's heights follow from where the clean session left the tip: minting it
+second on the same chain starts from 769.
 
 The second one is a **deliberately malformed DID history, published for
 testing**. Resolving it raises the spec's late-publishing error, which is the

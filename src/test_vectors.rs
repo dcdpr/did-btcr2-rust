@@ -57,9 +57,12 @@ pub(crate) const ALL_CHAIN_FIXTURES: &[&str] = &[
 /// the announcements it found. A `versionTime` bound compares against the
 /// block's `mediantime`, which only a `/block/{hash}` body carries, so the
 /// replay tests' versionTime probe cannot run on these and skips, by name,
-/// until they are re-captured. Checked in BOTH directions: a listed fixture
-/// that now holds its blocks fails saying the list is stale, and an unlisted
-/// fixture missing a block fails as a new defect rather than being skipped.
+/// until they are re-captured. All seven are vendor vectors in
+/// `STALE_UPDATE_CONTEXT`: a live capture rejects their pre-pin update
+/// `@context`, so the re-capture waits on the upstream regeneration first.
+/// Checked in BOTH directions: a listed fixture that now holds its blocks
+/// fails saying the list is stale, and an unlisted fixture missing a block
+/// fails as a new defect rather than being skipped.
 pub(crate) const FIXTURES_WITHOUT_SIGNAL_BLOCKS: &[&str] = &[
     "regtest/k1/qgppexmy",
     "regtest/k1/qgpy0hmm",
@@ -68,8 +71,6 @@ pub(crate) const FIXTURES_WITHOUT_SIGNAL_BLOCKS: &[&str] = &[
     "mutinynet/k1/q5p6w9su",
     "mutinynet/k1/q5pgeu9z",
     "mutinynet/x1/q5ugrf3w",
-    "minted/clean-rotating-beacons",
-    "minted/late-publishing-fork",
 ];
 
 /// One captured chain snapshot: what the beacon addresses returned, the tip they
