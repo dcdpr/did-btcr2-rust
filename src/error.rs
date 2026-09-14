@@ -29,8 +29,11 @@ pub enum Btcr2Error {
     #[error("The DID document was malformed: {0}")]
     InvalidDidDocument(String),
 
-    /// The Genesis Document could not be retrieved.
-    #[error("The Genesis Document could not be retrieved: {0}")]
+    /// The DID document was not found: the genesis document could not be
+    /// retrieved, or the requested `versionId` lies past the end of the DID's
+    /// history. The occurrence-specific reason is the payload (problem-details
+    /// `detail`).
+    #[error("The DID document was not found: {0}")]
     NotFound(String),
 
     /// One or more resolution options are invalid: `versionId` and
@@ -107,7 +110,7 @@ impl Btcr2Error {
         match self {
             Self::InvalidDid(_) => "An invalid DID was detected during DID Resolution",
             Self::InvalidDidDocument(_) => "The DID document was malformed",
-            Self::NotFound(_) => "The Genesis Document could not be retrieved",
+            Self::NotFound(_) => "The DID document was not found",
             Self::InvalidOptions(_) => "One or more resolution options are invalid",
             Self::InvalidSidecarData(_) => "Sidecar data was invalid",
             Self::LatePublishingError(_) => "Update payload was published late",
@@ -221,9 +224,11 @@ mod tests {
 
     /// `NotFound` is the DID Resolution `NOT_FOUND` error: its `type` is the
     /// standard `https://www.w3.org/ns/did#NOT_FOUND` identifier (not a
-    /// method-namespaced URI), the `title` is the Display text, and the
-    /// `detail` is the fixed sentence the resolver raised it with. Proves all
-    /// three match arms (prefix, name, detail) are present.
+    /// method-namespaced URI), the `title` is the generic fixed sentence, and
+    /// the `detail` is the reason the producer raised it with. Proves all
+    /// three match arms (prefix, name, detail) are present, and that the title
+    /// is the same whichever producer raised the error: a missing genesis
+    /// document and an unreachable `versionId` differ only in `detail`.
     #[test]
     fn not_found_problem_details_shape() {
         let message =
@@ -232,14 +237,26 @@ mod tests {
         let details = err.details().expect("NotFound yields problem details");
         assert_eq!(details["type"], "https://www.w3.org/ns/did#NOT_FOUND");
         assert_eq!(details["detail"], message);
-        assert_eq!(
-            details["title"],
-            "The Genesis Document could not be retrieved"
-        );
+        assert_eq!(details["title"], "The DID document was not found");
         assert_eq!(
             err.to_string(),
-            format!("The Genesis Document could not be retrieved: {message}"),
+            format!("The DID document was not found: {message}"),
             "Display carries the occurrence detail after the fixed title"
+        );
+
+        let message = "versionId 5 was requested but the DID's history ends at version 3";
+        let err = Btcr2Error::NotFound(message.into());
+        let details = err.details().expect("NotFound yields problem details");
+        assert_eq!(details["type"], "https://www.w3.org/ns/did#NOT_FOUND");
+        assert_eq!(details["detail"], message);
+        assert_eq!(
+            details["title"], "The DID document was not found",
+            "the title does not name the genesis document: it is the same for every producer"
+        );
+        assert_eq!(err.title(), "The DID document was not found");
+        assert_eq!(
+            err.to_string(),
+            format!("The DID document was not found: {message}")
         );
     }
 

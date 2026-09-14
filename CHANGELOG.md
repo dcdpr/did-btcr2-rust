@@ -61,6 +61,9 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   `versionTime` probes run. The clean scenario's third update is announced
   from the beacon its second update added, so its replay exercises the
   mid-walk beacon re-scan on real transactions.
+- `Btcr2Error::NotFound`'s fixed title (problem-details `title`, leading clause
+  of `Display`) is now "The DID document was not found"; the genesis-retrieval
+  or `versionId` reason stays in `detail`.
 
 ### Deprecated
 
