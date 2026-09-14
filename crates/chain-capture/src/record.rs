@@ -52,7 +52,10 @@ pub struct RecordingTransport<T: BtcTransport> {
 }
 
 impl<T: BtcTransport> RecordingTransport<T> {
-    /// Wrap `inner`, recording what passes through it.
+    /// Wrap `inner`, recording into a fresh `Recording`. The capture and
+    /// mint paths share one recording across two transports and construct
+    /// with [`RecordingTransport::sharing`]; this is the test convenience.
+    #[cfg(test)]
     pub fn new(inner: T) -> Self {
         Self::sharing(inner, Rc::new(RefCell::new(Recording::default())))
     }
@@ -70,6 +73,7 @@ impl<T: BtcTransport> RecordingTransport<T> {
     /// The handle is shared, not owned, because a transport is consumed by value
     /// when a client is built and is never handed back. Clone the handle BEFORE
     /// moving the transport, and it keeps observing every later write.
+    #[cfg(test)]
     pub fn recording(&self) -> Rc<RefCell<Recording>> {
         Rc::clone(&self.recording)
     }
