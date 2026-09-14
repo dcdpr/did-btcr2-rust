@@ -1,4 +1,3 @@
-#![allow(dead_code)] // todo
 #![warn(clippy::unwrap_used)]
 
 //! BIP340 cryptosuite implementation.
