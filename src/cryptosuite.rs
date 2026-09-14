@@ -236,8 +236,10 @@ fn bip340_sign(message_hash: Sha256Hash, secret_key: &SecretKey) -> Result<Signa
 
     // Sign with BIP340 Schnorr. This is the ONLY place the inner secp key is
     // unwrapped (the final point of use). `KeyPair` here is secp256k1's own
-    // type, unrelated to crate::key::KeyPair.
-    let keypair = KeyPair::from_secret_key(&secp, secret_key.as_inner());
+    // type, unrelated to crate::key::KeyPair. It holds a second copy of the
+    // scalar (plus the expanded key), so it is erased after the signature is
+    // taken rather than left to a destructor that does not scrub.
+    let mut keypair = KeyPair::from_secret_key(&secp, secret_key.as_inner());
 
     // Deterministic signing (no fresh auxiliary randomness): the signature is a
     // pure function of (secret key, message), so a given signed update is
@@ -245,7 +247,9 @@ fn bip340_sign(message_hash: Sha256Hash, secret_key: &SecretKey) -> Result<Signa
     // reproducible reference vectors for signed updates. The accepted trade-off
     // is weaker side-channel hardening than fresh-aux-rand signing; that is an
     // acceptable risk for a sans-I/O reference library.
-    Ok(secp.sign_schnorr_no_aux_rand(&message, &keypair))
+    let signature = secp.sign_schnorr_no_aux_rand(&message, &keypair);
+    keypair.non_secure_erase();
+    Ok(signature)
 }
 
 /// Verify a BIP340 Schnorr signature

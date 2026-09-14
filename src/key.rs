@@ -91,12 +91,19 @@ impl PublicKeyExt for PublicKey {
     }
 }
 
-/// A secp256k1 secret key that zeroizes its bytes on drop.
+/// A secp256k1 secret key that scrubs its owned bytes on drop.
 ///
 /// Wraps [`secp256k1::SecretKey`]; the inner key is exposed only at the final
-/// point of use (the sign boundary) via the crate-private `as_inner`. The owned
-/// bytes are scrubbed to `[1u8; 32]` when the value drops, so a used-and-dropped
-/// secret key does not linger in process memory.
+/// point of use (the sign boundary) via the crate-private `as_inner`. The
+/// owned scalar is overwritten with `[1u8; 32]` when the value drops, the
+/// `Vec<u8>` a key is built from is overwritten after the parse, and the
+/// signing keypair derived at the sign boundary is overwritten after use.
+///
+/// This is a best-effort scrub of the copies this crate owns, not a
+/// guarantee that no copy of the scalar remains in process memory: the
+/// erase is secp256k1's own `non_secure_erase`, which the compiler may
+/// optimise around and which cannot reach copies the compiler made when
+/// moving the value (stack spills, registers, the caller's own array).
 pub struct SecretKey(Secp256k1SecretKey);
 
 // Do NOT derive `Copy`/`Debug`: `Drop` forbids `Copy`, and a derived `Debug`
@@ -148,11 +155,26 @@ impl Drop for SecretKey {
 // fallible `TryFrom` — every path stays panic-free on untrusted input.
 impl TryFrom<Vec<u8>> for SecretKey {
     type Error = Error;
-    fn try_from(v: Vec<u8>) -> Result<Self, Error> {
-        Secp256k1SecretKey::from_slice(&v)
+    fn try_from(mut v: Vec<u8>) -> Result<Self, Error> {
+        let parsed = Secp256k1SecretKey::from_slice(&v)
             .map(SecretKey)
-            .map_err(Error::InvalidBytesForSecretKey)
+            .map_err(Error::InvalidBytesForSecretKey);
+        // The caller's buffer holds the scalar too, and `Vec`'s destructor
+        // frees it without touching the bytes. Overwrite it here, whether
+        // the parse succeeded or not — an invalid scalar is still a secret
+        // the caller handed over.
+        scrub_bytes(&mut v);
+        parsed
     }
+}
+
+/// Overwrite every byte of `bytes` with zero. The buffer is then passed
+/// through `std::hint::black_box`, the safe-Rust way to keep the compiler
+/// from treating a store to memory that is about to be freed as dead
+/// (`ptr::write_volatile` is `unsafe`, which this crate forbids).
+pub(crate) fn scrub_bytes(bytes: &mut [u8]) {
+    bytes.fill(0);
+    std::hint::black_box(bytes);
 }
 
 impl TryFrom<[u8; 32]> for SecretKey {
@@ -245,6 +267,24 @@ mod tests {
         let before = SCRUBS.with(|count| count.get());
         drop(SecretKey::try_from([7u8; 32]).expect("[7u8;32] is a valid secp scalar"));
         assert_eq!(SCRUBS.with(|count| count.get()), before + 1);
+    }
+
+    /// The scrub primitive the `Vec<u8>` constructor runs on the caller's
+    /// buffer zeroes every byte; the constructor reads the scalar before it
+    /// scrubs (the key is intact) and scrubs on the failure path too (an
+    /// invalid scalar is an error, not a panic on a zeroed buffer). The
+    /// buffer itself is moved into the constructor, so its final state is
+    /// observed on the primitive.
+    #[test]
+    fn test_try_from_vec_scrubs_the_callers_buffer() {
+        let mut buffer = vec![7u8; 32];
+        scrub_bytes(&mut buffer);
+        assert_eq!(buffer, [0u8; 32], "the primitive zeroes every byte");
+
+        let key = SecretKey::try_from(vec![7u8; 32]).expect("[7u8;32] is a valid secp scalar");
+        assert_eq!(key.as_inner().secret_bytes(), [7u8; 32]);
+        let err = SecretKey::try_from(vec![0u8; 32]).expect_err("all-zero is an invalid scalar");
+        assert!(matches!(err, Error::InvalidBytesForSecretKey(_)));
     }
 
     #[test]
