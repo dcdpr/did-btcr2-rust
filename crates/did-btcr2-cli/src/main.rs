@@ -895,6 +895,7 @@ fn run_write(d: WriteDispatch) -> Result<(), CliRunError> {
             sidecar_out: d.sidecar_out,
             min_conf: d.min_conf,
         },
+        confirm_broadcast,
     )
 }
 
@@ -920,14 +921,19 @@ struct WriteParams {
 }
 
 /// Dispatch a write operation into the facade. Generic over the transport so a
-/// fake can assert that a `--dry-run` issues zero `POST /tx`.
+/// fake can assert that a `--dry-run` issues zero `POST /tx`, and over the
+/// broadcast confirm so a test never reads the process's real stdin.
 ///
 /// This is orchestration only: it resolves the current document for
 /// its `version_id`, constructs the signed update for the
 /// `--dry-run` preview/print, and otherwise hands everything to
 /// `client.update` / `client.deactivate`. No FSM pump, UTXO/fee math, or
 /// broadcast logic lives here — those are the facade's.
-fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<(), CliRunError> {
+fn execute_write<T: BtcTransport>(
+    client: &Client<T>,
+    p: WriteParams,
+    mut confirm: impl FnMut() -> Result<bool, CliRunError>,
+) -> Result<(), CliRunError> {
     // Read the --sidecar INPUT file exactly once into an in-memory buffer, then
     // parse those same bytes twice: once for the resolve options, once (later, on
     // the broadcast success path) as the merge base for the --sidecar-out emit.
@@ -1015,7 +1021,7 @@ fn execute_write<T: BtcTransport>(client: &Client<T>, p: WriteParams) -> Result<
     )?;
     print_tx_summary(&preview)?;
 
-    if !p.yes && !confirm_broadcast()? {
+    if !p.yes && !confirm()? {
         writeln!(std::io::stdout().lock(), "aborted: not broadcast")
             .map_err(CliRunError::StdoutClosed)?;
         return Ok(());
@@ -1865,6 +1871,7 @@ mod tests {
                 sidecar_out: Some(sc_path.clone()),
                 min_conf: None,
             },
+            || unreachable!("--yes skips the broadcast confirm"),
         );
 
         let _ = std::fs::remove_file(&patch_path);
@@ -1939,6 +1946,7 @@ mod tests {
                 sidecar_out: None,
                 min_conf: None,
             },
+            || unreachable!("--yes skips the broadcast confirm"),
         );
 
         let _ = std::fs::remove_file(&patch_path);
@@ -2016,6 +2024,7 @@ mod tests {
                 sidecar_out: Some(v2_path.clone()),
                 min_conf: None,
             },
+            || unreachable!("--yes skips the broadcast confirm"),
         )
         .expect("the update write broadcasts and emits v2.json");
 
@@ -2056,6 +2065,7 @@ mod tests {
                 sidecar_out: Some(v3_path.clone()),
                 min_conf: None,
             },
+            || unreachable!("--yes skips the broadcast confirm"),
         )
         .expect("the deactivate write broadcasts and emits v3.json");
 
@@ -2118,11 +2128,12 @@ mod tests {
                 fee: Fee::Absolute(1_000),
                 change: None,
                 dry_run: false,
-                yes: false, // decline: cargo-test stdin is EOF → confirm returns false
+                yes: false, // the injected confirm below declines; real stdin is never read
                 sidecar: None,
                 sidecar_out: Some(sc_path.clone()),
                 min_conf: None,
             },
+            || Ok(false),
         );
 
         drop(client);
@@ -2176,6 +2187,7 @@ mod tests {
                 sidecar_out: Some(p.clone()),
                 min_conf: None,
             },
+            || unreachable!("--yes skips the broadcast confirm"),
         )
         .expect("the update write emits v2 at p");
 
@@ -2203,6 +2215,7 @@ mod tests {
                 sidecar_out: Some(p.clone()),
                 min_conf: None,
             },
+            || unreachable!("--yes skips the broadcast confirm"),
         )
         .expect("the same-path deactivate write succeeds");
 
