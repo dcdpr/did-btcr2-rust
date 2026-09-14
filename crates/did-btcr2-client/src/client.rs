@@ -152,11 +152,15 @@ impl<T: BtcTransport> Client<T> {
                     fsm = next_state.process_responses(responses);
                 }
                 ResolverState::BlockRequests(next_state, requests) => {
-                    // Keyed by the body's own `id`, not the request sent: a
-                    // response for the wrong block leaves the requested hash
-                    // missing and the core returns a typed error.
+                    // The body's `id` must be the block that was requested. A
+                    // mismatch is the transport misbehaving (an Esplora that
+                    // answers `/block/A` with block B) and is reported as a
+                    // malformed response here; the core's fail-closed
+                    // missing-mediantime path remains the backstop for
+                    // anything that slips through.
                     let mut mediantimes = HashMap::new();
                     for req in requests {
+                        let requested = block_hash_segment(req.uri().path()).to_string();
                         let resp = self.transport.execute(req.map(|()| Vec::new()))?;
                         let status = resp.status().as_u16();
                         if !(200..300).contains(&status) {
@@ -166,6 +170,11 @@ impl<T: BtcTransport> Client<T> {
                             }));
                         }
                         let (hash, mediantime) = esplora::block_mediantime_from_body(resp.body())?;
+                        if hash.to_string() != requested {
+                            return Err(Error::Transport(TransportError::Malformed(format!(
+                                "block body id `{hash}` does not match the requested block `{requested}`"
+                            ))));
+                        }
                         mediantimes.insert(hash, mediantime);
                     }
                     fsm = next_state.process_block_times(mediantimes);
@@ -408,6 +417,13 @@ impl<T: BtcTransport> Client<T> {
     }
 }
 
+/// The block hash a `GET {base}/block/{hash}` request path names: its last
+/// segment. The core builds the path from a `BlockHash`'s `Display`, so the
+/// segment is the exact lowercase-hex text a served body's `id` must equal.
+fn block_hash_segment(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or_default()
+}
+
 /// Lowercase-hex encode a byte slice (the `POST /tx` body is raw tx hex). Kept
 /// local so the facade carries no extra hex dependency for this single use.
 fn hex_encode(bytes: &[u8]) -> String {
@@ -423,7 +439,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use did_btcr2::document::Error as DocumentError;
+    use did_btcr2::document::{Error as DocumentError, SidecarData};
     use did_btcr2::error::{Btcr2Error, ProblemDetails as _};
     use did_btcr2::identifier::Network;
     use did_btcr2::key::PublicKey;
@@ -439,6 +455,8 @@ mod tests {
     struct FakeTransport {
         calls: RefCell<usize>,
         post_tx_calls: std::cell::Cell<usize>,
+        /// Every request path seen by `execute`, in order.
+        seen_paths: RefCell<Vec<String>>,
         /// Body served for `GET /address/{a}/txs` (a JSON tx array).
         txs_body: Vec<u8>,
         /// Chain-tip height served as a bare integer.
@@ -468,6 +486,7 @@ mod tests {
             Self {
                 calls: RefCell::new(0),
                 post_tx_calls: std::cell::Cell::new(0),
+                seen_paths: RefCell::new(Vec::new()),
                 txs_body: txs_body.as_bytes().to_vec(),
                 tip: 100,
                 utxo_value: 100_000,
@@ -527,6 +546,10 @@ mod tests {
             self.post_tx_calls.get()
         }
 
+        fn seen_paths(&self) -> Vec<String> {
+            self.seen_paths.borrow().clone()
+        }
+
         /// A synthetic confirmed `/utxo` array funding the announce. Serves the
         /// entries of `utxo_values` (each at a distinct outpoint) when set,
         /// otherwise the single `utxo_value`.
@@ -558,6 +581,9 @@ mod tests {
             req: http::Request<Vec<u8>>,
         ) -> Result<http::Response<Vec<u8>>, TransportError> {
             *self.calls.borrow_mut() += 1;
+            self.seen_paths
+                .borrow_mut()
+                .push(req.uri().path().to_string());
 
             if let Some(status) = self.force_status {
                 return Ok(http::Response::builder()
@@ -828,18 +854,17 @@ mod tests {
         );
     }
 
-    /// The transport route the `BlockRequests` arm of `resolve` runs through:
-    /// a `GET {base}/block/{hash}` answered with an Esplora block body that
-    /// `block_mediantime_from_body` parses to the requested hash and its
-    /// mediantime.
-    ///
-    /// The arm cannot be driven end to end from the public API: only a proof
-    /// carrying `expires` triggers it, and `construct_signed_update` never sets
-    /// one. Its wiring is proven by the exhaustive match on `ResolverState`
-    /// (it does not compile without the arm), the core FSM tests, and the
-    /// parser tests in `esplora.rs`; this test pins the route those rely on.
+    /// Pins the fake's `GET {base}/block/{hash}` route and the
+    /// `block_mediantime_from_body` contract that the end-to-end drives below
+    /// rely on: the default block body parses to the all-zero hash (the
+    /// `status.block_hash` the served announcement tx carries) and to
+    /// mediantime 1_699_996_400. See
+    /// `resolve_fetches_the_block_and_applies_an_update_whose_proof_expires`,
+    /// `resolve_rejects_an_update_that_expired_before_the_fetched_mediantime`,
+    /// and `resolve_rejects_a_block_body_for_a_different_block` for the
+    /// `BlockRequests` arm driven from `Client::resolve`.
     #[test]
-    fn resolve_serves_block_requests_through_the_transport() {
+    fn fake_transport_serves_a_block_body_on_the_block_route() {
         let transport = FakeTransport::new("[]");
         let zero_hash: esploda::bitcoin::BlockHash = "00"
             .repeat(32)
@@ -858,6 +883,221 @@ mod tests {
         assert_eq!(hash, zero_hash, "the body's id is the requested block");
         assert_eq!(mediantime.timestamp(), 1_699_996_400);
         assert_eq!(transport.call_count(), 1);
+    }
+
+    // ── resolve: the block-fetch path, driven end to end ─────────────────────
+
+    /// The core crate's second deterministic golden: a signed v2 update over
+    /// the `[0x07; 32]` Mutinynet DID whose proof carries `expires` (and no
+    /// `created`). Only a proof with `expires` makes the resolver ask for the
+    /// announcing block's header, so this is the fixture that drives the
+    /// `BlockRequests` arm.
+    const SIGNED_UPDATE_WITH_EXPIRES: &str =
+        include_str!("../../../fixtures/spec-form/signed-update-with-expires.json");
+
+    /// Build the served Esplora JSON-API transaction from a recovered
+    /// `bitcoin::Transaction`. The resolver reads only the LAST output's
+    /// scriptPubKey, the status, and the txid, so only those carry real data;
+    /// `status.confirmed` must be true or the beacon signal is rejected as
+    /// unconfirmed. `status.block_hash` is the all-zero hash the fake's
+    /// default block body answers to.
+    fn esplora_tx_json(
+        tx: &esploda::bitcoin::Transaction,
+        block_height: u32,
+        block_time: i64,
+    ) -> serde_json::Value {
+        let vout: Vec<serde_json::Value> = tx
+            .output
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "scriptpubkey": o.script_pubkey.to_hex_string(),
+                    "value": o.value,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "txid": tx.txid().to_string(),
+            "version": tx.version,
+            "locktime": 0,
+            "vin": [],
+            "vout": vout,
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": block_height,
+                "block_hash": "00".repeat(32),
+                "block_time": block_time,
+            },
+        })
+    }
+
+    /// The fixture update, its DID, and a `/txs` body carrying one confirmed
+    /// announcement of it. The client cannot compute the update hash itself
+    /// (the hashing trait is crate-private in the core), so the announce
+    /// path is the public route to the OP_RETURN signal: `build_update_tx`
+    /// yields the beacon tx whose last output commits to the update, and that
+    /// tx is served back as the beacon's history.
+    fn announced_expiring_update() -> (Did, Update, String) {
+        let update = Update::from_json_string(SIGNED_UPDATE_WITH_EXPIRES)
+            .expect("the committed fixture parses as an Update");
+
+        let client = Client::new("http://fake".to_string(), FakeTransport::new("[]"));
+        let (doc, did, _vm_id) = created_doc(&client);
+        let patched_value = update.as_ref()["patch"][0]["value"]
+            .as_str()
+            .expect("the fixture patch adds a string value");
+        assert!(
+            patched_value.starts_with(did.encode()),
+            "the fixture was minted for a different DID: {patched_value} vs {}",
+            did.encode()
+        );
+
+        let tx = client
+            .build_update_tx(
+                &doc,
+                update.clone(),
+                1,
+                Fee::Absolute(1_000),
+                None,
+                test_secret_key(),
+            )
+            .expect("the announce tx builds against the genesis document");
+        let txs = serde_json::Value::Array(vec![esplora_tx_json(tx.as_tx(), 100, 1_700_000_000)])
+            .to_string();
+        (did, update, txs)
+    }
+
+    /// The proof's `expires` as the fixture spells it, parsed rather than
+    /// hard-coded so a re-blessed fixture keeps the tests honest.
+    fn fixture_expires(update: &Update) -> chrono::DateTime<chrono::Utc> {
+        let expires = update.as_ref()["proof"]["expires"]
+            .as_str()
+            .expect("the fixture proof carries a string `expires`");
+        chrono::DateTime::parse_from_rfc3339(expires)
+            .expect("`expires` is RFC 3339")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// An Esplora block body with the given `id` and `mediantime`; only those
+    /// two fields are read by `block_mediantime_from_body`.
+    fn block_body(id: &str, mediantime: i64) -> Vec<u8> {
+        serde_json::json!({
+            "id": id,
+            "height": 100,
+            "timestamp": 1_700_000_000,
+            "mediantime": mediantime,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// The happy path through the `BlockRequests` arm: the sidecar update's
+    /// proof carries `expires`, the resolver asks for the announcing block,
+    /// the fake serves a body whose mediantime is before `expires`, and the
+    /// update is applied.
+    #[test]
+    fn resolve_fetches_the_block_and_applies_an_update_whose_proof_expires() {
+        let (did, update, txs) = announced_expiring_update();
+        let client = Client::new("http://fake".to_string(), FakeTransport::new(&txs));
+        assert!(
+            fixture_expires(&update).timestamp() > 1_699_996_400,
+            "the default block body's mediantime must precede the fixture's expires"
+        );
+
+        let result = client
+            .resolve(
+                &did,
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::new(None, vec![update], None, None)),
+                    ..Default::default()
+                },
+            )
+            .expect("the expiring update applies against a block that precedes expires");
+
+        assert_eq!(
+            result.document_metadata.version_id,
+            NonZeroU64::new(2).expect("2 is non-zero"),
+            "the update advances the document to version 2"
+        );
+        assert!(!result.document_metadata.deactivated);
+        let block_path = format!("/block/{}", "00".repeat(32));
+        assert!(
+            client
+                .transport
+                .seen_paths()
+                .iter()
+                .any(|p| p.ends_with(&block_path)),
+            "the resolver fetched the announcing block through the transport: {:?}",
+            client.transport.seen_paths()
+        );
+    }
+
+    /// The served block's mediantime is one second after the proof's
+    /// `expires`: the core rejects the update as `INVALID_DID_UPDATE` and the
+    /// client surfaces it unchanged inside the resolver error.
+    #[test]
+    fn resolve_rejects_an_update_that_expired_before_the_fetched_mediantime() {
+        let (did, update, txs) = announced_expiring_update();
+        let transport = FakeTransport {
+            block_body: block_body(&"00".repeat(32), fixture_expires(&update).timestamp() + 1),
+            ..FakeTransport::new(&txs)
+        };
+        let client = Client::new("http://fake".to_string(), transport);
+
+        let err = client
+            .resolve(
+                &did,
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::new(None, vec![update], None, None)),
+                    ..Default::default()
+                },
+            )
+            .expect_err("an update that expired before its announcing block is rejected");
+
+        match err {
+            Error::Resolver(did_btcr2::resolver::Error::Btcr2Error(
+                Btcr2Error::InvalidDidUpdate(msg),
+            )) => assert!(
+                msg.contains("expires is before the announcing block"),
+                "message must name the expires check, got: {msg}"
+            ),
+            other => panic!("expected Resolver(Btcr2Error(InvalidDidUpdate)), got {other:?}"),
+        }
+    }
+
+    /// The fake answers `GET /block/{zeros}` with a body whose `id` is a
+    /// different block. That is the transport misbehaving, not the DID's
+    /// update being invalid: the client reports a malformed response naming
+    /// both hashes and applies nothing.
+    #[test]
+    fn resolve_rejects_a_block_body_for_a_different_block() {
+        let (did, update, txs) = announced_expiring_update();
+        let transport = FakeTransport {
+            block_body: block_body(&"11".repeat(32), 1_699_996_400),
+            ..FakeTransport::new(&txs)
+        };
+        let client = Client::new("http://fake".to_string(), transport);
+
+        let err = client
+            .resolve(
+                &did,
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::new(None, vec![update], None, None)),
+                    ..Default::default()
+                },
+            )
+            .expect_err("a block body for the wrong block is rejected");
+
+        match err {
+            Error::Transport(TransportError::Malformed(msg)) => assert!(
+                msg.contains(&"11".repeat(32)) && msg.contains(&"00".repeat(32)),
+                "message must name both the served and the requested block, got: {msg}"
+            ),
+            other => panic!("expected Transport(Malformed), got {other:?}"),
+        }
     }
 
     /// An externally-created (`x1`) DID whose genesis document is supplied

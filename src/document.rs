@@ -4610,6 +4610,37 @@ mod tests {
         bless_or_assert(&produced, golden_path);
     }
 
+    /// The second deterministic golden: the same benign v2 update over the
+    /// same source DID as `golden-signed-update.json`, differing only in
+    /// that the proof carries `expires` (and still no `created`). The client
+    /// crate resolves this fixture end to end through its block-fetch path,
+    /// where the announcing block's `mediantime` is checked against
+    /// `expires`. Byte-exact so a proof-shape change surfaces here first.
+    #[test]
+    fn golden_signed_update_with_expires_bytes() {
+        let expires = ts(1_700_003_600);
+        let (_did, update) = signed_update_with_times(None, Some(expires));
+
+        assert!(
+            update.as_ref()["proof"]["expires"].is_string(),
+            "proof must carry `expires`"
+        );
+        assert!(
+            update.as_ref()["proof"].get("created").is_none(),
+            "proof must not carry `created`"
+        );
+
+        let produced = serde_json::to_string_pretty(update.as_ref())
+            .expect("signed update JSON serializes to pretty string");
+        let golden_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/spec-form/signed-update-with-expires.json"
+        );
+        bless_or_assert(&produced, golden_path);
+
+        Update::from_json_string(&produced).expect("the blessed wire form parses as an Update");
+    }
+
     /// the deterministically generated genesis document is
     /// spec-conformant on `@context`/`controller`, matching the migrated
     /// test-suite resolve vectors (the interop oracle) and the

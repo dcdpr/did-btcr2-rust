@@ -1010,6 +1010,7 @@ const KNOWN_TESTS: &[&str] = &[
     "document::tests::deterministically_generate",
     "document::tests::duplicate_signals_do_not_raise_false_late_publishing",
     "document::tests::golden_signed_update_bytes",
+    "document::tests::golden_signed_update_with_expires_bytes",
     "document::tests::external_genesis_without_sidecar_is_not_found",
     "document::tests::invoking_entry_type_string_is_not_gated",
     "document::tests::proof_value_is_base58btc_64_bytes",
