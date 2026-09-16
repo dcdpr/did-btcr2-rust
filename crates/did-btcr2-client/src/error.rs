@@ -120,6 +120,17 @@ pub enum Error {
     /// The resolved document has no beacon at the requested index.
     NoBeacon,
 
+    /// The core issued a beacon-signal request whose path is not
+    /// `/address/{address}/txs`, so the client cannot tell which beacon
+    /// address the history it fetches belongs to — and the core requires each
+    /// history fed back under that address. A mismatch between the two crates,
+    /// not a network fault.
+    #[error(
+        "the resolver requested `{0}`, which is not an /address/<address>/txs endpoint; the \
+         client keys each history by the address in that path"
+    )]
+    UnroutableRequest(String),
+
     /// Building or signing the beacon announcement transaction failed.
     Announce(#[from] did_btcr2::beacon::AnnounceError),
 

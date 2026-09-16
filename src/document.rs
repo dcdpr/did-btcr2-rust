@@ -1488,7 +1488,7 @@ impl InitialDocument {
         }
 
         // Resolve-path apply site: a proof-verification failure MUST surface as
-        // INVALID_DID_UPDATE (resolve.md:242), not the granular ProofVerification
+        // INVALID_DID_UPDATE (resolve.md:244), not the granular ProofVerification
         // code. Every other error apply_update raises is already InvalidDidUpdate,
         // so the whole apply step is spec-uniform. Find-refs confirms apply_update
         // has one production caller — the resolver resolve path — so this collapse
@@ -1511,7 +1511,7 @@ impl InitialDocument {
         })?;
 
         // The document identifier is immutable across an update: the post-patch
-        // document id MUST still equal this DID (resolve.md:209). Rejecting a
+        // document id MUST still equal this DID (resolve.md:211). Rejecting a
         // mismatch stops a patch from re-pointing the document identity.
         if fields.id != self.fields.id {
             return Err(Btcr2Error::InvalidDidUpdate(
@@ -2588,10 +2588,13 @@ mod tests {
             ],
         );
 
-        let json = include_str!(
+        let json: serde_json::Value = serde_json::from_str(include_str!(
             "../fixtures/k1qypa5tq86fzrl0ez32nh8e0ks4tzzkxnnmn8tdvxk04ahzt70u09dagl0mgs4-transactions.json"
-        );
-        let transactions: HashMap<_, _> = serde_json::from_str(json).unwrap();
+        ))
+        .unwrap();
+        let txs: Vec<esploda::esplora::Transaction> =
+            serde_json::from_value(json["SingletonBeacon"].clone()).unwrap();
+        let transactions = crate::resolver::history_under_first_request(&requests, txs);
         let fsm = next_state.process_responses(transactions);
 
         let ResolverState::Resolved(result) = fsm.resolve().unwrap() else {
@@ -3330,7 +3333,6 @@ mod tests {
     /// definition.
     #[test]
     fn announce_round_trip() {
-        use crate::beacon::BeaconType;
         use crate::resolver::{Resolver, ResolverState};
         use std::collections::HashMap;
 
@@ -3367,18 +3369,16 @@ mod tests {
         let resolver =
             Resolver::new(initial.clone(), resolution_options).expect("the options are valid");
 
-        // Drive the FSM: Init -> feed the bridged tx on the matching beacon ->
-        // resolve. The beacon the signal arrives on must be the one we announced
-        // from (P2WPKH), so route the tx under BeaconType::Singleton.
-        let ResolverState::Requests(next_state, _requests) = resolver
+        // Drive the FSM: Init -> feed the bridged tx as the history of a
+        // declared beacon -> resolve. Which genesis beacon is immaterial here;
+        // the bridged tx is served under the first one requested.
+        let ResolverState::Requests(next_state, requests) = resolver
             .resolve()
             .expect("Init step yields beacon requests")
         else {
             panic!("expected Requests from Init step");
         };
-        let mut transactions: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
-            HashMap::new();
-        transactions.insert(BeaconType::Singleton, vec![bridged]);
+        let transactions = crate::resolver::history_under_first_request(&requests, vec![bridged]);
         let fsm = next_state.process_responses(transactions);
 
         // The resolver may need additional empty-signal steps to terminate.
@@ -3389,10 +3389,8 @@ mod tests {
             match state {
                 ResolverState::Resolved(result) => break result,
                 ResolverState::Requests(next, _requests) => {
-                    let empty: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
-                        HashMap::new();
                     state = next
-                        .process_responses(empty)
+                        .process_responses(HashMap::new())
                         .resolve()
                         .expect("empty-signal step resolves");
                 }
@@ -3430,7 +3428,6 @@ mod tests {
     /// reaches version 3.
     #[test]
     fn duplicate_signals_do_not_raise_false_late_publishing() {
-        use crate::beacon::BeaconType;
         use crate::resolver::{Resolver, ResolverState};
         use std::collections::HashMap;
 
@@ -3492,17 +3489,16 @@ mod tests {
         let resolver =
             Resolver::new(genesis.clone(), resolution_options).expect("the options are valid");
 
-        let ResolverState::Requests(next_state, _requests) = resolver
+        let ResolverState::Requests(next_state, requests) = resolver
             .resolve()
             .expect("Init step yields beacon requests")
         else {
             panic!("expected Requests from Init step");
         };
-        let mut transactions: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
-            HashMap::new();
-        // Each update arrives TWICE on the Singleton beacon: the dups must not
-        // trip a false late-publishing.
-        transactions.insert(BeaconType::Singleton, vec![b1, b1_dup, b2, b2_dup]);
+        // Each update arrives TWICE on the first genesis beacon: the dups must
+        // not trip a false late-publishing.
+        let transactions =
+            crate::resolver::history_under_first_request(&requests, vec![b1, b1_dup, b2, b2_dup]);
         let fsm = next_state.process_responses(transactions);
 
         let mut state = fsm.resolve().expect(
@@ -3512,10 +3508,8 @@ mod tests {
             match state {
                 ResolverState::Resolved(result) => break result,
                 ResolverState::Requests(next, _requests) => {
-                    let empty: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
-                        HashMap::new();
                     state = next
-                        .process_responses(empty)
+                        .process_responses(HashMap::new())
                         .resolve()
                         .expect("empty-signal step resolves without a false late-publishing");
                 }
@@ -3541,7 +3535,6 @@ mod tests {
     /// no signal past the deactivation mutates the document).
     #[test]
     fn create_update_deactivate_reresolve() {
-        use crate::beacon::BeaconType;
         use crate::resolver::{Resolver, ResolverState};
         use std::collections::HashMap;
 
@@ -3605,15 +3598,14 @@ mod tests {
         let resolver =
             Resolver::new(genesis.clone(), resolution_options).expect("the options are valid");
 
-        let ResolverState::Requests(next_state, _requests) = resolver
+        let ResolverState::Requests(next_state, requests) = resolver
             .resolve()
             .expect("Init step yields beacon requests")
         else {
             panic!("expected Requests from Init step");
         };
-        let mut transactions: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
-            HashMap::new();
-        transactions.insert(BeaconType::Singleton, vec![bridged1, bridged2]);
+        let transactions =
+            crate::resolver::history_under_first_request(&requests, vec![bridged1, bridged2]);
         let fsm = next_state.process_responses(transactions);
 
         let mut state = fsm
@@ -3623,10 +3615,8 @@ mod tests {
             match state {
                 ResolverState::Resolved(result) => break result,
                 ResolverState::Requests(next, _requests) => {
-                    let empty: HashMap<BeaconType, Vec<esploda::esplora::Transaction>> =
-                        HashMap::new();
                     state = next
-                        .process_responses(empty)
+                        .process_responses(HashMap::new())
                         .resolve()
                         .expect("empty-signal step resolves");
                 }
@@ -3707,7 +3697,7 @@ mod tests {
         );
     }
 
-    /// resolve.md:230 — apply_update MUST reject an update whose proof
+    /// resolve.md:232 — apply_update MUST reject an update whose proof
     /// verificationMethod is NOT a member of the document's capabilityInvocation
     /// set (an update signed by a key the document never authorized to invoke its
     /// root capability). The same membership rule the construction side enforces
@@ -3759,7 +3749,7 @@ mod tests {
         }
     }
 
-    /// resolve.md:209 — apply_update MUST reject an update whose patch changes the
+    /// resolve.md:211 — apply_update MUST reject an update whose patch changes the
     /// document `id` (a post-patch `id != did`): a patch cannot re-point the
     /// document identity. Mapped to the spec-literal INVALID_DID_UPDATE
     /// (`Btcr2Error::InvalidDidUpdate`).
@@ -5020,7 +5010,7 @@ mod tests {
     /// deeper at BIP340 verification inside `data_integrity_verify_proof`. Prior to
     /// that collapse this surfaced the granular `InvalidUpdateProof` (cryptosuite.rs:228);
     /// the resolve-path `apply_update` site now wraps ANY proof-verification failure
-    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:242), so this security
+    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:244), so this security
     /// regression test asserts `InvalidDidUpdate`. The rejection property (a tampered
     /// signature is refused) is unchanged — only the wire variant is spec-aligned.
     #[test]
@@ -5067,7 +5057,7 @@ mod tests {
         }
     }
 
-    /// resolve.md:242: a proof-verification failure raised on the resolve
+    /// resolve.md:244: a proof-verification failure raised on the resolve
     /// path inside `apply_update` MUST surface as `INVALID_DID_UPDATE`, not the
     /// granular BIP340 `InvalidUpdateProof`. This pins the wire-code collapse at the
     /// `data_integrity_verify_proof` apply site. A find-refs scope check confirmed

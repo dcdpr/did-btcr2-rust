@@ -176,17 +176,16 @@ impl<T: BtcTransport> Client<T> {
                     // address's COMPLETE confirmed history back, which Esplora
                     // serves a page at a time. Paging is the facade's job
                     // because the page size is Esplora's, not the spec's.
-                    let mut responses = HashMap::new();
-                    for (beacon_type, requests) in beacons {
-                        for req in requests {
-                            let txs = esplora::address_history(
-                                &self.transport,
-                                req.map(|()| Vec::new()),
-                            )?;
-                            let entry: &mut Vec<Transaction> =
-                                responses.entry(beacon_type).or_default();
-                            entry.extend(txs);
-                        }
+                    // Each history is fed back under the address the request
+                    // path names: the core attributes every signal to the
+                    // beacon whose history it was found in, and only the
+                    // driver knows which history answered which request.
+                    let mut responses: HashMap<String, Vec<Transaction>> = HashMap::new();
+                    for req in beacons.into_values().flatten() {
+                        let address = address_segment(req.uri().path())?.to_string();
+                        let txs =
+                            esplora::address_history(&self.transport, req.map(|()| Vec::new()))?;
+                        responses.entry(address).or_default().extend(txs);
                     }
                     fsm = next_state.process_responses(responses);
                 }
@@ -461,6 +460,22 @@ impl<T: BtcTransport> Client<T> {
 /// segment is the exact lowercase-hex text a served body's `id` must equal.
 fn block_hash_segment(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or_default()
+}
+
+/// The beacon address a `GET {base}/address/{address}/txs` request path names:
+/// the segment between a trailing `txs` and the `address` before it. The core
+/// keys the history the driver feeds back by this exact text, so it is read
+/// off the path the core built rather than re-derived from the document. Any
+/// other shape is a request the core does not issue today, so it is
+/// [`Error::UnroutableRequest`] rather than a guess.
+fn address_segment(path: &str) -> Result<&str, Error> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let n = segments.len();
+    if n >= 3 && segments[n - 1] == "txs" && segments[n - 3] == "address" {
+        Ok(segments[n - 2])
+    } else {
+        Err(Error::UnroutableRequest(path.to_string()))
+    }
 }
 
 /// Lowercase-hex encode a byte slice (the `POST /tx` body is raw tx hex). Kept
@@ -1743,6 +1758,40 @@ mod tests {
                 "message must name both the served and the requested block, got: {msg}"
             ),
             other => panic!("expected Transport(Malformed), got {other:?}"),
+        }
+    }
+
+    /// The history the client feeds back is keyed by the address segment of
+    /// the request path, read off the path itself — host and base prefix
+    /// ignored, the address text untouched.
+    #[test]
+    fn address_segment_reads_the_address_from_a_txs_path() {
+        assert_eq!(
+            address_segment("/api/address/tb1q7mss0haz2pjzh6kry4ythrat3mpk4rj5hhgy4l/txs")
+                .expect("a /txs path is routable"),
+            "tb1q7mss0haz2pjzh6kry4ythrat3mpk4rj5hhgy4l"
+        );
+        assert_eq!(
+            address_segment("/address/mtA1SshFsJtD2Di1KBSTmyuD23eBqUekQ3/txs")
+                .expect("a base-less /txs path is routable"),
+            "mtA1SshFsJtD2Di1KBSTmyuD23eBqUekQ3"
+        );
+    }
+
+    /// A request shape the client cannot key by address is a typed error that
+    /// names the path, not a guessed key and not a panic.
+    #[test]
+    fn address_segment_rejects_another_endpoint_shape() {
+        for path in [
+            "/address/tb1qexample/utxo",
+            "/block/0000000000000000000000000000000000000000000000000000000000000000",
+            "/txs",
+            "",
+        ] {
+            match address_segment(path) {
+                Err(Error::UnroutableRequest(reported)) => assert_eq!(reported, path),
+                other => panic!("expected UnroutableRequest for `{path}`, got {other:?}"),
+            }
         }
     }
 
