@@ -105,6 +105,58 @@ pub fn problem_response(details: Value, diagnostic: Option<String>) -> Response 
     }
 }
 
+fn internal(category: &str) -> Value {
+    Problem::InternalError(category.to_string())
+        .details()
+        .expect("InternalError carries details")
+}
+
+/// Map a facade error to its RFC 9457 object and, for a 500, the full
+/// operator-facing chain. Spec-shaped core errors already carry problem
+/// details and pick their own status through [`status_for`] (a `NotFound`
+/// raised at genesis retrieval arrives wrapped in `Core`, one raised while
+/// stepping the resolver in `Resolver`, and both delegate to it); everything
+/// else is categorised without leaking what the backend said.
+pub fn map_client_error(err: did_btcr2_client::Error) -> (Value, Option<String>) {
+    use did_btcr2_client::{Error, TransportError};
+    use error_iter::ErrorIter as _;
+
+    let chain = {
+        let mut s = err.to_string();
+        for source in err.sources().skip(1) {
+            s.push_str("\n  Caused by: ");
+            s.push_str(&source.to_string());
+        }
+        s
+    };
+    let details = match err {
+        Error::Btcr2(e) => e.details(),
+        Error::Core(e) => e.details(),
+        Error::Resolver(e) => e.details(),
+        Error::Identifier(e) => did_btcr2::error::Btcr2Error::from(e).details(),
+        Error::NoDefaultEndpoint(network) => Problem::FeatureNotSupported(format!(
+            "no Esplora endpoint is configured for network `{network}`; DIDs on this network cannot be resolved by this server"
+        ))
+        .details(),
+        Error::Transport(TransportError::Http(_) | TransportError::Io(_)) => {
+            Some(internal("the Bitcoin backend could not be reached"))
+        }
+        Error::Transport(TransportError::Status { .. }) => {
+            Some(internal("the Bitcoin backend returned an error response"))
+        }
+        Error::Transport(TransportError::Malformed(_)) | Error::Json(_) => {
+            Some(internal("the Bitcoin backend returned a malformed response"))
+        }
+        // The remaining variants (network selection, funding, signing) are
+        // not resolution outcomes; a `_` arm also keeps this compiling as the
+        // facade grows.
+        _ => None,
+    }
+    .unwrap_or_else(|| internal("the resolver failed internally"));
+    let diagnostic = (status_for(details["type"].as_str().unwrap_or("")) == 500).then_some(chain);
+    (details, diagnostic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
