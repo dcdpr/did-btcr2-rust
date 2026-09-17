@@ -195,7 +195,10 @@ where
 /// The request-target is split on the first `?`, so a raw `?` is the query
 /// string and only a percent-encoded `%3F` reaches the handler as part of the
 /// DID segment. The logged method is the one received, so a rejected `POST`
-/// is logged as such.
+/// is logged as such. Both are client-supplied and `tiny_http` passes ASCII
+/// control characters through, so the method, the target and the diagnostic
+/// (which can carry a backend's response body) are escaped before they reach
+/// stderr: no terminal control sequence or forged log line gets in.
 ///
 /// A panic while handling is caught here: the request is answered with the
 /// crate's own 500 `INTERNAL_ERROR` body (not `tiny_http`'s bodiless default)
@@ -233,9 +236,14 @@ fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
             )
         }
     };
-    eprintln!("{} {} -> {}", plain.method, target, response.status);
+    eprintln!(
+        "{} {} -> {}",
+        escape_for_log(&plain.method),
+        shown_target,
+        response.status
+    );
     if let Some(diagnostic) = &response.diagnostic {
-        eprintln!("{diagnostic}");
+        eprintln!("{}", escape_for_log(diagnostic));
     }
     let mut out = tiny_http::Response::from_data(response.body).with_status_code(response.status);
     for (name, value) in &response.headers {
@@ -313,4 +321,44 @@ fn header_values(req: &Request, name: &str) -> Option<String> {
         .map(|(_, v)| v.as_str())
         .collect();
     (!values.is_empty()).then(|| values.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Printable ASCII passes through; every control character, including
+    /// the terminal escapes a request line can smuggle, becomes its Rust
+    /// escape, and a newline cannot start a forged log line.
+    #[test]
+    fn escape_for_log_neutralises_control_characters() {
+        let plain = "/1.0/identifiers/did:btcr2:k1abc?versionId=1";
+        assert_eq!(escape_for_log(plain), plain);
+        assert_eq!(
+            escape_for_log("/1.0/identifiers/\x1b[31mRED\x1b[0m\x07x"),
+            "/1.0/identifiers/\\u{1b}[31mRED\\u{1b}[0m\\u{7}x"
+        );
+        assert_eq!(
+            escape_for_log("GET /x -> 200\nGET /forged -> 200"),
+            "GET /x -> 200\\nGET /forged -> 200"
+        );
+        assert_eq!(escape_for_log("tab\there"), "tab\\there");
+        assert_eq!(escape_for_log("é"), "\\u{e9}");
+        for escaped in [escape_for_log("\x00\x01\x1f\x7f"), escape_for_log("\r\n")] {
+            assert!(
+                escaped.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+                "{escaped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn panic_message_reads_str_and_string_payloads() {
+        let from_str = catch_unwind(|| panic!("literal")).unwrap_err();
+        assert_eq!(panic_message(from_str.as_ref()), "literal");
+        let from_string = catch_unwind(|| panic!("{}", String::from("formatted"))).unwrap_err();
+        assert_eq!(panic_message(from_string.as_ref()), "formatted");
+        let other = catch_unwind(|| std::panic::panic_any(7u8)).unwrap_err();
+        assert_eq!(panic_message(other.as_ref()), "non-string panic payload");
+    }
 }
