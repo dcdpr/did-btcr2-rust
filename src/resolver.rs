@@ -131,6 +131,10 @@ pub struct Resolver<T = ()> {
     /// `resolutionOptions.minConf` (default 6): a signal with fewer
     /// confirmations than this is skipped by `find_next_signals`.
     min_conf: NonZeroU32,
+    /// The media type reported as `didResolutionMetadata.contentType`
+    /// (data-structures.md "DID Resolution Metadata"):
+    /// `resolutionOptions.accept`, or `application/did` when unset.
+    content_type: String,
     /// Block height of the MOST-RECENTLY-APPLIED unique update, the basis for
     /// `confirmations` (resolve.md:38,57). Overwritten on each unique apply; under
     /// the ascending (target_version_id, block_height) sort this ends as the
@@ -179,6 +183,10 @@ impl Resolver {
         let min_conf = resolution_options
             .min_conf
             .unwrap_or(ResolutionOptions::DEFAULT_MIN_CONF);
+        let content_type = resolution_options
+            .accept
+            .clone()
+            .unwrap_or_else(|| "application/did".to_string());
         let rpc_host = esplora_base(resolution_options.esplora_url.as_deref())?;
         let update_lookup_table = match resolution_options.sidecar_data {
             Some(SidecarData {
@@ -196,6 +204,7 @@ impl Resolver {
             update_lookup_table,
             chain_tip_height,
             min_conf,
+            content_type,
             applied_block_height: None,
             rpc_host,
             request_cache: HashSet::new(),
@@ -801,6 +810,7 @@ impl<T> Resolver<T> {
             update_lookup_table: self.update_lookup_table,
             chain_tip_height: self.chain_tip_height,
             min_conf: self.min_conf,
+            content_type: self.content_type,
             applied_block_height: self.applied_block_height,
             rpc_host: self.rpc_host,
             request_cache: self.request_cache,
@@ -836,7 +846,9 @@ impl<T> Resolver<T> {
             updated: None,
         };
         ResolutionResult {
-            resolution_metadata: crate::document::ResolutionMetadata::default(),
+            resolution_metadata: crate::document::ResolutionMetadata {
+                content_type: Some(self.content_type.clone()),
+            },
             document: self.contemporary_doc.clone().into(),
             document_metadata,
         }
@@ -2739,6 +2751,57 @@ mod tests {
             },
         )
         .expect("versionTime alone is valid");
+    }
+
+    /// With no `accept` option, `didResolutionMetadata.contentType` is
+    /// `application/did`, the default representation.
+    ///
+    /// Spec: did-btcr2/src/data-structures.md "DID Resolution Metadata" (a
+    /// resolver returning a bare DID document MUST use the media type
+    /// `application/did`; `contentType` records the media type of the DID
+    /// document itself).
+    #[test]
+    fn content_type_defaults_to_application_did_when_accept_is_unset() {
+        let (_did, initial) = chain_initial_document();
+        let resolver = Resolver::new(
+            initial,
+            ResolutionOptions {
+                accept: None,
+                ..test_options()
+            },
+        )
+        .expect("options are valid");
+        let result = drive_to_resolved(resolver, vec![]);
+        assert_eq!(
+            result.resolution_metadata.content_type.as_deref(),
+            Some("application/did"),
+            "data-structures.md: the default representation is application/did"
+        );
+    }
+
+    /// A caller-supplied `accept` option is echoed as
+    /// `didResolutionMetadata.contentType`.
+    ///
+    /// Spec: did-btcr2/src/data-structures.md "DID Resolution Metadata"
+    /// (`contentType` records the media type of the DID document itself) and
+    /// "DID Resolution Options" (`accept`, the caller's preferred media type).
+    #[test]
+    fn content_type_echoes_the_accept_option() {
+        let (_did, initial) = chain_initial_document();
+        let resolver = Resolver::new(
+            initial,
+            ResolutionOptions {
+                accept: Some("application/did+ld+json".to_string()),
+                ..test_options()
+            },
+        )
+        .expect("options are valid");
+        let result = drive_to_resolved(resolver, vec![]);
+        assert_eq!(
+            result.resolution_metadata.content_type.as_deref(),
+            Some("application/did+ld+json"),
+            "data-structures.md: contentType records the requested media type"
+        );
     }
 
     /// The same rejection reaches a `Document::resolve` caller as the

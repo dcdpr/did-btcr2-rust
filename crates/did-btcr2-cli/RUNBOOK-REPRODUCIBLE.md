@@ -222,7 +222,9 @@ REAL captured output (resolution triple, document trimmed to key fields;
     "deactivated": false,
     "versionId": "1"
   },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 
@@ -302,7 +304,9 @@ SAMPLE output (depends on a real broadcast — not captured here):
     "deactivated": false,
     "versionId": "2"
   },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 
@@ -376,7 +380,9 @@ SAMPLE output (depends on a real broadcast — not captured here):
     "deactivated": true,
     "versionId": "3"
   },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 

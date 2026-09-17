@@ -549,11 +549,14 @@ fn parse_write(
 /// Build the spec-key resolution JSON triple.
 ///
 /// `ResolutionResult` does NOT implement `Serialize`, so this uses
-/// `serde_json::json!` at the build site. Output is byte-identical to the
-/// pre-facade CLI.
+/// `serde_json::json!` at the build site. `didResolutionMetadata.contentType`
+/// is the media type the core reports (`application/did` unless `accept` was
+/// supplied).
 fn build_resolution_json(result: &ResolutionResult) -> serde_json::Value {
     serde_json::json!({
-        "didResolutionMetadata": {},
+        "didResolutionMetadata": {
+            "contentType": result.resolution_metadata.content_type,
+        },
         "didDocument": result.document.as_ref(),
         "didDocumentMetadata": result.document_metadata,
     })
@@ -1285,6 +1288,49 @@ mod tests {
 
     fn args_from_strings(strings: &[&str]) -> Vec<OsString> {
         strings.iter().map(OsString::from).collect()
+    }
+
+    /// The resolve output's `didResolutionMetadata` carries the `contentType`
+    /// the core reports, beside the document and its metadata under their
+    /// spec keys (`versionId` as a string).
+    ///
+    /// Spec: did-btcr2/src/data-structures.md "DID Resolution Metadata"
+    /// (`contentType` records the media type of the DID document itself).
+    #[test]
+    fn build_resolution_json_carries_content_type() {
+        use did_btcr2::document::{DocumentMetadata, InitialDocument, ResolutionMetadata};
+        use std::num::NonZeroU64;
+        use std::str::FromStr as _;
+
+        let did_str = "did:btcr2:k1qgpakaw4lwemekywf0lyth9hf6j8r2td7gqtrs4aztqfky50jnx7s8gfapup6";
+        let did = did_btcr2::identifier::Did::from_str(did_str).expect("well-formed k1 DID");
+        let document = did_btcr2::Document::from(
+            InitialDocument::from_did(&did, &ResolutionOptions::default())
+                .expect("k1 DID generates its initial document"),
+        );
+        let mut resolution_metadata = ResolutionMetadata::default();
+        resolution_metadata.content_type = Some("application/did".to_string());
+        let result = ResolutionResult {
+            resolution_metadata,
+            document,
+            document_metadata: DocumentMetadata {
+                version_id: NonZeroU64::MIN,
+                confirmations: Some(0),
+                deactivated: false,
+                updated: None,
+            },
+        };
+
+        let out = build_resolution_json(&result);
+        assert_eq!(
+            out["didResolutionMetadata"]["contentType"], "application/did",
+            "contentType is the media type the core reports"
+        );
+        assert_eq!(out["didDocument"]["id"], did_str);
+        assert_eq!(
+            out["didDocumentMetadata"]["versionId"], "1",
+            "versionId is an ASCII string on the wire"
+        );
     }
 
     #[test]

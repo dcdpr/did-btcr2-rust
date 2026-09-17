@@ -99,7 +99,9 @@ cargo run -q -p did-btcr2-cli -- resolve --network mutinynet "$DID"
 {
   "didDocument": { "id": "did:btcr2:k1q5p…", "//": "verificationMethod / service / relationship arrays" },
   "didDocumentMetadata": { "deactivated": false, "versionId": "1" },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 
@@ -172,7 +174,9 @@ cargo run -q -p did-btcr2-cli -- resolve --sidecar ./update-v2.sidecar.json \
     "//": "other fields omitted"
   },
   "didDocumentMetadata": { "deactivated": false, "versionId": "2" },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 
@@ -206,7 +210,9 @@ cargo run -q -p did-btcr2-cli -- resolve --sidecar ./deactivate-v3.sidecar.json 
 {
   "didDocument": { "id": "did:btcr2:k1q5p…" },
   "didDocumentMetadata": { "deactivated": true, "versionId": "3" },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 

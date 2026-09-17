@@ -274,7 +274,9 @@ The output is the spec resolution triple as pretty-printed JSON. This is the
     "deactivated": false,
     "versionId": "1"
   },
-  "didResolutionMetadata": {}
+  "didResolutionMetadata": {
+    "contentType": "application/did"
+  }
 }
 ```
 

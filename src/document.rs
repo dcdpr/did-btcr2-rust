@@ -550,12 +550,20 @@ pub struct ResolutionResult {
     pub document_metadata: DocumentMetadata,
 }
 
-/// `didResolutionMetadata` per resolve.md:50 ("MAY be empty"). Empty in
-/// empty for now; `#[non_exhaustive]` lets later work add
-/// `contentType` and error JSON-LD fields without a breaking change.
+/// `didResolutionMetadata` per resolve.md:50 and data-structures.md
+/// "DID Resolution Metadata". `#[non_exhaustive]` lets later work add the
+/// error JSON-LD fields without a breaking change; outside the crate, build
+/// it with `Default::default()` and assign fields.
 #[non_exhaustive]
 #[derive(Debug, Default)]
-pub struct ResolutionMetadata {}
+pub struct ResolutionMetadata {
+    /// Media type of the resolved DID document — `contentType` on the wire
+    /// (data-structures.md "DID Resolution Metadata", MUST): the value of
+    /// `resolutionOptions.accept`, or `application/did` (the default
+    /// representation) when the caller supplied none. `None` only for a
+    /// value built outside the resolver via `Default`.
+    pub content_type: Option<String>,
+}
 
 /// `didDocumentMetadata` per adrs/0004-did-document-metadata-shape.md
 /// UNION resolution:
