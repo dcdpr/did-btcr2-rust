@@ -167,6 +167,13 @@ fn content_type(resp: &Response) -> &str {
         .expect("Content-Type present")
 }
 
+fn vary(resp: &Response) -> Option<&str> {
+    resp.headers
+        .iter()
+        .find(|(k, _)| *k == "Vary")
+        .map(|(_, v)| v.as_str())
+}
+
 fn error_type(resp: &Response) -> String {
     body(resp)["didResolutionMetadata"]["error"]["type"]
         .as_str()
@@ -361,6 +368,7 @@ fn did_representation_accept_returns_only_the_document() {
         );
         assert_eq!(resp.status, 200, "{media_type}");
         assert_eq!(content_type(&resp), media_type);
+        assert_eq!(vary(&resp), Some("Accept"), "{media_type}");
         let b = body(&resp);
         assert!(b.get("id").is_some(), "{media_type}: {b}");
         assert_eq!(b["id"], VALID_DID);
@@ -422,15 +430,19 @@ fn error_result_shape_matches_check_error_resolution_result() {
 // ---------------------------------------------------------------------------
 
 /// No `Accept` header and `Accept: */*` both select the full result, byte for
-/// byte the same as an explicit `application/did-resolution`.
+/// byte the same as an explicit `application/did-resolution`. All three carry
+/// `Vary: Accept`: the body was chosen from the header (or its absence), so a
+/// shared cache must key on it.
 #[test]
 fn absent_and_wildcard_accept_return_the_full_result() {
     let explicit = handle(&full(&resolve_path(VALID_DID)), &ok());
     let absent = handle(&get(&resolve_path(VALID_DID), &[]), &ok());
     let wildcard = handle(&get(&resolve_path(VALID_DID), &[("Accept", "*/*")]), &ok());
+    assert_eq!(vary(&explicit), Some("Accept"));
     for (name, resp) in [("absent", &absent), ("*/*", &wildcard)] {
         assert_eq!(resp.status, 200, "{name}");
         assert_eq!(content_type(resp), FULL, "{name}");
+        assert_eq!(vary(resp), Some("Accept"), "{name}");
         assert_eq!(resp.body, explicit.body, "{name}");
         assert_success_result(resp);
     }
@@ -531,6 +543,11 @@ fn unsupported_representation_maps_to_406() {
     );
     assert_eq!(resp.status, 406);
     assert_error_result(&resp, REPRESENTATION_NOT_SUPPORTED);
+    assert_eq!(
+        vary(&resp),
+        Some("Accept"),
+        "the 406 is a function of Accept"
+    );
     let detail = error_detail(&resp);
     for offered in [
         "application/did-resolution",
@@ -1059,7 +1076,10 @@ fn method_specific_errors_are_500_with_uri_verbatim() {
 
 /// Every error response and the 410 is a resolution result, so every one
 /// carries `Content-Type: application/did-resolution` — whatever `Accept`
-/// asked for.
+/// asked for. Only the 406 and the 410 also carry `Vary: Accept`: the 406
+/// exists because of the header, and the 410 shares the negotiated 200's
+/// URL, so a cache must key both on it. The other errors are the same
+/// bytes for every `Accept` and carry exactly the one header.
 #[test]
 fn error_and_410_responses_carry_did_resolution_content_type() {
     let bare = [("Accept", "application/did+json")];
@@ -1126,12 +1146,15 @@ fn error_and_410_responses_carry_did_resolution_content_type() {
     for (name, resp) in rows {
         assert!(resp.status >= 400, "{name}: {}", resp.status);
         assert_eq!(content_type(&resp), FULL, "{name}");
-        assert_eq!(
-            resp.headers.len(),
-            1,
-            "{name}: exactly one header: {:?}",
-            resp.headers
-        );
+        let expected: Vec<(&str, String)> = if name == "406" || name == "410" {
+            vec![
+                ("Content-Type", FULL.to_string()),
+                ("Vary", "Accept".to_string()),
+            ]
+        } else {
+            vec![("Content-Type", FULL.to_string())]
+        };
+        assert_eq!(resp.headers, expected, "{name}");
     }
 }
 

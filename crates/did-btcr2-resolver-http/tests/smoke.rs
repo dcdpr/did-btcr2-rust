@@ -166,6 +166,7 @@ fn socket_round_trip_through_the_tiny_http_shell() {
         header(&resp, "content-type"),
         Some("application/did-resolution")
     );
+    assert_eq!(header(&resp, "vary"), Some("Accept"));
     let body: serde_json::Value =
         serde_json::from_str(&resp.body_mut().read_to_string().expect("body")).expect("JSON");
     assert_eq!(body["didDocument"]["id"], VALID_DID);

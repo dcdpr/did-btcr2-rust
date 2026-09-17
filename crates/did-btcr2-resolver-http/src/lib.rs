@@ -119,13 +119,17 @@ pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
     let mode = match negotiate(accept.as_deref()) {
         Ok(m) => m,
         Err(offered) => {
-            return problem_response(
+            // The 406 exists only because of what `Accept` said: a cache
+            // must not hand it to a client whose `Accept` would negotiate.
+            let mut response = problem_response(
                 details_of(&Problem::RepresentationNotSupported(format!(
                     "none of the requested media types is supported; offered: {}",
                     offered.join(", ")
                 ))),
                 None,
             );
+            response.headers.push(vary_accept());
+            return response;
         }
     };
     opts.accept = Some(mode.opts_accept().to_string());
@@ -288,10 +292,20 @@ fn full_body(result: &ResolutionResult) -> Value {
     })
 }
 
+/// `Vary: Accept`, for every response whose body was chosen from the
+/// `Accept` header: the 200 (full result or bare document), the 410 and the
+/// 406. Without it a shared cache (RFC 9111 §4.1) could serve a bare document
+/// to a client that asked for the resolution result, or the reverse. The
+/// bodiless 404/405 and the other error results do not vary and do not
+/// carry it.
+fn vary_accept() -> (&'static str, String) {
+    ("Vary", "Accept".to_string())
+}
+
 fn json_response(status: u16, content_type: &'static str, body: &Value) -> Response {
     Response {
         status,
-        headers: vec![("Content-Type", content_type.to_string())],
+        headers: vec![("Content-Type", content_type.to_string()), vary_accept()],
         body: serde_json::to_vec(body).expect("a JSON value serialises"),
         diagnostic: None,
     }
