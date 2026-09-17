@@ -12,7 +12,8 @@ repeats the other; for "is requirement X covered", read CONFORMANCE.md.
 Run everything from the workspace root `did-btcr2-rust/`.
 
 ```bash
-cargo test -p did-btcr2 -p did-btcr2-client -p did-btcr2-cli -p chain-capture
+cargo test -p did-btcr2 -p did-btcr2-client -p did-btcr2-cli -p chain-capture -p did-btcr2-resolver-http
+cargo test -p did-btcr2-resolver-http --test conformance --test guard --test schema --test smoke
 cargo test -p did-btcr2 --lib op_vectors -- --nocapture     # prints the coverage ledger
 cargo test -p did-btcr2 --lib minted_chain -- --nocapture   # minted clean chain
 cargo test -p did-btcr2 --lib minted_fork -- --nocapture    # minted fork
@@ -25,14 +26,20 @@ Never use `cargo --all` or `--workspace`. The `smt-sim` workspace member fails
 to build without a system fontconfig, which is unrelated to any of the crates
 above. Always name crates with `-p`.
 
+The HTTP binding's suite (`did-btcr2-resolver-http`, second line) runs offline
+against a scripted resolver; only `smoke` opens a socket, on loopback at an
+ephemeral port. See §9 for the vendored W3C suite that `guard` and `schema`
+read.
+
 ## 2. What ships
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 353 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 361 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 64 + 1 e2e |
-| `did-btcr2-cli` | 44 + 2 broken-pipe |
+| `did-btcr2-cli` | 45 + 2 broken-pipe |
 | `chain-capture` | 185 |
+| `did-btcr2-resolver-http` | 15 lib + 9 bin + 45 conformance + 9 guard + 5 schema + 1 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 
@@ -523,3 +530,40 @@ run, because their fixtures are in-repo.
 
 To check the submodule out, see the one-time setup in
 [README.md](./README.md): `git submodule init && git submodule update`.
+
+## 9. The W3C resolution suite (`w3c-resolution-suite/`)
+
+`w3c/did-resolution-test-suite` is vendored as a git submodule pinned at
+`2649fdf719beadbd3c684d358eea23c3c2e514fe`. It is excluded from the crates.io
+package by the root `Cargo.toml` `include` allowlist; `cargo package --list`
+does not mention it.
+
+Two test binaries of `did-btcr2-resolver-http` read it at runtime:
+
+- **`tests/guard.rs`** — the traceability guard. It extracts every `it()` title
+  from the suite's `tests/4-did-resolution.js` and `tests/10-bindings.js` and
+  requires each to be a row (title and line) of
+  `crates/did-btcr2-resolver-http/CONFORMANCE.md`; every `Covered` row must name
+  a `#[test]` that exists in `tests/conformance.rs` or `tests/schema.rs`; the
+  per-file `it()` counts must match the pin; and the submodule's `HEAD` must be
+  the recorded pin. The title extractor and the existence check carry their own
+  negative tests, so the guard cannot pass vacuously.
+- **`tests/schema.rs`** — compiles the suite's `did-schema.json` (draft-04, the
+  schema the suite's `checkConformantDidDocument` feeds to Ajv) and validates a
+  resolved `did:btcr2` document against it; three malformed shapes must fail.
+
+**Absence behaviour.** When the submodule is absent or unpopulated these tests
+**fail**, naming `git submodule update --init w3c-resolution-suite`. This
+deliberately differs from §8: the operation-vector drivers skip because their
+fixtures are upstream-owned and optional; the W3C rows are the binding's
+conformance claim, and a claim that silently skips is not a claim. It is the
+same stance §7 takes for in-repo fixtures — a missing input the suite depends on
+is a defect, reported by name.
+
+**Regeneration.** `BLESS=1 cargo test -p did-btcr2-resolver-http --test guard`
+rewrites `CONFORMANCE.md` from the curated table. A pin bump means updating
+`PIN` in `guard.rs`, re-checking every row's `Line (at pin)` column against the
+new files, and re-blessing.
+
+The live mocha run against a deployed host is a later acceptance gate; this
+suite is the development loop.
