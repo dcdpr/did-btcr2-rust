@@ -98,6 +98,18 @@ pub enum Error {
 
     /// Invalid hash length
     InvalidHashLength,
+
+    /// The DID is well-formed under DID Core §3.1 but names a method other than
+    /// `btcr2`. Carries the method name found, so the caller can report it.
+    #[error("DID method `{0}` is not supported; only `btcr2` is")]
+    MethodNotSupported(String),
+
+    /// The input is a DID URL (it carries a path, query or fragment after the
+    /// method-specific-id), where a bare DID is required. Distinguished from a
+    /// malformed DID so a resolver can report the unsupported feature rather
+    /// than an invalid identifier.
+    #[error("a DID URL was supplied where a DID is required (path, query or fragment present)")]
+    DidUrl,
 }
 
 /// Extension trait for types that may carry a Bitcoin [`Network`] hint.
@@ -458,7 +470,84 @@ impl DidComponents {
     }
 }
 
+/// Outcome of the generic DID Core §3.1 syntax pass, before any method logic.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DidSyntax<'a> {
+    /// A bare DID: `did:` method-name `:` method-specific-id, nothing after.
+    Did {
+        method: &'a str,
+        method_specific_id: &'a str,
+    },
+    /// A DID followed by a path (`/`), query (`?`) or fragment (`#`) — a DID URL.
+    DidUrl,
+}
+
+/// Check `s` against the DID Core §3.1 ABNF (`specs/did/index.html:1164-1169`,
+/// `:1216`), independent of any method:
+/// `did = "did:" method-name ":" method-specific-id`,
+/// `method-name = 1*(%x61-7A / DIGIT)`,
+/// `method-specific-id = *( *idchar ":" ) 1*idchar`,
+/// `idchar = ALPHA / DIGIT / "." / "-" / "_" / pct-encoded`, `pct-encoded = "%" HEXDIG HEXDIG`.
+/// The first `/`, `?` or `#` after at least one idchar starts a DID URL's
+/// path/query/fragment and ends the DID. This is the one DID-syntax parser in
+/// the crate; `json_tools::is_did_syntax` (controller validation) wraps it.
+pub(crate) fn parse_did_syntax(s: &str) -> Result<DidSyntax<'_>, Error> {
+    let rest = s
+        .strip_prefix("did:")
+        .ok_or_else(|| Error::InvalidDidFormat("DID must start with `did:`".to_string()))?;
+    let (method, rest) = rest.split_once(':').ok_or_else(|| {
+        Error::InvalidDidFormat("DID is missing the method-specific-id".to_string())
+    })?;
+    if method.is_empty()
+        || !method
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(Error::InvalidDidFormat(
+            "method-name must be 1*(%x61-7A / DIGIT)".to_string(),
+        ));
+    }
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':') => i += 1,
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
+                i += 3
+            }
+            b'/' | b'?' | b'#' => break,
+            _ => {
+                return Err(Error::InvalidDidFormat(
+                    "invalid character in method-specific-id".to_string(),
+                ));
+            }
+        }
+    }
+    let method_specific_id = &rest[..i];
+    if method_specific_id.is_empty() || method_specific_id.ends_with(':') {
+        return Err(Error::InvalidDidFormat(
+            "method-specific-id must end with an idchar".to_string(),
+        ));
+    }
+    if i < bytes.len() {
+        return Ok(DidSyntax::DidUrl);
+    }
+    Ok(DidSyntax::Did {
+        method,
+        method_specific_id,
+    })
+}
+
 /// Parse a DID:BTCR2 identifier string into its components
+///
+/// The generic DID Core §3.1 syntax is checked first ([`parse_did_syntax`]),
+/// then the method (`btcr2`), then the Bech32m payload — so a malformed DID
+/// is reported as [`Error::InvalidDidFormat`] before a well-formed DID of
+/// another method is reported as [`Error::MethodNotSupported`], and a DID URL
+/// is [`Error::DidUrl`].
 ///
 /// # Arguments
 ///
@@ -474,15 +563,15 @@ impl DidComponents {
 /// public doctest is preserved as the `parse_did_identifier_decodes_key_based`
 /// unit test.
 fn parse_did_identifier(did: &str) -> Result<DidComponents, Error> {
-    // Check DID prefix
-    if !did.starts_with(DID_BTCR2_PREFIX) {
-        return Err(Error::InvalidDidFormat(format!(
-            "DID must start with '{DID_BTCR2_PREFIX}'",
-        )));
-    }
-
-    // Extract the bech32 part
-    let bech32_part = &did[DID_BTCR2_PREFIX.len()..];
+    let bech32_part = match parse_did_syntax(did)? {
+        DidSyntax::DidUrl => return Err(Error::DidUrl),
+        DidSyntax::Did { method, .. } if method != "btcr2" => {
+            return Err(Error::MethodNotSupported(method.to_string()));
+        }
+        DidSyntax::Did {
+            method_specific_id, ..
+        } => method_specific_id,
+    };
 
     // The spec requires a lowercase method-specific-id. Bech32 itself accepts
     // an all-uppercase string (BIP-173 case-insensitivity), so check before
@@ -663,17 +752,122 @@ mod tests {
         assert_eq!(components.id_type, hash);
     }
 
+    /// A well-formed DID of another method is `MethodNotSupported`, naming the
+    /// method; a string that is not a DID at all is `InvalidDidFormat`. Both
+    /// are typed errors, never a panic.
     #[test]
     fn test_invalid_prefix() {
-        let result = parse_did_identifier("did:example:123");
-        assert!(matches!(result, Err(Error::InvalidDidFormat(_))));
+        match parse_did_identifier("did:example:123") {
+            Err(Error::MethodNotSupported(m)) if m == "example" => {}
+            other => panic!("expected MethodNotSupported(\"example\"), got {other:?}"),
+        }
 
         // the old on-wire prefix `did:btc1:` is hard-rejected with a typed
         // error (no back-compat acceptance path), never a panic.
         let legacy = parse_did_identifier(
             "did:btc1:k1qqpuwwde82nennsavvf0lqfnlvx7frrgzs57lchr02q8mz49qzaaxmqphnvcx",
         );
-        assert!(matches!(legacy, Err(Error::InvalidDidFormat(_))));
+        match legacy {
+            Err(Error::MethodNotSupported(m)) if m == "btc1" => {}
+            other => panic!("expected MethodNotSupported(\"btc1\"), got {other:?}"),
+        }
+
+        match parse_did_identifier("not-a-did") {
+            Err(Error::InvalidDidFormat(_)) => {}
+            other => panic!("expected InvalidDidFormat for not-a-did, got {other:?}"),
+        }
+    }
+
+    /// One row per DID Core §3.1 ABNF rule, through the generic syntax pass:
+    /// the `did:` prefix, `method-name = 1*(%x61-7A / DIGIT)`,
+    /// `method-specific-id = *( *idchar ":" ) 1*idchar`, `pct-encoded`, and
+    /// the `/ ? #` delimiters that turn a DID into a DID URL.
+    #[test]
+    fn did_syntax_rows_follow_the_did_core_abnf() {
+        #[derive(Debug)]
+        enum Expected {
+            Did(&'static str, &'static str),
+            DidUrl,
+            Invalid,
+        }
+        use Expected::*;
+
+        const K1: &str =
+            "did:btcr2:k1qgpakaw4lwemekywf0lyth9hf6j8r2td7gqtrs4aztqfky50jnx7s8gfapup6";
+        let rows = [
+            (K1, Did("btcr2", &K1[DID_BTCR2_PREFIX.len()..])),
+            ("not-a-did", Invalid),
+            ("did:example", Invalid),
+            ("did:example:", Invalid),
+            ("did::abc", Invalid),
+            ("did:Example:x", Invalid),
+            ("did:ex ample:x", Invalid),
+            ("did:example:a b", Invalid),
+            ("did:example:a:b", Did("example", "a:b")),
+            ("did:example::b", Did("example", ":b")),
+            ("did:example:a:", Invalid),
+            ("did:example:%3A", Did("example", "%3A")),
+            ("did:example:%3G", Invalid),
+            ("did:example:%3", Invalid),
+            ("did:example:%", Invalid),
+            ("did:example:abc/path", DidUrl),
+            ("did:example:abc?service=files", DidUrl),
+            ("did:example:abc#key-0", DidUrl),
+            ("did:example:/path", Invalid),
+        ];
+        for (input, expected) in rows {
+            let got = parse_did_syntax(input);
+            match (&expected, &got) {
+                (
+                    Did(method, msid),
+                    Ok(DidSyntax::Did {
+                        method: m,
+                        method_specific_id: id,
+                    }),
+                ) => {
+                    assert_eq!(m, method, "{input}: method");
+                    assert_eq!(id, msid, "{input}: method-specific-id");
+                }
+                (DidUrl, Ok(DidSyntax::DidUrl)) => {}
+                (Invalid, Err(Error::InvalidDidFormat(_))) => {}
+                _ => panic!("{input}: expected {expected:?}, got {got:?}"),
+            }
+        }
+    }
+
+    /// A well-formed DID whose method is not `btcr2` fails at the method
+    /// check, carrying the method name found.
+    #[test]
+    fn unsupported_method_is_reported_by_name() {
+        match "did:unsupported:123456789abcdefghi".parse::<Did>() {
+            Err(Error::MethodNotSupported(m)) => assert_eq!(m, "unsupported"),
+            other => panic!("expected MethodNotSupported, got {other:?}"),
+        }
+    }
+
+    /// A path, query or fragment after a valid method-specific-id is a DID
+    /// URL, reported as `DidUrl`; a pct-encoded triplet passes the generic
+    /// syntax and fails the btcr2 bech32 decode instead, so it is neither
+    /// `DidUrl` nor `MethodNotSupported`.
+    #[test]
+    fn did_url_inputs_are_distinguished_from_malformed_dids() {
+        const K1: &str =
+            "did:btcr2:k1qgpakaw4lwemekywf0lyth9hf6j8r2td7gqtrs4aztqfky50jnx7s8gfapup6";
+        for suffix in ["/path", "?service=files", "#key-0"] {
+            let input = format!("{K1}{suffix}");
+            match input.parse::<Did>() {
+                Err(Error::DidUrl) => {}
+                other => panic!("{input}: expected DidUrl, got {other:?}"),
+            }
+        }
+
+        let input = format!("{K1}%3A");
+        match input.parse::<Did>() {
+            Err(Error::DidUrl) | Err(Error::MethodNotSupported(_)) | Ok(_) => {
+                panic!("{input}: a pct-encoded suffix must fail the btcr2 decode")
+            }
+            Err(_) => {}
+        }
     }
 
     #[test]

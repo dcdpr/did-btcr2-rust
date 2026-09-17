@@ -43,6 +43,13 @@ pub enum Btcr2Error {
     #[error("One or more resolution options are invalid: {0}")]
     InvalidOptions(String),
 
+    /// The DID is well-formed but its method is not one this resolver
+    /// implements. DID Resolution §4.4 step 2: syntax is checked first
+    /// (`INVALID_DID`), then the method (`METHOD_NOT_SUPPORTED`). The detail is
+    /// the method name found.
+    #[error("The DID method is not supported: {0}")]
+    MethodNotSupported(String),
+
     // Errors from DID BTCR2 Spec
     //
     /// Sidecar data was invalid
@@ -112,6 +119,7 @@ impl Btcr2Error {
             Self::InvalidDidDocument(_) => "The DID document was malformed",
             Self::NotFound(_) => "The DID document was not found",
             Self::InvalidOptions(_) => "One or more resolution options are invalid",
+            Self::MethodNotSupported(_) => "The DID method is not supported",
             Self::InvalidSidecarData(_) => "Sidecar data was invalid",
             Self::LatePublishingError(_) => "Update payload was published late",
             Self::MissingUpdateData { .. } => {
@@ -141,7 +149,8 @@ impl ProblemDetails for Btcr2Error {
             Self::InvalidDid(_)
             | Self::InvalidDidDocument(_)
             | Self::NotFound(_)
-            | Self::InvalidOptions(_) => "https://www.w3.org/ns/did",
+            | Self::InvalidOptions(_)
+            | Self::MethodNotSupported(_) => "https://www.w3.org/ns/did",
             // The method's own namespace, the same one the document
             // `@context` uses (`https://btcr2.dev/context/v1`). The spec's
             // error registry (did-btcr2/src/errors.md) names the codes but
@@ -163,6 +172,7 @@ impl ProblemDetails for Btcr2Error {
             Self::InvalidDidDocument(_) => "INVALID_DID_DOCUMENT",
             Self::NotFound(_) => "NOT_FOUND",
             Self::InvalidOptions(_) => "INVALID_OPTIONS",
+            Self::MethodNotSupported(_) => "METHOD_NOT_SUPPORTED",
             Self::InvalidSidecarData(_) => "INVALID_SIDECAR_DATA",
             Self::LatePublishingError(_) => "LATE_PUBLISHING",
             Self::MissingUpdateData { .. } => "MISSING_UPDATE_DATA",
@@ -185,6 +195,7 @@ impl ProblemDetails for Btcr2Error {
                 Self::InvalidDidDocument(detail) => detail.clone(),
                 Self::NotFound(detail) => detail.clone(),
                 Self::InvalidOptions(detail) => detail.clone(),
+                Self::MethodNotSupported(detail) => detail.clone(),
                 Self::InvalidSidecarData(detail) => detail.clone(),
                 Self::LatePublishingError(detail) => detail.clone(),
                 Self::MissingUpdateData { update_hash } => {
@@ -198,6 +209,23 @@ impl ProblemDetails for Btcr2Error {
                 Self::Unsupported(detail) => detail.clone(),
             },
         }))
+    }
+}
+
+/// Bridge a DID-identifier parse failure to the resolution vocabulary: an
+/// unsupported method is `METHOD_NOT_SUPPORTED`; everything else — a
+/// malformed DID, a DID URL where a DID is required, a bad bech32 payload —
+/// is `INVALID_DID`, carrying the parser's message as the detail. The parse
+/// taxonomy stays granular for callers that want it; this is the
+/// spec-facing view.
+impl From<crate::identifier::Error> for Btcr2Error {
+    fn from(err: crate::identifier::Error) -> Self {
+        match err {
+            crate::identifier::Error::MethodNotSupported(method) => {
+                Self::MethodNotSupported(method)
+            }
+            other => Self::InvalidDid(other.to_string()),
+        }
     }
 }
 
@@ -273,6 +301,7 @@ mod tests {
             Btcr2Error::InvalidDidDocument(detail.into()),
             Btcr2Error::NotFound(detail.into()),
             Btcr2Error::InvalidOptions(detail.into()),
+            Btcr2Error::MethodNotSupported(detail.into()),
             Btcr2Error::InvalidSidecarData(detail.into()),
             Btcr2Error::LatePublishingError(detail.into()),
             Btcr2Error::InvalidUpdateProof(detail.into()),
@@ -300,6 +329,78 @@ mod tests {
             "{err}"
         );
         assert_eq!(err.details().expect("details")["title"], err.title());
+    }
+
+    /// `MethodNotSupported` is the DID Resolution `METHOD_NOT_SUPPORTED`
+    /// error: the standard `https://www.w3.org/ns/did#METHOD_NOT_SUPPORTED`
+    /// type, a fixed `title`, the method name as `detail`, and a Display that
+    /// opens with the title.
+    #[test]
+    fn method_not_supported_problem_details_shape() {
+        let err = Btcr2Error::MethodNotSupported("example".into());
+        let d = err
+            .details()
+            .expect("MethodNotSupported yields problem details");
+        assert_eq!(d["type"], "https://www.w3.org/ns/did#METHOD_NOT_SUPPORTED");
+        assert_eq!(d["title"], "The DID method is not supported");
+        assert_eq!(d["detail"], "example");
+        assert_eq!(err.title(), "The DID method is not supported");
+        assert_eq!(err.to_string(), "The DID method is not supported: example");
+    }
+
+    /// The identifier parser's taxonomy folds into the resolution vocabulary:
+    /// an unsupported method keeps its name as `METHOD_NOT_SUPPORTED`; every
+    /// other parse failure — malformed syntax, a DID URL where a DID is
+    /// required, a payload-level failure — is `INVALID_DID` carrying the
+    /// parser's message.
+    #[test]
+    fn identifier_errors_bridge_to_the_resolution_vocabulary() {
+        use crate::identifier::Error as IdError;
+
+        match Btcr2Error::from(IdError::MethodNotSupported("btc1".into())) {
+            Btcr2Error::MethodNotSupported(m) => assert_eq!(m, "btc1"),
+            other => panic!("expected MethodNotSupported, got {other:?}"),
+        }
+
+        match Btcr2Error::from(IdError::InvalidDidFormat("x".into())) {
+            Btcr2Error::InvalidDid(d) => assert_eq!(d, "Invalid DID format: x"),
+            other => panic!("expected InvalidDid, got {other:?}"),
+        }
+        let err = Btcr2Error::from(IdError::InvalidDidFormat("x".into()));
+        assert_eq!(
+            err.details().expect("details")["type"],
+            "https://www.w3.org/ns/did#INVALID_DID"
+        );
+
+        match Btcr2Error::from(IdError::DidUrl) {
+            Btcr2Error::InvalidDid(_) => {}
+            other => panic!("expected InvalidDid for a DID URL, got {other:?}"),
+        }
+
+        match Btcr2Error::from(IdError::InvalidHashLength) {
+            Btcr2Error::InvalidDid(_) => {}
+            other => panic!("expected InvalidDid for InvalidHashLength, got {other:?}"),
+        }
+    }
+
+    /// End to end through `Did::from_str`: a malformed DID is `INVALID_DID`
+    /// and a well-formed DID of another method is `METHOD_NOT_SUPPORTED` —
+    /// the two inputs the W3C resolution suite sends.
+    #[test]
+    fn suite_inputs_split_into_invalid_did_and_method_not_supported() {
+        use crate::identifier::Did;
+
+        match "did:example".parse::<Did>().map_err(Btcr2Error::from) {
+            Err(Btcr2Error::InvalidDid(_)) => {}
+            other => panic!("expected InvalidDid for did:example, got {other:?}"),
+        }
+        match "did:unsupported:123456789abcdefghi"
+            .parse::<Did>()
+            .map_err(Btcr2Error::from)
+        {
+            Err(Btcr2Error::MethodNotSupported(m)) => assert_eq!(m, "unsupported"),
+            other => panic!("expected MethodNotSupported, got {other:?}"),
+        }
     }
 
     /// `InvalidDid` carries the W3C `did` namespace prefix, the `INVALID_DID`

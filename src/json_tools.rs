@@ -1,4 +1,4 @@
-use crate::identifier::Sha256Hash;
+use crate::identifier::{DidSyntax, Sha256Hash, parse_did_syntax};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use onlyerror::Error;
@@ -182,48 +182,11 @@ pub(crate) fn controllers_from_object(value: &Value) -> Result<Vec<String>, Json
     }
 }
 
-/// DID Core 1.1 §3.1 DID syntax: `did:` `method-name` `:` `method-specific-id`,
-/// where `method-name` is one or more of `[a-z0-9]`, and `method-specific-id`
-/// is `*( *idchar ":" ) 1*idchar` with `idchar` = ALPHA / DIGIT / `.` / `-` /
-/// `_` / pct-encoded.
+/// DID Core 1.1 §3.1 DID syntax, any method — the `controller` rule. A DID
+/// URL (path, query or fragment present) is not a controller DID. Delegates
+/// to the crate's one DID-syntax parser, `identifier::parse_did_syntax`.
 pub(crate) fn is_did_syntax(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("did:") else {
-        return false;
-    };
-    let Some((method, id)) = rest.split_once(':') else {
-        return false;
-    };
-    if method.is_empty()
-        || !method
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-    {
-        return false;
-    }
-    // Every colon-separated segment may be empty except the last.
-    let Some(last) = id.rsplit(':').next() else {
-        return false;
-    };
-    !last.is_empty() && id.split(':').all(is_idchars)
-}
-
-/// `*idchar`: ALPHA / DIGIT / `.` / `-` / `_` / pct-encoded (`%` + two hex).
-fn is_idchars(segment: &str) -> bool {
-    let bytes = segment.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_' => i += 1,
-            b'%' => match bytes.get(i + 1..i + 3) {
-                Some([high, low]) if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() => {
-                    i += 3;
-                }
-                _ => return false,
-            },
-            _ => return false,
-        }
-    }
-    true
+    matches!(parse_did_syntax(s), Ok(DidSyntax::Did { .. }))
 }
 
 #[cfg(test)]
