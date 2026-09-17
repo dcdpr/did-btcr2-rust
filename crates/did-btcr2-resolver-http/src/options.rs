@@ -11,6 +11,12 @@
 //! (or an `accept`, which the HTTP binding carries in the header only) would
 //! resolve the wrong version and report success. A duplicated name is rejected
 //! for the same reason — there is no "last one wins" to get wrong.
+//!
+//! `versionId` and `versionTime` together are rejected here as well as in the
+//! core's `Resolver::new`, with the same detail text. The core check comes
+//! after the client has fetched the chain tip, so leaving the pair to it
+//! would cost a wasted backend round-trip and, with the backend down, turn a
+//! deterministic 400 `INVALID_OPTIONS` into a 500.
 
 use std::collections::HashSet;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -50,9 +56,10 @@ fn invalid(detail: String) -> OptionsError {
 
 /// Parse the query string into the core's typed options. Accepted:
 /// `versionId` (positive integer), `versionTime` (RFC 3339, normalised to
-/// UTC), `minConf` (positive integer). `noCache` and `expandRelativeUrls`
-/// are registered options this resolver does not implement; any other name,
-/// including `accept` (header-only in the HTTP binding), is invalid.
+/// UTC), `minConf` (positive integer) — `versionId` and `versionTime` not
+/// together. `noCache` and `expandRelativeUrls` are registered options this
+/// resolver does not implement; any other name, including `accept`
+/// (header-only in the HTTP binding), is invalid.
 pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsError> {
     let Some(query) = query.filter(|s| !s.is_empty()) else {
         return Ok(ResolutionOptions::default());
@@ -114,6 +121,13 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
             _ => return Err(invalid(format!("unknown resolution option `{key}`"))),
         }
     }
+    if opts.version_id.is_some() && opts.version_time.is_some() {
+        // Word for word the core's `Resolver::new` detail, which stays as the
+        // backstop for callers that bypass this binding.
+        return Err(invalid(
+            "versionId and versionTime are mutually exclusive; supply at most one".to_string(),
+        ));
+    }
     Ok(opts)
 }
 
@@ -174,10 +188,23 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap())
         );
 
-        let opts = parse_options(Some("versionId=1&versionTime=2026-01-02T03:04:05Z"))
-            .expect("both set here; the core rejects the pair");
-        assert_eq!(opts.version_id.map(NonZeroU64::get), Some(1));
-        assert!(opts.version_time.is_some());
+        // The pair is rejected here, in either order, before the resolver
+        // runs — with the detail the core's `Resolver::new` uses, so a caller
+        // sees one message whichever check fires.
+        for query in [
+            "versionId=1&versionTime=2026-01-02T03:04:05Z",
+            "versionTime=2026-01-02T03:04:05Z&versionId=1",
+            "versionId=1&minConf=1&versionTime=2026-01-02T03:04:05Z",
+        ] {
+            assert_rejected(query, INVALID_OPTIONS, "versionId");
+            assert_rejected(query, INVALID_OPTIONS, "versionTime");
+            let err = parse_options(Some(query)).expect_err("rejected");
+            assert_eq!(
+                err.details()["detail"],
+                "versionId and versionTime are mutually exclusive; supply at most one",
+                "{query}"
+            );
+        }
 
         let opts = parse_options(Some("&versionId=2&")).expect("empty pairs are skipped");
         assert_eq!(opts.version_id.map(NonZeroU64::get), Some(2));
@@ -199,6 +226,7 @@ mod tests {
             ("versionId=%zz", "versionId"),
             ("ver%zz=1", "ver%zz"),
             ("VersionId=1", "VersionId"),
+            ("versionId=1&versionTime=2026-01-02T03:04:05Z", "versionId"),
         ] {
             assert_rejected(query, INVALID_OPTIONS, names);
         }

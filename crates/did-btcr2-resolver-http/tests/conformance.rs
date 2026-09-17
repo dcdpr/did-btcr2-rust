@@ -884,6 +884,31 @@ fn invalid_options_rows_are_400() {
     }
 }
 
+/// `versionId` and `versionTime` together are a 400 `INVALID_OPTIONS` decided
+/// by the binding alone: the resolver — and so the Bitcoin backend the
+/// production resolver contacts before the core's own check — is never
+/// reached, and the detail is the core's text so both checks read the same.
+#[test]
+fn version_id_with_version_time_is_400_before_the_resolver_is_reached() {
+    for query in [
+        "versionId=1&versionTime=2026-01-02T03:04:05Z",
+        "versionTime=2026-01-02T03:04:05Z&versionId=1",
+    ] {
+        let resp = handle(
+            &full(&format!("{}?{query}", resolve_path(VALID_DID))),
+            &Untouchable,
+        );
+        assert_eq!(resp.status, 400, "{query}");
+        assert_error_result(&resp, INVALID_OPTIONS);
+        assert_eq!(
+            error_detail(&resp),
+            "versionId and versionTime are mutually exclusive; supply at most one",
+            "{query}"
+        );
+        assert!(resp.diagnostic.is_none(), "{query}");
+    }
+}
+
 /// The registered options this resolver does not implement are a 501
 /// `FEATURE_NOT_SUPPORTED` naming the option.
 #[test]
