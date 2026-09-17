@@ -6,6 +6,8 @@
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use did_btcr2::document::{
     Document, DocumentMetadata, InitialDocument, ResolutionMetadata, ResolutionOptions,
@@ -52,8 +54,94 @@ fn ok_result(did: &Did) -> ResolutionResult {
     }
 }
 
+/// A resolver that panics on its first call and answers like `OkMock` after.
+#[derive(Clone)]
+struct PanicsOnce(Arc<AtomicBool>);
+
+impl Resolve for PanicsOnce {
+    fn resolve(
+        &self,
+        did: &Did,
+        _: ResolutionOptions,
+    ) -> Result<ResolutionResult, did_btcr2_client::Error> {
+        if !self.0.swap(true, Ordering::SeqCst) {
+            panic!("scripted panic on the first resolution");
+        }
+        Ok(ok_result(did))
+    }
+}
+
 fn header<'a>(resp: &'a ureq::http::Response<ureq::Body>, name: &str) -> Option<&'a str> {
     resp.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+/// A panic inside the handler is confined to its request: that request gets
+/// the crate's 500 `INTERNAL_ERROR` resolution result (a body, not
+/// `tiny_http`'s empty default), and the same — only — worker serves the next
+/// request normally. One worker so the second request cannot be picked up by
+/// a sibling; a client timeout so a retired worker fails the test instead of
+/// hanging it.
+#[test]
+fn a_panicking_request_is_answered_500_and_the_worker_keeps_serving() {
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+    let addr = server.server_addr().to_ip().expect("TCP listener");
+    let threads = NonZeroUsize::MIN;
+    let workers = serve(
+        Arc::clone(&server),
+        threads,
+        PanicsOnce(Arc::new(AtomicBool::new(false))),
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let url = format!("http://{addr}/1.0/identifiers/{VALID_DID}");
+
+    let mut resp = agent
+        .get(&url)
+        .header("Accept", "application/did-resolution")
+        .call()
+        .expect("the panicking request is still answered");
+    assert_eq!(resp.status().as_u16(), 500);
+    assert_eq!(
+        header(&resp, "content-type"),
+        Some("application/did-resolution")
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.body_mut().read_to_string().expect("body")).expect("JSON");
+    assert_eq!(
+        body["didResolutionMetadata"]["error"]["type"],
+        "https://www.w3.org/ns/did#INTERNAL_ERROR"
+    );
+    assert_eq!(
+        body["didResolutionMetadata"]["error"]["detail"],
+        "the resolver failed internally"
+    );
+    assert!(body["didDocument"].is_null());
+    assert_eq!(body["didDocumentMetadata"], serde_json::json!({}));
+    let text = serde_json::to_string(&body).expect("re-serialise");
+    assert!(
+        !text.contains("scripted panic"),
+        "the panic message stays off the wire: {text}"
+    );
+
+    let mut resp = agent
+        .get(&url)
+        .header("Accept", "application/did-resolution")
+        .call()
+        .expect("the worker is still serving");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.body_mut().read_to_string().expect("body")).expect("JSON");
+    assert_eq!(body["didDocument"]["id"], VALID_DID);
+
+    server.unblock();
+    for worker in workers {
+        worker
+            .join()
+            .expect("the worker exits normally, not by the panic");
+    }
 }
 
 #[test]

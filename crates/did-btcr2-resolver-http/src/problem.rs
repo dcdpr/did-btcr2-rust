@@ -105,7 +105,8 @@ pub fn problem_response(details: Value, diagnostic: Option<String>) -> Response 
     }
 }
 
-fn internal(category: &str) -> Value {
+/// The RFC 9457 object for an `INTERNAL_ERROR` whose detail is `category`.
+pub(crate) fn internal(category: &str) -> Value {
     Problem::InternalError(category.to_string())
         .details()
         .expect("InternalError carries details")

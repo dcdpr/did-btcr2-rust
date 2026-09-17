@@ -19,7 +19,9 @@ mod path;
 mod problem;
 mod resolve;
 
+use std::any::Any;
 use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -152,6 +154,12 @@ pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
 /// requests wait for a free worker. A worker exits when `recv()` fails
 /// (after [`tiny_http::Server::unblock`]); the caller joins the handles.
 ///
+/// A panic inside the handler (or the resolver behind it) is confined to the
+/// request that raised it: the worker answers that request with a 500
+/// `INTERNAL_ERROR` resolution result and goes on serving. Otherwise each
+/// panic would retire one worker, and after `threads` of them the listener
+/// would still queue requests that nothing takes.
+///
 /// Each worker prints one stderr line per request, `<METHOD> <request-target>
 /// -> <status>`, followed by the response's diagnostic (the error chain behind
 /// a 500) when there is one. The diagnostic never reaches the wire.
@@ -187,9 +195,15 @@ where
 /// The request-target is split on the first `?`, so a raw `?` is the query
 /// string and only a percent-encoded `%3F` reaches the handler as part of the
 /// DID segment. The logged method is the one received, so a rejected `POST`
-/// is logged as such; the target is logged verbatim.
+/// is logged as such.
+///
+/// A panic while handling is caught here: the request is answered with the
+/// crate's own 500 `INTERNAL_ERROR` body (not `tiny_http`'s bodiless default)
+/// and the panic message goes to the diagnostic line, so the worker survives
+/// and the client still receives a resolution result.
 fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
     let target = request.url().to_string();
+    let shown_target = escape_for_log(&target);
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), Some(q.to_string())),
         None => (target.clone(), None),
@@ -209,7 +223,16 @@ fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
             })
             .collect(),
     };
-    let response = handle(&plain, resolver);
+    let response = match catch_unwind(AssertUnwindSafe(|| handle(&plain, resolver))) {
+        Ok(response) => response,
+        Err(payload) => {
+            eprintln!("handler panicked on {shown_target}; the worker continues");
+            problem_response(
+                problem::internal("the resolver failed internally"),
+                Some(format!("panic: {}", panic_message(payload.as_ref()))),
+            )
+        }
+    };
     eprintln!("{} {} -> {}", plain.method, target, response.status);
     if let Some(diagnostic) = &response.diagnostic {
         eprintln!("{diagnostic}");
@@ -226,6 +249,26 @@ fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
     if let Err(e) = request.respond(out) {
         eprintln!("respond: {e}");
     }
+}
+
+/// The text of a panic payload: the `&str` or `String` a `panic!` carries, or
+/// a placeholder for any other payload type.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Render client-supplied text for a stderr line: every non-printable or
+/// non-ASCII character becomes its Rust escape (`\u{1b}`, `\n`, …), so a
+/// request-target cannot carry terminal control sequences or forged log
+/// lines into the operator's log.
+fn escape_for_log(s: &str) -> String {
+    s.chars().flat_map(char::escape_default).collect()
 }
 
 /// The full resolution result: the core's triple, `contentType` from the core.
