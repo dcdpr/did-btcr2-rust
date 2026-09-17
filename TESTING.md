@@ -39,7 +39,7 @@ read.
 | `did-btcr2-client` | 64 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
 | `chain-capture` | 185 |
-| `did-btcr2-resolver-http` | 15 lib + 9 bin + 45 conformance + 9 guard + 5 schema + 1 smoke |
+| `did-btcr2-resolver-http` | 17 lib + 9 bin + 46 conformance + 9 guard + 5 schema + 2 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 
