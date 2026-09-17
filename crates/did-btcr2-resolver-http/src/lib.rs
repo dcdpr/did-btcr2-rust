@@ -19,6 +19,10 @@ mod path;
 mod problem;
 mod resolve;
 
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
 use did_btcr2::document::ResolutionResult;
 use did_btcr2::error::{Btcr2Error, ProblemDetails};
 use did_btcr2::identifier::Did;
@@ -137,6 +141,90 @@ pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
             Mode::Full => json_response(200, RESOLUTION_RESULT, &full_body(&result)),
             Mode::Bare(media_type) => json_response(200, media_type, result.document.as_ref()),
         },
+    }
+}
+
+/// Run `threads` workers over `server`, each taking requests with `recv()`,
+/// handing them to [`handle`] with its own clone of `resolver`, and writing
+/// the response back. `threads` bounds handler concurrency only: `tiny_http`
+/// accepts and parses connections independently and queues the parsed
+/// requests, so nothing is dropped and there is no 503 path — excess
+/// requests wait for a free worker. A worker exits when `recv()` fails
+/// (after [`tiny_http::Server::unblock`]); the caller joins the handles.
+///
+/// Each worker prints one stderr line per request, `<METHOD> <request-target>
+/// -> <status>`, followed by the response's diagnostic (the error chain behind
+/// a 500) when there is one. The diagnostic never reaches the wire.
+pub fn serve<R>(
+    server: Arc<tiny_http::Server>,
+    threads: NonZeroUsize,
+    resolver: R,
+) -> Vec<JoinHandle<()>>
+where
+    R: Resolve + Clone + Send + 'static,
+{
+    (0..threads.get())
+        .map(|_| {
+            let server = Arc::clone(&server);
+            let resolver = resolver.clone();
+            std::thread::spawn(move || {
+                loop {
+                    match server.recv() {
+                        Ok(request) => serve_one(request, &resolver),
+                        Err(e) => {
+                            eprintln!("recv: {e}");
+                            break;
+                        }
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
+/// Adapt one `tiny_http` request: convert, handle, log one line, respond.
+///
+/// The request-target is split on the first `?`, so a raw `?` is the query
+/// string and only a percent-encoded `%3F` reaches the handler as part of the
+/// DID segment. The logged method is the one received, so a rejected `POST`
+/// is logged as such; the target is logged verbatim.
+fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
+    let target = request.url().to_string();
+    let (path, query) = match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), Some(q.to_string())),
+        None => (target.clone(), None),
+    };
+    let plain = Request {
+        method: request.method().as_str().to_string(),
+        path,
+        query,
+        headers: request
+            .headers()
+            .iter()
+            .map(|h| {
+                (
+                    h.field.as_str().as_str().to_string(),
+                    h.value.as_str().to_string(),
+                )
+            })
+            .collect(),
+    };
+    let response = handle(&plain, resolver);
+    eprintln!("{} {} -> {}", plain.method, target, response.status);
+    if let Some(diagnostic) = &response.diagnostic {
+        eprintln!("{diagnostic}");
+    }
+    let mut out = tiny_http::Response::from_data(response.body).with_status_code(response.status);
+    for (name, value) in &response.headers {
+        // Every emitted header is a fixed ASCII constant or a media type from a
+        // fixed set; a non-ASCII value would be a bug in the handler, not input.
+        match tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            Ok(header) => out = out.with_header(header),
+            Err(()) => eprintln!("dropping non-ASCII header {name}"),
+        }
+    }
+    if let Err(e) = request.respond(out) {
+        eprintln!("respond: {e}");
     }
 }
 
