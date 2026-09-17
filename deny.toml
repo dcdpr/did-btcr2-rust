@@ -13,6 +13,9 @@ allow = [
     # https://spdx.org/licenses/Unicode-3.0.html
     # https://spdx.org/licenses/Unicode-DFS-2016.html
     "MITNFA", "Unicode-3.0", "Unicode-DFS-2016",
+    # https://spdx.org/licenses/MIT-0.html — borrow-or-share, via fluent-uri <- referencing <- jsonschema (dev-dependency)
+    # https://spdx.org/licenses/Zlib.html — foldhash, via hashbrown <- jsonschema (dev-dependency)
+    "MIT-0", "Zlib",
 ]
 confidence-threshold = 0.93
 private = { ignore = true }

@@ -51,7 +51,7 @@ fn build_agent() -> ureq::Agent {
 /// Cloning shares the agent (its connection pool), so a caller that needs a
 /// second handle — one moved into a client, one kept — does not build a
 /// second agent.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UreqTransport {
     agent: ureq::Agent,
 }

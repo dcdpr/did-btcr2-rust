@@ -1,0 +1,31 @@
+[package]
+name = "did-btcr2-resolver-http"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "did-btcr2-resolver-http"
+path = "src/main.rs"
+
+[dependencies]
+# `version` alongside `path` keeps cargo-deny's wildcard ban clean for this member.
+did-btcr2 = { path = "../..", version = "0.1.0" }
+did-btcr2-client = { path = "../did-btcr2-client", version = "0.1.0" }
+# Blocking HTTP/1.1 listener: 5 transitive crates with default features, no TLS
+# (TLS is behind the non-default ssl-* features and is not wanted here).
+tiny_http = "0.12"
+onlyargs = "0.2"
+onlyerror = "0.1"
+error-iter = "0.4"
+serde_json = "1"
+# `versionTime` is RFC 3339 -> DateTime<Utc>; the core's exact feature set.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+# Validates the resolved document against the vendored W3C suite's draft-04
+# did-schema.json. Defaults pull reqwest + rustls + aws-lc-rs (138 crates vs
+# 62); the schema only uses internal `#/$defs` refs, so none of that is needed.
+jsonschema = { version = "0.56", default-features = false }
+# The one socket smoke test's client (already a client-crate dependency).
+ureq = "3"
