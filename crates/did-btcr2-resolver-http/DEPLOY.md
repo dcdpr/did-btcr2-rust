@@ -182,9 +182,10 @@ journalctl -u caddy | grep 'certificate obtained successfully'    # wait for thi
 ```
 Both 80 and 443 must be open: Caddy picks HTTP-01 or TLS-ALPN-01 at random. If Let's Encrypt
 rate-limits `sslip.io` (it is not on the Public Suffix List, so every user shares one bucket),
-switch the hostname to `nip.io`; Caddy also falls back to ZeroSSL on its own. `sslip.io` and
-`nip.io` are volunteer DNS services — fine for a throwaway, wrong for the real host. The
-shakedown got its Let's Encrypt certificate three seconds after the reload.
+switch the hostname to `nip.io`. With no `email` global option in the Caddyfile, Let's Encrypt
+is the only issuer Caddy configures — there is no ZeroSSL fallback. `sslip.io` and `nip.io`
+are volunteer DNS services — fine for a throwaway, wrong for the real host. The shakedown got
+its Let's Encrypt certificate three seconds after the reload.
 
 > **Expect scanners within a minute of issuance.** Certificate Transparency logs publish the
 > new name, and the shakedown journal showed about forty probes (`/.env`, `/.git/config`,
