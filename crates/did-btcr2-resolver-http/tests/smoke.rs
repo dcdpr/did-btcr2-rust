@@ -4,6 +4,8 @@
 //! the request/response adaptation, the status and header plumbing, and the
 //! `unblock` shutdown path.
 
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpStream;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +75,31 @@ impl Resolve for PanicsOnce {
 
 fn header<'a>(resp: &'a ureq::http::Response<ureq::Body>, name: &str) -> Option<&'a str> {
     resp.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Send a `HEAD` for `path` over a bare socket and return everything the
+/// server writes back: to EOF when it honours `Connection: close`, otherwise
+/// until nothing more arrives within the read timeout. Unlike an HTTP client,
+/// this does not discard a body the server should not have sent.
+fn raw_head(addr: std::net::SocketAddr, path: &str) -> String {
+    let mut sock = TcpStream::connect(addr).expect("connect to the shell");
+    sock.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set a read timeout");
+    sock.write_all(
+        format!("HEAD {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .expect("write the request");
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
+            Err(e) => panic!("read the response: {e}"),
+        }
+    }
+    String::from_utf8(raw).expect("the response is UTF-8")
 }
 
 /// A panic inside the handler is confined to its request: that request gets
@@ -222,18 +249,20 @@ fn socket_round_trip_through_the_tiny_http_shell() {
         r#"{"status":"ok"}"#
     );
 
-    // The handler returns the GET response for HEAD; the shell drops the body.
-    let mut resp = agent
-        .head(format!("http://{addr}/health"))
-        .call()
-        .expect("HEAD the liveness path");
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(header(&resp, "content-type"), Some("application/json"));
-    assert_eq!(
-        resp.body_mut().read_to_string().expect("body"),
-        "",
-        "HEAD carries no body"
+    // The handler returns the GET response for HEAD; the shell drops the body
+    // (RFC 9110 §9.3.2: the GET's `Content-Length`, no body). An HTTP client
+    // never reads a HEAD body, so this row speaks raw HTTP and asserts the
+    // bytes on the wire: nothing follows the header terminator.
+    let raw = raw_head(addr, "/health");
+    assert!(raw.starts_with("HTTP/1.1 200 "), "{raw:?}");
+    let (headers, rest) = raw.split_once("\r\n\r\n").expect("a complete header block");
+    let headers = headers.to_ascii_lowercase();
+    assert!(
+        headers.contains("\r\ncontent-type: application/json"),
+        "{raw:?}"
     );
+    assert!(headers.contains("\r\ncontent-length: 15"), "{raw:?}");
+    assert_eq!(rest, "", "HEAD carries no body: {raw:?}");
 
     // `unblock` wakes one blocked `recv()` per call; every worker must exit.
     for _ in 0..threads.get() {
