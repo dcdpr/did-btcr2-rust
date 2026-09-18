@@ -1,4 +1,5 @@
-//! Request-target path handling: strict percent-decoding and the one route.
+//! Request-target path handling: strict percent-decoding and the two routes
+//! the binding serves — the resolver prefix and the liveness path.
 //!
 //! The decoder is hand-rolled rather than borrowed from `urlencoding` because
 //! that crate's `decode` passes a malformed escape (`%ZZ`, or a trailing `%2`)
@@ -55,6 +56,9 @@ pub fn percent_decode(s: &str) -> Result<String, DecodeError> {
 /// The resolver path prefix of the DID Resolution HTTP binding.
 pub const RESOLVE_PREFIX: &str = "/1.0/identifiers/";
 
+/// The liveness path. Matched exactly, so `/health/` and `/healthz` are not it.
+pub const HEALTH_PATH: &str = "/health";
+
 /// Where a request-target path lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route<'a> {
@@ -64,13 +68,20 @@ pub enum Route<'a> {
         /// The raw path segment after the prefix, still percent-encoded.
         encoded_did: &'a str,
     },
+    /// The liveness route. Liveness only — no upstream probe — so a poller
+    /// cannot flap the endpoint on an Esplora hiccup. Answers `GET` and `HEAD`.
+    Health,
     /// Any other path.
     NotFound,
 }
 
-/// Match the path against the one route the binding serves. The prefix
-/// itself without a trailing slash is not the resolver endpoint.
+/// Match the path against the routes the binding serves: the liveness path
+/// exactly, else the resolver prefix. The prefix itself without a trailing
+/// slash is not the resolver endpoint.
 pub fn route(path: &str) -> Route<'_> {
+    if path == HEALTH_PATH {
+        return Route::Health;
+    }
     match path.strip_prefix(RESOLVE_PREFIX) {
         Some(rest) => Route::Resolve { encoded_did: rest },
         None => Route::NotFound,
@@ -130,6 +141,10 @@ mod tests {
             ("/1.0/identifiers", Route::NotFound),
             ("/", Route::NotFound),
             ("", Route::NotFound),
+            ("/health", Route::Health),
+            ("/health/", Route::NotFound),
+            ("/healthz", Route::NotFound),
+            ("/health/x", Route::NotFound),
             (
                 "/1.0/identifiers/did:x/extra",
                 Route::Resolve {

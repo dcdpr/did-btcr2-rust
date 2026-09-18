@@ -210,6 +210,31 @@ fn socket_round_trip_through_the_tiny_http_shell() {
         "didDocument is present, not omitted"
     );
 
+    let mut resp = agent
+        .get(format!("http://{addr}/health"))
+        .call()
+        .expect("GET the liveness path");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(header(&resp, "content-type"), Some("application/json"));
+    assert_eq!(header(&resp, "vary"), None);
+    assert_eq!(
+        resp.body_mut().read_to_string().expect("body"),
+        r#"{"status":"ok"}"#
+    );
+
+    // The handler returns the GET response for HEAD; the shell drops the body.
+    let mut resp = agent
+        .head(format!("http://{addr}/health"))
+        .call()
+        .expect("HEAD the liveness path");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(header(&resp, "content-type"), Some("application/json"));
+    assert_eq!(
+        resp.body_mut().read_to_string().expect("body"),
+        "",
+        "HEAD carries no body"
+    );
+
     // `unblock` wakes one blocked `recv()` per call; every worker must exit.
     for _ in 0..threads.get() {
         server.unblock();

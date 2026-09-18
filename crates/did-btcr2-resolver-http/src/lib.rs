@@ -9,6 +9,9 @@
 //! handler is a pure function over plain structs so the conformance suite drives
 //! it in-process with a scripted resolver; a thin `tiny_http` shell adapts it to
 //! a socket.
+//! `/health` is a liveness route beside the resolver path: `GET` and `HEAD`
+//! answer without reaching the resolver, so a supervisor, a proxy or an
+//! uptime poller can hit it without cost.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -32,7 +35,7 @@ use serde_json::{Value, json};
 
 pub use accept::{Mode, negotiate};
 pub use options::{OptionsError, parse_options};
-pub use path::{DecodeError, Route, percent_decode, route};
+pub use path::{DecodeError, HEALTH_PATH, Route, percent_decode, route};
 pub use problem::{
     Problem, RESOLUTION_RESULT, error_body, map_client_error, problem_response, status_for,
 };
@@ -67,14 +70,18 @@ pub struct Response {
 }
 
 /// Serve one request. Pure: no I/O, no clock, no logging — the shell owns
-/// those. Steps, in order: route, method, decode once, empty, parse the DID
-/// (a DID URL is an unsupported feature, another method is unsupported,
-/// anything else is an invalid DID), options, `Accept`, resolve, map, body.
+/// those. Steps, in order: route (the liveness route answers here, for GET
+/// and HEAD), method, decode once, empty, parse the DID (a DID URL is an
+/// unsupported feature, another method is unsupported, anything else is an
+/// invalid DID), options, `Accept`, resolve, map, body.
 /// Only a request that reaches the resolution function gets a
 /// resolution-result body; the route and method rejections are bodiless.
 pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
-    let Route::Resolve { encoded_did } = route(&req.path) else {
-        return plain(404, vec![]);
+    let encoded_did = match route(&req.path) {
+        Route::NotFound => return plain(404, vec![]),
+        Route::Health if req.method == "GET" || req.method == "HEAD" => return health(),
+        Route::Health => return plain(405, vec![("Allow", "GET, HEAD".to_string())]),
+        Route::Resolve { encoded_did } => encoded_did,
     };
     if req.method != "GET" {
         return plain(405, vec![("Allow", "GET".to_string())]);
@@ -311,6 +318,18 @@ fn json_response(status: u16, content_type: &'static str, body: &Value) -> Respo
     }
 }
 
+/// The liveness response. Built literally rather than through `json_response`
+/// because that helper adds `Vary: Accept`, and this body is not negotiated.
+/// The same value serves `HEAD`: the shell drops the body for that method.
+fn health() -> Response {
+    Response {
+        status: 200,
+        headers: vec![("Content-Type", "application/json".to_string())],
+        body: br#"{"status":"ok"}"#.to_vec(),
+        diagnostic: None,
+    }
+}
+
 fn plain(status: u16, headers: Vec<(&'static str, String)>) -> Response {
     Response {
         status,
@@ -340,6 +359,93 @@ fn header_values(req: &Request, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use did_btcr2::document::ResolutionOptions;
+
+    /// A resolver the request must never reach.
+    struct Untouchable;
+
+    impl Resolve for Untouchable {
+        fn resolve(
+            &self,
+            did: &Did,
+            _: ResolutionOptions,
+        ) -> Result<ResolutionResult, did_btcr2_client::Error> {
+            panic!(
+                "the resolver must not be reached for this request (did {})",
+                did.encode()
+            )
+        }
+    }
+
+    fn request(method: &str, path: &str, query: Option<&str>) -> Request {
+        Request {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: query.map(str::to_string),
+            headers: vec![],
+        }
+    }
+
+    /// Liveness is a fixed JSON body with no `Vary`: nothing about it is
+    /// negotiated (an `Accept` nobody could satisfy still gets the 200, not
+    /// a 406), the query string is ignored, and the resolver is never
+    /// consulted.
+    #[test]
+    fn health_get_is_200_json_without_vary() {
+        let resp = handle(&request("GET", "/health", None), &Untouchable);
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            resp.headers,
+            vec![("Content-Type", "application/json".to_string())]
+        );
+        assert_eq!(resp.body, br#"{"status":"ok"}"#);
+        assert!(resp.diagnostic.is_none());
+        let with_query = handle(&request("GET", "/health", Some("x=1")), &Untouchable);
+        assert_eq!(with_query, resp, "the query string is ignored");
+        let mut with_accept = request("GET", "/health", None);
+        with_accept
+            .headers
+            .push(("Accept".to_string(), "text/plain".to_string()));
+        assert_eq!(
+            handle(&with_accept, &Untouchable),
+            resp,
+            "liveness is not negotiated: no 406 for an unsatisfiable Accept"
+        );
+    }
+
+    /// `HEAD` is answered by the same arm: the pure handler returns the GET
+    /// response and the shell suppresses the body on the wire.
+    #[test]
+    fn health_head_is_the_get_response() {
+        let get = handle(&request("GET", "/health", None), &Untouchable);
+        let head = handle(&request("HEAD", "/health", None), &Untouchable);
+        assert_eq!(head, get);
+    }
+
+    #[test]
+    fn health_non_get_is_405_with_allow_get_head() {
+        for method in ["POST", "PUT", "DELETE"] {
+            let resp = handle(&request(method, "/health", None), &Untouchable);
+            assert_eq!(resp.status, 405, "{method}");
+            assert_eq!(
+                resp.headers,
+                vec![("Allow", "GET, HEAD".to_string())],
+                "{method}"
+            );
+            assert!(resp.body.is_empty(), "{method}");
+        }
+    }
+
+    #[test]
+    fn health_lookalikes_are_404() {
+        for path in ["/health/", "/healthz", "/health/x", "/Health"] {
+            let resp = handle(&request("GET", path, None), &Untouchable);
+            assert_eq!(resp.status, 404, "{path}");
+            assert!(resp.headers.is_empty(), "{path}");
+            assert!(resp.body.is_empty(), "{path}");
+        }
+    }
 
     /// Printable ASCII passes through; every control character, including
     /// the terminal escapes a request line can smuggle, becomes its Rust

@@ -3,7 +3,9 @@
 //! endpoint is derived from each DID's own network, with `--esplora-url`
 //! overrides for networks that have no hosted default (regtest, testnet4,
 //! custom). TLS, caching and structured logging belong to a fronting proxy or
-//! a later release; this binary is the conformance target.
+//! a later release; this binary is the conformance target. `/health` (GET or
+//! HEAD) is a liveness route for the supervisor, the proxy and uptime pollers:
+//! it answers without touching Esplora.
 
 #![forbid(unsafe_code)]
 
@@ -52,6 +54,7 @@ const HELP_TEXT: &str = concat!(
     "  -V, --version                  Show the version\n",
     "\n",
     "Endpoint: GET /1.0/identifiers/{did}[?versionId=|versionTime=|minConf=]\n",
+    "Health:   GET|HEAD /health -> 200 {\"status\":\"ok\"} (liveness only; no Esplora probe)\n",
 );
 
 /// The parsed command line.
@@ -298,6 +301,7 @@ mod tests {
         assert!(HELP_TEXT.contains("--bind"));
         assert!(HELP_TEXT.contains("--esplora-url <network>=<url>"));
         assert!(HELP_TEXT.contains("--threads"));
+        assert!(HELP_TEXT.contains("Health:   GET|HEAD /health -> 200"));
         for network in NETWORK_NAMES {
             assert!(HELP_TEXT.contains(network), "help names {network}");
         }
