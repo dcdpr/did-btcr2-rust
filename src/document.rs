@@ -540,7 +540,7 @@ impl ResolutionOptions {
 /// Named struct — positional tuples invite swap bugs; most callers
 /// want only one or two of the three fields. The clean-break choice
 /// accepts that the crate is not yet published.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolutionResult {
     /// The `didResolutionMetadata` describing the resolution process.
     pub resolution_metadata: ResolutionMetadata,
@@ -555,7 +555,7 @@ pub struct ResolutionResult {
 /// error JSON-LD fields without a breaking change; outside the crate, build
 /// it with `Default::default()` and assign fields.
 #[non_exhaustive]
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolutionMetadata {
     /// Media type of the resolved DID document — `contentType` on the wire
     /// (data-structures.md "DID Resolution Metadata", MUST): the value of
@@ -576,7 +576,7 @@ pub struct ResolutionMetadata {
 /// - `deactivated`: REQUIRED per both sources.
 /// - `updated`: OPTIONAL per data-structures.md; ABSENT in resolve.md.
 ///   Always emitted as a UNION.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DocumentMetadata {
     /// Spec wire shape: ASCII string per data-structures.md:341.
     /// Custom serde — `5` (number) would silently break interop.
@@ -5446,6 +5446,59 @@ mod tests {
         assert_eq!(
             serde_json::to_string(target.as_ref()).expect("document serializes"),
             serde_json::to_string(before.as_ref()).expect("document serializes")
+        );
+    }
+
+    /// A resolution result is an owned value a caller may keep and hand out
+    /// copies of; the copy carries every field of the original.
+    #[test]
+    fn resolution_result_clone_is_field_equal() {
+        use crate::key::KeyPair;
+        use chrono::TimeZone as _;
+
+        let id_type = IdType::from(KeyPair::generate().public_key);
+        let did: Did = DidComponents::new(DidVersion::One, Network::Regtest, id_type)
+            .expect("regtest is a valid network")
+            .try_into()
+            .expect("version 1 + regtest + key id type encode to a valid did");
+        let initial = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("key-based DID deterministically generates its initial document");
+
+        let original = ResolutionResult {
+            resolution_metadata: ResolutionMetadata {
+                content_type: Some("application/did+json".to_string()),
+            },
+            document: Document::from(initial),
+            document_metadata: DocumentMetadata {
+                version_id: NonZeroU64::new(7).expect("7 is non-zero"),
+                confirmations: Some(3),
+                deactivated: true,
+                updated: Some(Utc.with_ymd_and_hms(2026, 9, 19, 0, 0, 0).unwrap()),
+            },
+        };
+
+        let copy = original.clone();
+
+        assert_eq!(
+            copy.resolution_metadata.content_type,
+            original.resolution_metadata.content_type
+        );
+        assert_eq!(copy.document, original.document);
+        assert_eq!(
+            copy.document_metadata.version_id,
+            original.document_metadata.version_id
+        );
+        assert_eq!(
+            copy.document_metadata.confirmations,
+            original.document_metadata.confirmations
+        );
+        assert_eq!(
+            copy.document_metadata.deactivated,
+            original.document_metadata.deactivated
+        );
+        assert_eq!(
+            copy.document_metadata.updated,
+            original.document_metadata.updated
         );
     }
 }
