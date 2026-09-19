@@ -726,12 +726,18 @@ fn deactivated_document_maps_to_410() {
 /// its deactivated document, so the 410 body is the full triple with
 /// `didDocument` present as an object, not null — under a bare `Accept` too,
 /// since a deactivated result is a resolution result whatever was negotiated.
+/// `contentType` names the representation each request negotiated: the
+/// binding stamps it from the negotiated mode, exactly as the core stamps it
+/// from `resolutionOptions.accept`.
 #[test]
 fn deactivated_body_carries_the_document_not_null() {
-    for headers in [
-        vec![("Accept", FULL)],
-        vec![("Accept", "application/did+json")],
-        vec![],
+    for (headers, negotiated) in [
+        (vec![("Accept", FULL)], "application/did"),
+        (
+            vec![("Accept", "application/did+json")],
+            "application/did+json",
+        ),
+        (vec![], "application/did"),
     ] {
         let resp = handle(&get(&resolve_path(VALID_DID), &headers), &deactivated());
         assert_eq!(resp.status, 410, "{headers:?}");
@@ -742,7 +748,7 @@ fn deactivated_body_carries_the_document_not_null() {
         assert_eq!(b["didDocumentMetadata"]["deactivated"], true, "{headers:?}");
         assert_eq!(
             b["didResolutionMetadata"],
-            json!({ "contentType": "application/did" }),
+            json!({ "contentType": negotiated }),
             "{headers:?}"
         );
         assert!(b["didResolutionMetadata"].get("error").is_none());

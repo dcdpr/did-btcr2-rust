@@ -145,15 +145,23 @@ pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
             let (details, diagnostic) = map_client_error(e);
             problem_response(details, diagnostic)
         }
-        // A deactivated result is a resolution result whatever representation
-        // was negotiated: the 410 carries the full triple, document included.
-        Ok(result) if result.document_metadata.deactivated => {
-            json_response(410, RESOLUTION_RESULT, &full_body(&result))
+        Ok(mut result) => {
+            // The binding negotiated the representation, so it stamps it: a
+            // resolver may hand back a result it produced for another request.
+            result.resolution_metadata.content_type = Some(mode.opts_accept().to_string());
+            if result.document_metadata.deactivated {
+                // A deactivated result is a resolution result whatever representation
+                // was negotiated: the 410 carries the full triple, document included.
+                json_response(410, RESOLUTION_RESULT, &full_body(&result))
+            } else {
+                match mode {
+                    Mode::Full => json_response(200, RESOLUTION_RESULT, &full_body(&result)),
+                    Mode::Bare(media_type) => {
+                        json_response(200, media_type, result.document.as_ref())
+                    }
+                }
+            }
         }
-        Ok(result) => match mode {
-            Mode::Full => json_response(200, RESOLUTION_RESULT, &full_body(&result)),
-            Mode::Bare(media_type) => json_response(200, media_type, result.document.as_ref()),
-        },
     }
 }
 
@@ -290,7 +298,8 @@ fn escape_for_log(s: &str) -> String {
     s.chars().flat_map(char::escape_default).collect()
 }
 
-/// The full resolution result: the core's triple, `contentType` from the core.
+/// The full resolution result: the core's triple, `contentType` as [`handle`]
+/// stamped it from the negotiated mode.
 fn full_body(result: &ResolutionResult) -> Value {
     json!({
         "didResolutionMetadata": { "contentType": result.resolution_metadata.content_type },
