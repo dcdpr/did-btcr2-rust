@@ -18,6 +18,8 @@ tiny_http = "0.12"
 onlyargs = "0.2"
 onlyerror = "0.1"
 error-iter = "0.4"
+# Field-ordered request log line (serde_json's default map sorts keys).
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `versionTime` is RFC 3339 -> DateTime<Utc>; the core's exact feature set.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

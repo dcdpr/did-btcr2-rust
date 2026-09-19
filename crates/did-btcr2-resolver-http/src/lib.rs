@@ -3,8 +3,9 @@
 //!
 //! This crate owns no resolution logic. It turns `GET /1.0/identifiers/{did}`
 //! into one call through the [`Resolve`] seam — in production
-//! [`ClientResolver`], which builds a `did_btcr2_client::Client` for the DID's
-//! own network on every request — and turns the typed result or error back into
+//! [`CachingResolver`] over [`ClientResolver`]: a miss builds a
+//! `did_btcr2_client::Client` for the DID's own network, a hit is served from
+//! memory for 60 s — and turns the typed result or error back into
 //! an HTTP status, a `Content-Type`, and a resolution-result body. The request
 //! handler is a pure function over plain structs so the conformance suite drives
 //! it in-process with a scripted resolver; a thin `tiny_http` shell adapts it to
@@ -27,10 +28,13 @@ use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use did_btcr2::document::ResolutionResult;
 use did_btcr2::error::{Btcr2Error, ProblemDetails};
 use did_btcr2::identifier::Did;
+use did_btcr2_client::network_name;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 pub use accept::{Mode, negotiate};
@@ -39,7 +43,10 @@ pub use path::{DecodeError, HEALTH_PATH, Route, percent_decode, route};
 pub use problem::{
     Problem, RESOLUTION_RESULT, error_body, map_client_error, problem_response, status_for,
 };
-pub use resolve::{ClientResolver, Resolve};
+pub use resolve::{
+    CACHE_CAPACITY, CACHE_TTL, CacheOutcome, CachingResolver, ClientResolver, Clock, Resolve,
+    SystemClock,
+};
 
 /// An HTTP request, reduced to what the binding reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,9 +186,11 @@ pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
 /// panic would retire one worker, and after `threads` of them the listener
 /// would still queue requests that nothing takes.
 ///
-/// Each worker prints one stderr line per request, `<METHOD> <request-target>
-/// -> <status>`, followed by the response's diagnostic (the error chain behind
-/// a 500) when there is one. The diagnostic never reaches the wire.
+/// Each worker prints one JSON object per request on stderr — `method`,
+/// `path`, `did`, `accept`, `status`, `latency_ms`, `cache`
+/// (`hit`/`miss`/`n/a`), `network` — followed by the response's diagnostic
+/// (the error chain behind a 500) when there is one. The diagnostic never
+/// reaches the wire.
 pub fn serve<R>(
     server: Arc<tiny_http::Server>,
     threads: NonZeroUsize,
@@ -223,7 +232,11 @@ where
 /// crate's own 500 `INTERNAL_ERROR` body (not `tiny_http`'s bodiless default)
 /// and the panic message goes to the diagnostic line, so the worker survives
 /// and the client still receives a resolution result.
+///
+/// Every request is logged in the same shape, `/health` and the rejected ones
+/// included: those never reach the resolver, so they carry `cache: "n/a"`.
 fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
+    let started = Instant::now();
     let target = request.url().to_string();
     let shown_target = escape_for_log(&target);
     let (path, query) = match target.split_once('?') {
@@ -245,21 +258,32 @@ fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
             })
             .collect(),
     };
-    let response = match catch_unwind(AssertUnwindSafe(|| handle(&plain, resolver))) {
-        Ok(response) => response,
+    let (response, cache) = match catch_unwind(AssertUnwindSafe(|| handle(&plain, resolver))) {
+        Ok(response) => (response, resolver.take_cache_outcome()),
         Err(payload) => {
             eprintln!("handler panicked on {shown_target}; the worker continues");
-            problem_response(
-                problem::internal("the resolver failed internally"),
-                Some(format!("panic: {}", panic_message(payload.as_ref()))),
+            // A panic after a cache access must not leak the outcome onto the 500 line.
+            let _ = resolver.take_cache_outcome();
+            (
+                problem_response(
+                    problem::internal("the resolver failed internally"),
+                    Some(format!("panic: {}", panic_message(payload.as_ref()))),
+                ),
+                None,
             )
         }
     };
     eprintln!(
-        "{} {} -> {}",
-        escape_for_log(&plain.method),
-        shown_target,
-        response.status
+        "{}",
+        request_log_line(
+            &plain.method,
+            &target,
+            did_for_log(&plain.path).as_ref(),
+            header_values(&plain, "accept").as_deref(),
+            response.status,
+            started.elapsed(),
+            cache,
+        )
     );
     if let Some(diagnostic) = &response.diagnostic {
         eprintln!("{}", escape_for_log(diagnostic));
@@ -296,6 +320,66 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// lines into the operator's log.
 fn escape_for_log(s: &str) -> String {
     s.chars().flat_map(char::escape_default).collect()
+}
+
+/// One request as the shell logs it: a single JSON object on stderr. Field
+/// order is the declaration order. `method`, `path` and `accept` are client
+/// text and are escaped (`escape_for_log`) before they are JSON-encoded, so a
+/// control character shows as its Rust escape rather than reaching the
+/// terminal; `did` is the re-encoded parse result, never client bytes.
+#[derive(Serialize)]
+struct RequestLog<'a> {
+    method: String,
+    path: String,
+    did: Option<String>,
+    accept: Option<String>,
+    status: u16,
+    latency_ms: u64,
+    cache: &'static str,
+    network: Option<&'a str>,
+}
+
+/// The `cache` field: `hit`, `miss`, or `n/a` when the resolver was not reached
+/// (a rejected request, `/health`, or a panic).
+fn cache_label(outcome: Option<CacheOutcome>) -> &'static str {
+    match outcome {
+        Some(CacheOutcome::Hit) => "hit",
+        Some(CacheOutcome::Miss) => "miss",
+        None => "n/a",
+    }
+}
+
+/// Render the per-request log line. Pure, so it is tested without a socket.
+fn request_log_line(
+    method: &str,
+    target: &str,
+    did: Option<&Did>,
+    accept: Option<&str>,
+    status: u16,
+    latency: Duration,
+    cache: Option<CacheOutcome>,
+) -> String {
+    let line = RequestLog {
+        method: escape_for_log(method),
+        path: escape_for_log(target),
+        did: did.map(|d| d.encode().to_owned()),
+        accept: accept.map(escape_for_log),
+        status,
+        latency_ms: u64::try_from(latency.as_millis()).unwrap_or(u64::MAX),
+        cache: cache_label(cache),
+        network: did.map(|d| network_name(d.components().network())),
+    };
+    serde_json::to_string(&line).expect("a struct of strings and numbers serialises")
+}
+
+/// The DID a request-target names, for the log line only: the resolver path,
+/// percent-decoded once, parsed. `None` for every other path and for anything
+/// that does not parse — the raw target is already in `path`.
+fn did_for_log(path: &str) -> Option<Did> {
+    match route(path) {
+        Route::Resolve { encoded_did } => percent_decode(encoded_did).ok()?.parse().ok(),
+        _ => None,
+    }
 }
 
 /// The full resolution result: the core's triple, `contentType` as [`handle`]
@@ -370,6 +454,7 @@ mod tests {
     use super::*;
 
     use did_btcr2::document::ResolutionOptions;
+    use did_btcr2::identifier::{DidComponents, DidVersion, IdType, Network};
 
     /// A resolver the request must never reach.
     struct Untouchable;
@@ -489,5 +574,165 @@ mod tests {
         assert_eq!(panic_message(from_string.as_ref()), "formatted");
         let other = catch_unwind(|| std::panic::panic_any(7u8)).unwrap_err();
         assert_eq!(panic_message(other.as_ref()), "non-string panic payload");
+    }
+
+    /// A key-based DID anchored to `network`, re-parsed from its string form
+    /// exactly as a request would carry it.
+    fn did_on(network: Network) -> Did {
+        let public_key = did_btcr2::KeyPair::generate().public_key;
+        let components = DidComponents::new(DidVersion::One, network, IdType::from(public_key))
+            .expect("the components are valid");
+        Did::try_from(components)
+            .expect("the DID encodes")
+            .encode()
+            .parse()
+            .expect("the encoded DID parses back")
+    }
+
+    fn parse_line(line: &str) -> serde_json::Map<String, Value> {
+        match serde_json::from_str(line).expect("the log line is JSON") {
+            Value::Object(map) => map,
+            other => panic!("the log line is not an object: {other}"),
+        }
+    }
+
+    const FIELDS: [&str; 8] = [
+        "method",
+        "path",
+        "did",
+        "accept",
+        "status",
+        "latency_ms",
+        "cache",
+        "network",
+    ];
+
+    /// The line is one JSON object with exactly the eight fields, emitted in
+    /// declaration order (not sorted), the numbers as numbers, on one line.
+    #[test]
+    fn request_log_line_has_the_eight_fields_in_declaration_order() {
+        let line = request_log_line(
+            "GET",
+            "/1.0/identifiers/did:btcr2:k1abc?versionId=1",
+            None,
+            Some("application/did-resolution"),
+            200,
+            Duration::from_millis(1234),
+            None,
+        );
+        assert!(!line.contains('\n'), "{line:?}");
+        let map = parse_line(&line);
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        let mut expected: Vec<&str> = FIELDS.to_vec();
+        expected.sort_unstable();
+        let mut got = keys.clone();
+        got.sort_unstable();
+        assert_eq!(got, expected, "exactly the eight fields");
+        let offsets: Vec<usize> = FIELDS
+            .iter()
+            .map(|f| line.find(&format!("\"{f}\"")).expect(f))
+            .collect();
+        assert!(
+            offsets.windows(2).all(|w| w[0] < w[1]),
+            "declaration order in the raw text: {line}"
+        );
+        assert_eq!(map["status"], json!(200));
+        assert_eq!(map["latency_ms"], json!(1234u64));
+        assert_eq!(map["method"], json!("GET"));
+        assert_eq!(
+            map["path"],
+            json!("/1.0/identifiers/did:btcr2:k1abc?versionId=1")
+        );
+        assert_eq!(map["accept"], json!("application/did-resolution"));
+    }
+
+    /// Client text is escaped before it is JSON-encoded: the raw line carries
+    /// no control byte, and the parsed fields hold the Rust escape text, so a
+    /// terminal escape or a forged line cannot reach the journal even through
+    /// a consumer that unescapes the JSON.
+    #[test]
+    fn request_log_line_escapes_control_characters_in_client_fields() {
+        let line = request_log_line(
+            "GE\nT",
+            "/1.0/identifiers/\x1b[31mX\x07",
+            None,
+            Some("text/\u{7}plain"),
+            400,
+            Duration::ZERO,
+            None,
+        );
+        assert!(
+            line.bytes().all(|b| b >= 0x20),
+            "a control byte reached the line: {line:?}"
+        );
+        let map = parse_line(&line);
+        assert_eq!(map["path"], json!("/1.0/identifiers/\\u{1b}[31mX\\u{7}"));
+        assert_eq!(map["method"], json!("GE\\nT"));
+        assert_eq!(map["accept"], json!("text/\\u{7}plain"));
+    }
+
+    #[test]
+    fn request_log_line_cache_field_values() {
+        for (outcome, label) in [
+            (Some(CacheOutcome::Hit), "hit"),
+            (Some(CacheOutcome::Miss), "miss"),
+            (None, "n/a"),
+        ] {
+            let line = request_log_line("GET", "/x", None, None, 200, Duration::ZERO, outcome);
+            assert_eq!(parse_line(&line)["cache"], json!(label), "{outcome:?}");
+        }
+    }
+
+    /// `did` is the re-encoded parse result and `network` its network name;
+    /// both are `null` when no DID was parsed, as is an absent `Accept`.
+    #[test]
+    fn request_log_line_did_and_network() {
+        let did = did_on(Network::Mainnet);
+        let line = request_log_line(
+            "GET",
+            "/x",
+            Some(&did),
+            None,
+            200,
+            Duration::ZERO,
+            Some(CacheOutcome::Miss),
+        );
+        let map = parse_line(&line);
+        assert_eq!(map["did"], json!(did.encode()));
+        assert_eq!(map["network"], json!("mainnet"));
+        assert_eq!(map["accept"], Value::Null);
+
+        let line = request_log_line("GET", "/health", None, None, 200, Duration::ZERO, None);
+        let map = parse_line(&line);
+        assert_eq!(map["did"], Value::Null);
+        assert_eq!(map["network"], Value::Null);
+    }
+
+    /// Only the resolver path yields a DID, and only when its segment decodes
+    /// and parses; everything else is `None` and the raw target stays in `path`.
+    #[test]
+    fn did_for_log_parses_only_the_resolver_path() {
+        let did = did_on(Network::Mainnet);
+        let encoded = did.encode();
+        let plain = format!("/1.0/identifiers/{encoded}");
+        assert_eq!(
+            did_for_log(&plain).map(|d| d.encode().to_owned()),
+            Some(encoded.to_owned())
+        );
+        let percent = format!("/1.0/identifiers/{}", encoded.replace(':', "%3A"));
+        assert_ne!(percent, plain);
+        assert_eq!(
+            did_for_log(&percent).map(|d| d.encode().to_owned()),
+            Some(encoded.to_owned())
+        );
+        for path in [
+            "/1.0/identifiers/not-a-did",
+            "/1.0/identifiers/",
+            "/health",
+            "/other",
+            "/1.0/identifiers/did%3Aexample%3Aabc",
+        ] {
+            assert!(did_for_log(path).is_none(), "{path}");
+        }
     }
 }

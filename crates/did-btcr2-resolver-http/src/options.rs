@@ -3,9 +3,10 @@
 //! Three names are accepted, the three scalar options the core models:
 //! `versionId` (a positive integer), `versionTime` (an RFC 3339 timestamp,
 //! normalised to UTC) and `minConf` (a positive integer). `noCache` and
-//! `expandRelativeUrls` are registered DID Resolution options this resolver
-//! does not implement, so they are `FEATURE_NOT_SUPPORTED` rather than
-//! `INVALID_OPTIONS`.
+//! `expandRelativeUrls` are registered DID Resolution options
+//! this resolver declines: it keeps a short response cache and offers no
+//! bypass for it, and it does not expand relative URLs — so both are
+//! `FEATURE_NOT_SUPPORTED` rather than `INVALID_OPTIONS`.
 //!
 //! Every other name is rejected, not ignored: a silently dropped `versionld`
 //! (or an `accept`, which the HTTP binding carries in the header only) would

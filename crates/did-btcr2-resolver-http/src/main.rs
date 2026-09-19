@@ -2,14 +2,15 @@
 //! `did:btcr2` over plain HTTP. One process serves every network: the Esplora
 //! endpoint is derived from each DID's own network, with `--esplora-url`
 //! overrides for networks that have no hosted default (regtest, testnet4,
-//! custom). TLS, caching and structured logging belong to a fronting proxy or
-//! a later release; this binary is the conformance target. `/health` (GET or
-//! HEAD) is a liveness route for the supervisor, the proxy and uptime pollers:
-//! it answers without touching Esplora.
+//! custom). Successful results are cached in memory for 60 s per DID and
+//! option set, and every request is logged as one JSON object on stderr; TLS
+//! belongs to a fronting proxy. `/health` (GET or HEAD) is a liveness route
+//! for the supervisor, the proxy and uptime pollers: it answers without
+//! touching Esplora.
 
 #![forbid(unsafe_code)]
 
-use did_btcr2_resolver_http::{ClientResolver, serve};
+use did_btcr2_resolver_http::{CACHE_CAPACITY, CACHE_TTL, CachingResolver, ClientResolver, serve};
 use error_iter::ErrorIter as _;
 use onlyargs::{CliError, OnlyArgs, traits::*};
 use onlyerror::Error;
@@ -55,6 +56,9 @@ const HELP_TEXT: &str = concat!(
     "\n",
     "Endpoint: GET /1.0/identifiers/{did}[?versionId=|versionTime=|minConf=]\n",
     "Health:   GET|HEAD /health -> 200 {\"status\":\"ok\"} (liveness only; no Esplora probe)\n",
+    "Cache:    successful results for 60 s, keyed by DID + versionId/versionTime/minConf (not Accept);\n",
+    "          errors are never cached; noCache=true answers 501 FEATURE_NOT_SUPPORTED\n",
+    "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network\n",
 );
 
 /// The parsed command line.
@@ -166,7 +170,11 @@ fn run() -> Result<(), RunError> {
     let workers = serve(
         Arc::new(server),
         args.threads,
-        ClientResolver::new(args.esplora_urls),
+        CachingResolver::new(
+            ClientResolver::new(args.esplora_urls),
+            CACHE_TTL,
+            CACHE_CAPACITY,
+        ),
     );
     for worker in workers {
         if worker.join().is_err() {
@@ -307,5 +315,10 @@ mod tests {
         }
         assert!(HELP_TEXT.contains("Every custom\n"));
         assert!(HELP_TEXT.contains("network shares the one `custom` override"));
+        assert!(HELP_TEXT.contains("Cache:    successful results for 60 s"));
+        assert!(HELP_TEXT.contains("noCache=true answers 501 FEATURE_NOT_SUPPORTED"));
+        assert!(HELP_TEXT.contains(
+            "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network"
+        ));
     }
 }

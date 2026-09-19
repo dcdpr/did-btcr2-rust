@@ -14,32 +14,13 @@ use did_btcr2::document::{ResolutionOptions, ResolutionResult};
 use did_btcr2::identifier::Did;
 use did_btcr2_client::{Client, Error, UreqTransport, network_name};
 
-// The cache is not yet re-exported from the crate root, so the lib target has
-// no path to its constants and constructors (`new` is the root the clock and
-// `with_clock` are reached through). `expect` (not `allow`) becomes an error
-// the moment the export lands, so the markers cannot outlive their reason.
-
 /// How long a successful result is served from memory before the next request
 /// for it resolves again: one block interval, so `confirmations` and a freshly
 /// confirmed update are at most a minute stale.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "reachable once the crate root re-exports the cache"
-    )
-)]
 pub const CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// The most entries the cache holds; past it, expired entries go first and
 /// then the oldest.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "reachable once the crate root re-exports the cache"
-    )
-)]
 pub const CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1024).expect("1024 is non-zero");
 
 /// Resolve a DID. Production is [`ClientResolver`]; the conformance suite
@@ -116,13 +97,6 @@ pub struct CachingResolver<R> {
 
 impl<R> CachingResolver<R> {
     /// Wrap `inner` with the process clock.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reachable once the crate root re-exports the cache"
-        )
-    )]
     pub fn new(inner: R, ttl: Duration, capacity: NonZeroUsize) -> Self {
         Self::with_clock(inner, ttl, capacity, Arc::new(SystemClock))
     }
@@ -151,13 +125,6 @@ impl<R> CachingResolver<R> {
     }
 
     /// `true` when no entry is held.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reachable once the crate root re-exports the cache"
-        )
-    )]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

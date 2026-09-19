@@ -689,6 +689,7 @@ dependencies = [
  "jsonschema",
  "onlyargs",
  "onlyerror",
+ "serde",
  "serde_json",
  "tiny_http",
  "ureq",
