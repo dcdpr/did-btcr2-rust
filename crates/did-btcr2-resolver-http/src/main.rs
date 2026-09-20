@@ -57,7 +57,7 @@ const HELP_TEXT: &str = concat!(
     "Endpoint: GET /1.0/identifiers/{did}[?versionId=|versionTime=|minConf=]\n",
     "Health:   GET|HEAD /health -> 200 {\"status\":\"ok\"} (liveness only; no Esplora probe)\n",
     "Cache:    successful results for 60 s, keyed by DID + versionId/versionTime/minConf (not Accept);\n",
-    "          errors are never cached; noCache=true answers 501 FEATURE_NOT_SUPPORTED\n",
+    "          errors are never cached; noCache=false (the default) is accepted, noCache=true answers 501 FEATURE_NOT_SUPPORTED\n",
     "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network\n",
 );
 
@@ -316,6 +316,7 @@ mod tests {
         assert!(HELP_TEXT.contains("Every custom\n"));
         assert!(HELP_TEXT.contains("network shares the one `custom` override"));
         assert!(HELP_TEXT.contains("Cache:    successful results for 60 s"));
+        assert!(HELP_TEXT.contains("noCache=false (the default) is accepted"));
         assert!(HELP_TEXT.contains("noCache=true answers 501 FEATURE_NOT_SUPPORTED"));
         assert!(HELP_TEXT.contains(
             "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network"

@@ -51,8 +51,10 @@ Exactly this, and nothing more:
 - **One small in-memory cache, otherwise no state:** successful resolution results are kept for
   60 s, keyed by DID and `versionId`/`versionTime`/`minConf` (never by `Accept`), at most 1024
   entries — expired entries are evicted first, then the oldest. Errors are never cached, so a
-  transient Esplora fault is never pinned; `noCache=true` is answered `501 FEATURE_NOT_SUPPORTED`
-  rather than honoured (an anonymous cache bypass would be a lever against the Esplora quota).
+  transient Esplora fault is never pinned. `noCache=false` — the DID Resolution default, caching
+  allowed — is accepted and changes nothing; `noCache=true` is answered `501 FEATURE_NOT_SUPPORTED`
+  rather than honoured (an anonymous cache bypass would be a lever against the Esplora quota);
+  any other `noCache` value is a `400 INVALID_OPTIONS`.
   No database, no writable filesystem beyond the journal. The cache is process memory only, so
   the process is still safe to restart at any time; the cost of a restart is one resolution per
   DID.

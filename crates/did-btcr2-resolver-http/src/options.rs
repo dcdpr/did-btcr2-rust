@@ -2,11 +2,15 @@
 //!
 //! Three names are accepted, the three scalar options the core models:
 //! `versionId` (a positive integer), `versionTime` (an RFC 3339 timestamp,
-//! normalised to UTC) and `minConf` (a positive integer). `noCache` and
-//! `expandRelativeUrls` are registered DID Resolution options
-//! this resolver declines: it keeps a short response cache and offers no
-//! bypass for it, and it does not expand relative URLs — so both are
-//! `FEATURE_NOT_SUPPORTED` rather than `INVALID_OPTIONS`.
+//! normalised to UTC) and `minConf` (a positive integer). Two further
+//! registered DID Resolution options are recognised but not implemented.
+//! `noCache` (DID Resolution §13.2) takes `true` or `false`: `false` is the
+//! spec's default — caching allowed — and is accepted as a no-op; `true` asks
+//! to bypass the response cache this resolver keeps, which it declines with
+//! `FEATURE_NOT_SUPPORTED`, the answer the spec requires of a resolver that
+//! denies resolution without caching; any other value is malformed, so
+//! `INVALID_OPTIONS`. `expandRelativeUrls` is not implemented for any value
+//! and is `FEATURE_NOT_SUPPORTED` outright.
 //!
 //! Every other name is rejected, not ignored: a silently dropped `versionld`
 //! (or an `accept`, which the HTTP binding carries in the header only) would
@@ -58,9 +62,10 @@ fn invalid(detail: String) -> OptionsError {
 /// Parse the query string into the core's typed options. Accepted:
 /// `versionId` (positive integer), `versionTime` (RFC 3339, normalised to
 /// UTC), `minConf` (positive integer) — `versionId` and `versionTime` not
-/// together. `noCache` and `expandRelativeUrls` are registered options this
-/// resolver does not implement; any other name, including `accept`
-/// (header-only in the HTTP binding), is invalid.
+/// together — and `noCache=false`, the default, which sets nothing.
+/// `noCache=true` and `expandRelativeUrls` are declined as unsupported
+/// features; a `noCache` value other than `true`/`false` is invalid, as is
+/// any other name, including `accept` (header-only in the HTTP binding).
 pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsError> {
     let Some(query) = query.filter(|s| !s.is_empty()) else {
         return Ok(ResolutionOptions::default());
@@ -108,7 +113,22 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
                     invalid(format!("minConf must be a positive integer, got `{value}`"))
                 })?);
             }
-            "noCache" | "expandRelativeUrls" => {
+            "noCache" => match value.as_str() {
+                // The spec's default: caching is allowed. Nothing to set.
+                "false" => {}
+                "true" => {
+                    return Err(OptionsError::Unsupported(Problem::FeatureNotSupported(
+                        "bypassing the response cache (noCache=true) is not permitted by this resolver"
+                            .to_string(),
+                    )));
+                }
+                other => {
+                    return Err(invalid(format!(
+                        "noCache must be `true` or `false`, got `{other}`"
+                    )));
+                }
+            },
+            "expandRelativeUrls" => {
                 return Err(OptionsError::Unsupported(Problem::FeatureNotSupported(
                     format!("resolution option `{key}` is not supported by this resolver"),
                 )));
@@ -232,14 +252,51 @@ mod tests {
             assert_rejected(query, INVALID_OPTIONS, names);
         }
 
-        // FEATURE_NOT_SUPPORTED for the registered-but-unimplemented pair.
+        // FEATURE_NOT_SUPPORTED for the registered-but-unimplemented pair:
+        // `noCache` only when it asks for the bypass; `expandRelativeUrls`
+        // for any value.
         for (query, names) in [
             ("noCache=true", "noCache"),
             ("expandRelativeUrls=true", "expandRelativeUrls"),
-            ("noCache", "noCache"),
+            ("expandRelativeUrls=false", "expandRelativeUrls"),
+            ("expandRelativeUrls", "expandRelativeUrls"),
         ] {
             assert_rejected(query, FEATURE_NOT_SUPPORTED, names);
         }
+    }
+
+    /// `noCache` has three answers: `false` (the spec default) is accepted
+    /// and sets nothing, `true` is the unsupported bypass, anything else is a
+    /// malformed value — `INVALID_OPTIONS`, as for `versionId=abc`.
+    #[test]
+    fn no_cache_false_is_accepted_true_is_unsupported_and_anything_else_is_invalid() {
+        assert_all_unset(&parse_options(Some("noCache=false")).expect("the default is accepted"));
+        let opts = parse_options(Some("versionId=3&noCache=false&minConf=2"))
+            .expect("noCache=false beside real options");
+        assert_eq!(opts.version_id.map(NonZeroU64::get), Some(3));
+        assert_eq!(opts.min_conf.map(NonZeroU32::get), Some(2));
+
+        assert_rejected("noCache=true", FEATURE_NOT_SUPPORTED, "noCache");
+        assert_rejected("versionId=3&noCache=true", FEATURE_NOT_SUPPORTED, "noCache");
+
+        for query in [
+            "noCache=1",
+            "noCache=0",
+            "noCache=",
+            "noCache",
+            "noCache=True",
+            "noCache=FALSE",
+            "noCache=yes",
+            "noCache=false&noCache=false",
+        ] {
+            assert_rejected(query, INVALID_OPTIONS, "noCache");
+        }
+        // Duplicates are rejected as duplicates, not on the value.
+        assert_rejected(
+            "noCache=false&noCache=false",
+            INVALID_OPTIONS,
+            "more than once",
+        );
     }
 
     #[test]
@@ -262,10 +319,16 @@ mod tests {
     fn options_error_variants_carry_their_problem() {
         let invalid = parse_options(Some("foo=1")).expect_err("rejected");
         assert!(matches!(invalid, OptionsError::Invalid(_)), "{invalid:?}");
-        let unsupported = parse_options(Some("noCache=1")).expect_err("rejected");
+        let unsupported = parse_options(Some("noCache=true")).expect_err("rejected");
         assert!(
             matches!(unsupported, OptionsError::Unsupported(_)),
             "{unsupported:?}"
+        );
+        // A malformed `noCache` value is a malformed option, not a feature.
+        let malformed = parse_options(Some("noCache=1")).expect_err("rejected");
+        assert!(
+            matches!(malformed, OptionsError::Invalid(_)),
+            "{malformed:?}"
         );
     }
 }

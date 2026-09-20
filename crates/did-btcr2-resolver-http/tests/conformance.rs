@@ -892,6 +892,8 @@ fn invalid_options_rows_are_400() {
         ("versionTime=yesterday", "versionTime"),
         ("foo=1", "foo"),
         ("accept=application/did", "accept"),
+        ("noCache=1", "noCache"),
+        ("noCache=", "noCache"),
     ] {
         let resp = handle(
             &full(&format!("{}?{query}", resolve_path(VALID_DID))),
@@ -905,6 +907,25 @@ fn invalid_options_rows_are_400() {
             error_detail(&resp)
         );
     }
+}
+
+/// DID Resolution §13.2: `noCache=false` is the default ("caching of DID
+/// documents is allowed"), so a request that spells it out resolves exactly
+/// as one that omits it — 200, the resolver reached with default options.
+#[test]
+fn no_cache_false_is_the_default_and_resolves() {
+    let (resolver, seen) = recording();
+    let resp = handle(
+        &full(&format!("{}?noCache=false", resolve_path(VALID_DID))),
+        &resolver,
+    );
+    assert_eq!(resp.status, 200);
+    assert_eq!(content_type(&resp), FULL);
+    assert_success_result(&resp);
+    assert_eq!(body(&resp)["didDocument"]["id"], VALID_DID);
+    let seen = seen.lock().expect("recorder lock");
+    assert_eq!(seen.len(), 1, "the resolver was reached once");
+    assert_eq!(seen[0], (Some("application/did".to_string()), None, None));
 }
 
 /// `versionId` and `versionTime` together are a 400 `INVALID_OPTIONS` decided
@@ -933,12 +954,16 @@ fn version_id_with_version_time_is_400_before_the_resolver_is_reached() {
 }
 
 /// The registered options this resolver does not implement are a 501
-/// `FEATURE_NOT_SUPPORTED` naming the option.
+/// `FEATURE_NOT_SUPPORTED` naming the option: the `noCache=true` bypass
+/// (DID Resolution §13.2, the MUST for a resolver that denies resolution
+/// without caching) and `expandRelativeUrls` for any value.
 #[test]
 fn unsupported_registered_options_are_501() {
     for (query, name) in [
         ("noCache=true", "noCache"),
+        ("versionId=1&noCache=true", "noCache"),
         ("expandRelativeUrls=true", "expandRelativeUrls"),
+        ("expandRelativeUrls=false", "expandRelativeUrls"),
     ] {
         let resp = handle(
             &full(&format!("{}?{query}", resolve_path(VALID_DID))),
