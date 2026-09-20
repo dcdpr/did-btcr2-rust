@@ -12,8 +12,9 @@
 //! - `notFound` is a bare string, because the pinned suite reads it as a scalar
 //!   and would request `/1.0/identifiers/[object Object]` for the README's array;
 //! - the `endpoint` has the resolver-path shape (`https://…/1.0/identifiers`, no
-//!   trailing slash) — the shape, never the literal host, so a host move is a
-//!   config edit and `cargo test` carries no throwaway address;
+//!   trailing slash) — the shape, not a literal host, so a host move is a config
+//!   edit with nothing to change here. The config is compiled in (`include_str!`),
+//!   so the test binary does carry whatever host the config names;
 //! - the record names both identifiers verbatim, carries the two custody
 //!   statements and the exact `NOT_FOUND` type URI, and holds no 64-hex token.
 //!
@@ -24,8 +25,10 @@ use did_btcr2::identifier::{Did, DidVersion, IdType, Network};
 
 const CONFIG: &str = include_str!("../w3c/localConfig.cjs");
 const RECORD: &str = include_str!("../FIXTURES.md");
-// No host constant: the guard asserts the endpoint's SHAPE, never the literal host, so a host
-// move is a config edit and `cargo test` never carries the throwaway droplet's address.
+// No host constant: the guard asserts the endpoint's SHAPE, not a literal host, so a host move
+// is a config edit with nothing to change here. The host is still in the binary — `CONFIG`
+// above embeds the whole file — so when the droplet is destroyed, the config is what to update
+// (`DEPLOY.md`, "Cleanup").
 
 /// Every token that starts with `did:btcr2:` in `source`, split on the characters
 /// that cannot appear in a DID: `"`, `'`, `,`, whitespace.

@@ -307,6 +307,15 @@ curl -sS "https://$HOST/health"
 
 ## Cleanup
 
-Nothing lands in the tree but this file. The droplet is left running as the development
-endpoint; `doctl compute droplet delete btcr2-shakedown` (or the console) removes it, and the
-sslip.io name needs no un-pointing.
+The droplet is left running as the development endpoint; `doctl compute droplet delete
+btcr2-shakedown` (or the console) removes it, and the sslip.io name needs no un-pointing.
+
+**Two tracked files name the host** — `w3c/localConfig.cjs` (`id` and `endpoint`) and
+`FIXTURES.md` (the two `curl` lines). This is deliberate: the config is what the §9 run copies
+into the suite, and `tests/fixtures.rs` compiles it in to guard the fixture identifiers, so the
+address is in that test binary too. When the droplet is destroyed, DigitalOcean reassigns its IP
+and the sslip.io name resolves to whoever gets it next; nothing local fails. **Destroying the
+droplet therefore includes editing both files** in the same change: point them at the
+replacement host, or remove the URLs if there is none (`tests/fixtures.rs` only asserts the
+endpoint's shape, so it needs no edit for a host move). The scratch repo `danpape/btcr2-shakedown`
+holds its own copy of `localConfig.cjs` for the `mocha.yml` job and needs the same update.
