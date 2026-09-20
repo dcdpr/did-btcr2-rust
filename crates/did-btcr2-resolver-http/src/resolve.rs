@@ -16,7 +16,10 @@ use did_btcr2_client::{Client, Error, UreqTransport, network_name};
 
 /// How long a successful result is served from memory before the next request
 /// for it resolves again: one block interval, so `confirmations` and a freshly
-/// confirmed update are at most a minute stale.
+/// confirmed update are at most a minute stale. The age is counted from the
+/// instant the lookup missed — before the upstream call, whose chain tip the
+/// result reflects — not from the instant the result arrived, so a slow or
+/// rate-limited Esplora does not extend the bound by its latency.
 pub const CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// The most entries the cache holds; past it, expired entries go first and
@@ -73,6 +76,9 @@ pub enum CacheOutcome {
 /// `(did, versionId, versionTime, minConf)` — the projection of the options
 /// that selects a result. `accept` is deliberately absent: representation is
 /// chosen after the result exists, so one resolution serves every `Accept`.
+/// `minConf` is stored as the value in force, so an absent option and an
+/// explicit [`ResolutionOptions::DEFAULT_MIN_CONF`] — which the core resolves
+/// identically — share one entry.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct CacheKey {
     did: String,
@@ -215,7 +221,8 @@ impl<R: Resolve> Resolve for CachingResolver<R> {
             did: did.encode().to_owned(),
             version_id: opts.version_id,
             version_time: opts.version_time,
-            min_conf: opts.min_conf,
+            // The key holds the value in force; `opts` goes upstream as given.
+            min_conf: opts.min_conf.or(Some(ResolutionOptions::DEFAULT_MIN_CONF)),
         };
         let now = self.clock.now();
         if let Some(result) = self.lookup(&key, now) {
@@ -226,7 +233,9 @@ impl<R: Resolve> Resolve for CachingResolver<R> {
             // An `Err` leaves here; nothing is inserted.
             Err(e) => return (Err(e), Some(CacheOutcome::Miss)),
         };
-        self.insert(key, self.clock.now(), result.clone());
+        // Stamped with the instant before the upstream call, so the TTL bounds
+        // the age of the data (the chain tip it reflects), not of the entry.
+        self.insert(key, now, result.clone());
         (Ok(result), Some(CacheOutcome::Miss))
     }
 }
@@ -619,7 +628,7 @@ mod tests {
                 with_version_id(1),
                 with_version_id(2),
                 with_version_time("2026-01-01T00:00:00Z"),
-                with_min_conf(6),
+                with_min_conf(ResolutionOptions::DEFAULT_MIN_CONF.get() + 1),
                 ResolutionOptions::default(),
             ]
         };
@@ -635,6 +644,108 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         assert_eq!(resolver.len(), 5);
+    }
+
+    /// An absent `minConf` and an explicit `DEFAULT_MIN_CONF` resolve
+    /// identically in the core, so they are one entry in either order; any
+    /// other value is its own entry. The options go upstream as given — the
+    /// normalisation is in the key only.
+    #[test]
+    fn min_conf_absent_and_explicit_default_are_one_entry() {
+        let default = ResolutionOptions::DEFAULT_MIN_CONF;
+        let clock = ManualClock::new();
+        let seen: Arc<Mutex<Vec<Option<NonZeroU32>>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let (inner, calls) = counting(move |did, opts| {
+            record.lock().expect("seen lock").push(opts.min_conf);
+            Ok(ok_result(did, false))
+        });
+        let resolver = cache(inner, &clock);
+        let did = did_on(Network::Mainnet);
+
+        let (_, outcome) = resolver.resolve_traced(&did, ResolutionOptions::default());
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        let (_, outcome) = resolver.resolve_traced(&did, with_min_conf(default.get()));
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Hit),
+            "explicit default after absent"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.len(), 1);
+
+        let (_, outcome) = resolver.resolve_traced(&did, with_min_conf(default.get() + 1));
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Miss),
+            "another value is its own entry"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(resolver.len(), 2);
+
+        // The reverse order on a fresh DID: explicit default populates, absent hits.
+        let other = did_on(Network::Mainnet);
+        let (_, outcome) = resolver.resolve_traced(&other, with_min_conf(default.get()));
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        let (_, outcome) = resolver.resolve_traced(&other, ResolutionOptions::default());
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Hit),
+            "absent after explicit default"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(resolver.len(), 3);
+
+        // Upstream received the options as the caller gave them.
+        assert_eq!(
+            *seen.lock().expect("seen lock"),
+            vec![
+                None,
+                Some(NonZeroU32::new(default.get() + 1).expect("non-zero")),
+                Some(default),
+            ]
+        );
+    }
+
+    /// The entry's age is counted from the instant the lookup missed, not
+    /// from the instant the upstream answered: with a resolution that takes
+    /// `latency`, the entry expires at `miss + TTL`, so a call at
+    /// `miss + TTL - 1 s` is still a hit and a call at `miss + TTL` is not.
+    /// Stamping on completion would keep it until `miss + latency + TTL`.
+    #[test]
+    fn entry_age_is_measured_from_before_the_upstream_call() {
+        let latency = Duration::from_secs(10);
+        let clock = ManualClock::new();
+        let slow_clock = Arc::clone(&clock);
+        let (inner, calls) = counting(move |did, _| {
+            slow_clock.advance(latency);
+            Ok(ok_result(did, false))
+        });
+        let resolver = cache(inner, &clock);
+        let did = did_on(Network::Mainnet);
+
+        let (_, outcome) = resolver.resolve_traced(&did, ResolutionOptions::default());
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // The clock now reads miss + latency.
+
+        clock.advance(CACHE_TTL - latency - Duration::from_secs(1));
+        let (_, outcome) = resolver.resolve_traced(&did, ResolutionOptions::default());
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Hit),
+            "at miss + TTL - 1 s the entry is live"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        clock.advance(Duration::from_secs(1));
+        let (_, outcome) = resolver.resolve_traced(&did, ResolutionOptions::default());
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Miss),
+            "at miss + TTL the entry has expired, whatever the latency was"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
