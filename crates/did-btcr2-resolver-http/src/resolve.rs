@@ -98,6 +98,23 @@ struct Entry {
 /// be). Cloning shares the cache — every `serve` worker sees the same entries.
 /// The hit/miss outcome is returned from [`Resolve::resolve_traced`], never
 /// stored on the handle, so one handle may serve any number of threads.
+///
+/// # Contract
+///
+/// The key is `(did, versionId, versionTime, minConf)` and nothing else. The
+/// other [`ResolutionOptions`] fields — `sidecar_data`, `chain_tip_height`,
+/// `expand_relative_urls` and `esplora_url` — are not part of it, so a caller
+/// must not vary them across requests for one DID: a request carrying sidecar
+/// data could otherwise be answered by an entry computed without it. Callers
+/// must leave all four at their defaults; the layer below the cache fills
+/// what it needs (`Client::resolve` fetches the chain tip and picks the
+/// Esplora URL for the DID's network). This binding never sets any of them
+/// — `parse_options` yields only the three scalars and `handle` adds
+/// `accept`, which is not in the key by design — and `resolve_traced` checks
+/// the contract with a `debug_assert!`, so a test shell that broke it would
+/// fail loudly rather than serve a mismatched hit. (`accept` is excluded
+/// because representation is chosen after the result exists: one resolution
+/// serves every `Accept`.)
 pub struct CachingResolver<R> {
     inner: R,
     ttl: Duration,
@@ -217,6 +234,17 @@ impl<R: Resolve> Resolve for CachingResolver<R> {
         did: &Did,
         opts: ResolutionOptions,
     ) -> (Result<ResolutionResult, Error>, Option<CacheOutcome>) {
+        // The contract on the type: only the keyed options may vary. Anything
+        // else set here would be invisible to the lookup.
+        debug_assert!(
+            opts.sidecar_data.is_none()
+                && opts.chain_tip_height.is_none()
+                && !opts.expand_relative_urls
+                && opts.esplora_url.is_none(),
+            "CachingResolver: an option outside the cache key was set (sidecar_data, \
+             chain_tip_height, expand_relative_urls or esplora_url); the layer below \
+             the cache owns those"
+        );
         let key = CacheKey {
             did: did.encode().to_owned(),
             version_id: opts.version_id,
@@ -705,6 +733,78 @@ mod tests {
                 Some(default),
             ]
         );
+    }
+
+    /// The contract on the type, checked in debug builds: an option the key
+    /// does not cover trips the assertion before anything is looked up or
+    /// resolved, for each of the four; the binding's own request path — the
+    /// three query options plus `Accept` — sets none of them, so a served
+    /// request passes.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn options_outside_the_key_fail_the_debug_assertion() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        use did_btcr2::document::SidecarData;
+
+        let clock = ManualClock::new();
+        let (inner, calls) = ok_counting();
+        let resolver = cache(inner, &clock);
+        let did = did_on(Network::Mainnet);
+
+        let offending = [
+            (
+                "sidecar_data",
+                ResolutionOptions {
+                    sidecar_data: Some(SidecarData::default()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "chain_tip_height",
+                ResolutionOptions {
+                    chain_tip_height: Some(1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "expand_relative_urls",
+                ResolutionOptions {
+                    expand_relative_urls: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "esplora_url",
+                ResolutionOptions {
+                    esplora_url: Some("http://h:1".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (name, opts) in offending {
+            let tripped = catch_unwind(AssertUnwindSafe(|| resolver.resolve_traced(&did, opts)));
+            assert!(tripped.is_err(), "{name} must trip the assertion");
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the upstream was never reached"
+        );
+        assert!(resolver.is_empty(), "nothing was inserted");
+
+        // The binding's own path passes: `Accept` and every query option.
+        let mut request = get(&did, Some("application/did-resolution"));
+        request.query = Some("versionId=1&minConf=3&noCache=false".to_string());
+        let (response, outcome) = crate::handle_traced(&request, &resolver);
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        let mut request = get(&did, None);
+        request.query = Some("versionTime=2026-01-01T00:00:00Z".to_string());
+        let (response, outcome) = crate::handle_traced(&request, &resolver);
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     /// The entry's age is counted from the instant the lookup missed, not

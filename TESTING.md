@@ -40,7 +40,7 @@ compile time.
 | `did-btcr2-client` | 64 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
 | `chain-capture` | 185 |
-| `did-btcr2-resolver-http` | 44 lib + 9 bin + 47 conformance + 7 fixtures + 9 guard + 5 schema + 2 smoke |
+| `did-btcr2-resolver-http` | 45 lib + 9 bin + 47 conformance + 7 fixtures + 9 guard + 5 schema + 2 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 
