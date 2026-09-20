@@ -13,7 +13,7 @@ Run everything from the workspace root `did-btcr2-rust/`.
 
 ```bash
 cargo test -p did-btcr2 -p did-btcr2-client -p did-btcr2-cli -p chain-capture -p did-btcr2-resolver-http
-cargo test -p did-btcr2-resolver-http --test conformance --test guard --test schema --test smoke
+cargo test -p did-btcr2-resolver-http --test conformance --test guard --test schema --test smoke --test fixtures
 cargo test -p did-btcr2 --lib op_vectors -- --nocapture     # prints the coverage ledger
 cargo test -p did-btcr2 --lib minted_chain -- --nocapture   # minted clean chain
 cargo test -p did-btcr2 --lib minted_fork -- --nocapture    # minted fork
@@ -29,17 +29,18 @@ above. Always name crates with `-p`.
 The HTTP binding's suite (`did-btcr2-resolver-http`, second line) runs offline
 against a scripted resolver; only `smoke` opens a socket, on loopback at an
 ephemeral port. See §9 for the vendored W3C suite that `guard` and `schema`
-read.
+read. `fixtures` reads the committed `w3c/localConfig.cjs` and `FIXTURES.md` at
+compile time.
 
 ## 2. What ships
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 361 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 362 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 64 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
 | `chain-capture` | 185 |
-| `did-btcr2-resolver-http` | 21 lib + 9 bin + 46 conformance + 9 guard + 5 schema + 2 smoke |
+| `did-btcr2-resolver-http` | 39 lib + 9 bin + 46 conformance + 7 fixtures + 9 guard + 5 schema + 2 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 
@@ -551,6 +552,13 @@ Two test binaries of `did-btcr2-resolver-http` read it at runtime:
 - **`tests/schema.rs`** — compiles the suite's `did-schema.json` (draft-04, the
   schema the suite's `checkConformantDidDocument` feeds to Ajv) and validates a
   resolved `did:btcr2` document against it; three malformed shapes must fail.
+- **`tests/fixtures.rs`** — the fixture guard. It parses the two mainnet DIDs
+  out of `crates/did-btcr2-resolver-http/w3c/localConfig.cjs` (compiled in with
+  `include_str!`) and asserts mainnet / version 1 / `k1` for `valid` and
+  mainnet / version 1 / `x1` for `notFound`, that `notFound` is a bare string
+  (the pinned suite reads it as a scalar), that the endpoint is the resolver
+  path, and that both DIDs appear verbatim in `FIXTURES.md`. The extractor has
+  its own negative test.
 
 **Absence behaviour.** When the submodule is absent or unpopulated these tests
 **fail**, naming `git submodule update --init w3c-resolution-suite`. This
@@ -565,5 +573,18 @@ rewrites `CONFORMANCE.md` from the curated table. A pin bump means updating
 `PIN` in `guard.rs`, re-checking every row's `Line (at pin)` column against the
 new files, and re-blessing.
 
-The live mocha run against a deployed host is a later acceptance gate; this
-suite is the development loop.
+**Running the suite against a host.** The in-process suite is the development loop; the real mocha
+suite against a deployed host is the acceptance gate. From the workspace root:
+
+```bash
+npm --prefix w3c-resolution-suite ci
+cp crates/did-btcr2-resolver-http/w3c/localConfig.cjs w3c-resolution-suite/localConfig.cjs
+npm --prefix w3c-resolution-suite test -- --reporter spec
+```
+
+The config names the host and the two fixtures in `crates/did-btcr2-resolver-http/FIXTURES.md`; the
+copy is untracked inside the submodule and must never be committed there. `-- --reporter spec`
+overrides the suite's `.mocharc.yaml` (`mocha-w3c-interop-reporter`, which prints no `N passing`
+summary); mocha's exit code is the gate. Expected: `30 passing`, nothing failing or pending — the
+`deactivated` and dereferencing rows are not generated for an empty config.
+`crates/did-btcr2-resolver-http/DEPLOY.md` §9 has the same recipe and the runner variant.

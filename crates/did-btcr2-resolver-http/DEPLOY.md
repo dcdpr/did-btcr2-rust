@@ -1,7 +1,8 @@
 # did-btcr2-resolver-http DEPLOY — what the service needs, and one throwaway droplet
 
 > See also: `CONFORMANCE.md` (the assertion ledger the deployed binary is measured against),
-> `src/main.rs` (`--help`), and the runner check at
+> `FIXTURES.md` (the two mainnet fixtures and their custody), `w3c/localConfig.cjs` (the suite
+> config for §9), `src/main.rs` (`--help`), and the runner check at
 > <https://github.com/danpape/btcr2-shakedown/blob/main/.github/workflows/shakedown.yml>.
 
 This file is two things. §1 is the handoff note for whoever runs the service on real
@@ -35,21 +36,36 @@ Exactly this, and nothing more:
   > re-normalises the path and re-encodes it. Use `proxy_pass http://127.0.0.1:8080;` with no
   > trailing URI, or `$request_uri`, and re-run the §7 journal check before trusting it.
 - **Outbound HTTPS** to the Esplora endpoint of every network the host serves — for this
-  shakedown `https://mutinynet.com/api` (the built-in default for mutinynet); mainnet uses its
-  built-in hosted default unless `--esplora-url mainnet=<url>` overrides it. TLS roots are
+  shakedown `https://mutinynet.com/api` (the built-in default for mutinynet); mainnet needs no
+  flag: the built-in default is `https://blockstream.info/api` (`crates/did-btcr2-client/src/url.rs`),
+  overridable with `--esplora-url mainnet=<url>`. TLS roots are
   compiled in (`webpki-roots`), so the host needs no CA bundle for that.
   > **The hosted mutinynet Esplora rate-limits.** `mutinynet.com/api` (nginx behind Cloudflare)
   > answers HTTP 429 after roughly eight uncached calls in about 1.5 s, with no `Retry-After`.
   > One valid resolution is four Esplora calls, so back-to-back resolutions surface as fast
-  > `500 INTERNAL_ERROR` responses, not timeouts. A production host needs a response cache in
-  > front of the binary or its own Esplora instance; the shakedown host has neither.
-- **No state:** no database, no cache, no writable filesystem beyond the journal. Every request
-  re-fetches from Esplora. The process is safe to restart at any time.
+  > `500 INTERNAL_ERROR` responses, not timeouts. The binary's own response cache (next bullet)
+  > absorbs a test suite's repeated requests for one DID — the W3C run in §9 costs one or two
+  > resolutions per DID — but it does not help a stream of distinct DIDs; for that, a private
+  > Esplora instance is the remaining option. Mainnet `blockstream.info` showed no such limit
+  > (200 for 12 back-to-back address calls).
+- **One small in-memory cache, otherwise no state:** successful resolution results are kept for
+  60 s, keyed by DID and `versionId`/`versionTime`/`minConf` (never by `Accept`), at most 1024
+  entries — expired entries are evicted first, then the oldest. Errors are never cached, so a
+  transient Esplora fault is never pinned; `noCache=true` is answered `501 FEATURE_NOT_SUPPORTED`
+  rather than honoured (an anonymous cache bypass would be a lever against the Esplora quota).
+  No database, no writable filesystem beyond the journal. The cache is process memory only, so
+  the process is still safe to restart at any time; the cost of a restart is one resolution per
+  DID.
 - **Liveness:** `GET /health` or `HEAD /health` → `200`, body `{"status":"ok"}` (`HEAD` returns the
   headers only), without touching Esplora. Point an uptime poller or `curl -I` at
   `https://<host>/health`; the proxy's own upstream health checks are unnecessary.
-- **Logs:** one stderr line per request (`GET <target> -> <status>`), plus the error chain on a
-  500. Under systemd that is `journalctl -u did-btcr2-resolver-http`.
+- **Logs:** one JSON object per request on stderr, fields in this order: `method`, `path` (the
+  raw request-target, escaped), `did` (the decoded DID when the path parsed as one, else `null`),
+  `accept`, `status`, `latency_ms`, `cache` (`hit`, `miss`, or `n/a` when the resolver was not
+  reached), `network`. `/health` requests are logged in the same shape (`did` and `network`
+  `null`, `cache` `n/a`); the error chain behind a 500 follows on its own line. Under systemd
+  that is `journalctl -u did-btcr2-resolver-http`; the encoded-target pass-through check above
+  reads the `path` field.
 
 ## 2. Where commands run
 
@@ -216,11 +232,11 @@ curl -sS -i -H 'Accept: text/plain' "https://$HOST/1.0/identifiers/$DID"  # 406 
 curl -sS -i          "https://$HOST/health"                          # 200 {"status":"ok"}
 curl -sS -i -X POST  "https://$HOST/health"                          # 405, Allow: GET, HEAD
 ```
-Space the two valid requests a second or two apart, or the second one may trip the Esplora
-rate limit described in §1 and come back 500. Then on the droplet,
+With the cache, the second request is served from memory (`"cache":"hit"` in the journal);
+against a network whose Esplora rate-limits, only the first of the two touches it. Then on the droplet,
 `journalctl -u did-btcr2-resolver-http | grep identifiers` is the
-pass-through evidence: the second request must appear as `…did%3Abtcr2%3A… -> 200` (encoded, as
-sent), and the third as `…did%253Abtcr2%253A… -> 400`. The journal line is primary; the 400 alone
+pass-through evidence: the second request's `path` field must read `…did%3Abtcr2%3A…` (encoded, as
+sent) with `"status":200`, and the third `…did%253Abtcr2%253A…` with `"status":400`. The journal line is primary; the 400 alone
 does not tell a decode-and-re-encode proxy from a pass-through one.
 
 Latency, for the record (`curl -w '%{time_total}'` on the valid request; cold = first request
@@ -240,11 +256,49 @@ gh workflow run shakedown --repo danpape/btcr2-shakedown -f host="$HOST" -f did=
 gh run watch --repo danpape/btcr2-shakedown && gh run view --repo danpape/btcr2-shakedown --log
 ```
 
+## 9. Validate a deployment with the W3C suite
+
+The real `w3c/did-resolution-test-suite` (vendored at `w3c-resolution-suite/`, pin `2649fdf7`) runs
+against a host from a `localConfig.cjs` at the suite root. The committed config points at the
+shakedown host and names the two mainnet fixtures in `FIXTURES.md`; with it present only that
+implementation runs. The suite is a submodule — the copy below is never committed inside it.
+
+```sh
+# laptop, from the did-btcr2-rust workspace root
+npm --prefix w3c-resolution-suite ci
+cp crates/did-btcr2-resolver-http/w3c/localConfig.cjs w3c-resolution-suite/localConfig.cjs
+npm --prefix w3c-resolution-suite test -- --reporter spec
+```
+`-- --reporter spec` is not optional: the suite's `.mocharc.yaml` selects `mocha-w3c-interop-reporter`,
+which writes an HTML report and never prints a `N passing` summary; the flag overrides it. The exit
+code is the gate (non-zero on any failing row); the spec transcript is the evidence to keep. If you
+`tee` the transcript to a file, read mocha's exit code from `${PIPESTATUS[0]}` (bash) or
+`${pipestatus[1]}` (zsh), not `$?`.
+Expected: `30 passing`, no `failing`, no `pending` — 17 rows from `tests/4-did-resolution.js` and 13
+from `tests/10-bindings.js`. The `deactivated`, `derefUrls` and `serviceDerefUrls` rows are not
+generated because the config leaves them empty (a deactivation needs an on-chain update; DID URL
+dereferencing is not implemented). Any red is a defect to fix before the host is registered anywhere.
+The journal during a run shows a `"cache":"miss"` for the first request of the valid DID (another if
+the run straddles the 60 s TTL) followed by `"cache":"hit"` lines; the `notFound` DID is a `miss`
+every time (errors are never cached).
+
+The same run from a GitHub-hosted runner:
+<https://github.com/danpape/btcr2-shakedown/blob/main/.github/workflows/mocha.yml> checks the suite
+out at the pin, drops in the same config, and runs `npm test -- --reporter spec`; the job's conclusion
+is the gate. Mocha prints no colour on the runner, but `gh run view --log` prefixes every line with
+`<job>\t<step>\t<timestamp> ` — strip that before comparing titles with a laptop transcript:
+```sh
+# laptop
+gh workflow run mocha --repo danpape/btcr2-shakedown
+gh run watch --repo danpape/btcr2-shakedown && gh run view --repo danpape/btcr2-shakedown --log
+```
+
 ## Redeploy
 
 ```sh
 # laptop
 cargo build --release -p did-btcr2-resolver-http --target x86_64-unknown-linux-musl
+sha256sum target/x86_64-unknown-linux-musl/release/did-btcr2-resolver-http     # record it; compare on the droplet after install
 scp target/x86_64-unknown-linux-musl/release/did-btcr2-resolver-http root@$IP:/usr/local/bin/did-btcr2-resolver-http.new
 ssh root@$IP 'install -m 0755 /usr/local/bin/did-btcr2-resolver-http.new /usr/local/bin/did-btcr2-resolver-http && rm /usr/local/bin/did-btcr2-resolver-http.new && systemctl restart did-btcr2-resolver-http'
 curl -sS "https://$HOST/health"
