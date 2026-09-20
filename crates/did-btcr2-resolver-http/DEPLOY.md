@@ -44,10 +44,13 @@ Exactly this, and nothing more:
   > answers HTTP 429 after roughly eight uncached calls in about 1.5 s, with no `Retry-After`.
   > One valid resolution is four Esplora calls, so back-to-back resolutions surface as fast
   > `500 INTERNAL_ERROR` responses, not timeouts. The binary's own response cache (next bullet)
-  > absorbs a test suite's repeated requests for one DID — the W3C run in §9 costs one or two
-  > resolutions per DID — but it does not help a stream of distinct DIDs; for that, a private
-  > Esplora instance is the remaining option. Mainnet `blockstream.info` showed no such limit
-  > (200 for 12 back-to-back address calls).
+  > absorbs a *sequential* client's repeated requests for one DID — the W3C run in §9 costs one
+  > or two resolutions per DID because mocha runs its rows one at a time. It does not coalesce
+  > in-flight misses: N concurrent first requests for one DID (a parallel client, a proxy retry
+  > storm) each reach Esplora, N × 4 calls, and the last result to arrive is the one kept. Nor
+  > does it help a stream of distinct DIDs. For either, a private Esplora instance is the
+  > remaining option. Mainnet `blockstream.info` showed no such limit (200 for 12 back-to-back
+  > address calls).
 - **One small in-memory cache, otherwise no state:** successful resolution results are kept for
   60 s, keyed by DID and `versionId`/`versionTime`/`minConf` (never by `Accept`), at most 1024
   entries — expired entries are evicted first, then the oldest. Errors are never cached, so a
@@ -62,12 +65,24 @@ Exactly this, and nothing more:
   headers only), without touching Esplora. Point an uptime poller or `curl -I` at
   `https://<host>/health`; the proxy's own upstream health checks are unnecessary.
 - **Logs:** one JSON object per request on stderr, fields in this order: `method`, `path` (the
-  raw request-target, escaped), `did` (the decoded DID when the path parsed as one, else `null`),
-  `accept`, `status`, `latency_ms`, `cache` (`hit`, `miss`, or `n/a` when the resolver was not
-  reached), `network`. `/health` requests are logged in the same shape (`did` and `network`
-  `null`, `cache` `n/a`); the error chain behind a 500 follows on its own line. Under systemd
-  that is `journalctl -u did-btcr2-resolver-http`; the encoded-target pass-through check above
-  reads the `path` field.
+  raw request-target), `did` (the decoded DID when the path parsed as one, else `null`),
+  `accept`, `status`, `latency_ms`, `cache`, `network`. `/health` requests are logged in the
+  same shape (`did` and `network` `null`, `cache` `n/a`); the error chain behind a 500 follows
+  on its own line. Under systemd that is `journalctl -u did-btcr2-resolver-http`; the
+  encoded-target pass-through check above reads the `path` field.
+  - `method`, `path` and `accept` are client text and are escaped **twice**: first with Rust's
+    `char::escape_default` (so a control character or a non-ASCII character cannot reach a
+    terminal even through a consumer that unescapes the JSON), then by the JSON encoding. In
+    the raw line a `"` in the request-target therefore reads `\\\"` and `é` reads `\\u{e9}`;
+    after JSON-decoding the field, the value is still the Rust escape text (`\"`, `\u{e9}`,
+    `\u{1b}`). A consumer comparing `path` against what the client sent must unescape it once
+    more. For a well-formed request — percent-encoded ASCII — the two forms coincide and the
+    field reads as sent.
+  - `cache` is `hit`, `miss`, or `n/a`. `n/a` has two readings: the request never reached the
+    resolver (a rejected request, `/health`, a handler panic), or the resolver that served it
+    has no cache. The shipped binary always wraps the resolver in its cache, so in this
+    deployment `n/a` means the former; only a build that serves the bare resolver would give
+    the latter, and it would then show `n/a` on every request.
 
 ## 2. Where commands run
 

@@ -247,7 +247,8 @@ where
 /// and the client still receives a resolution result.
 ///
 /// Every request is logged in the same shape, `/health` and the rejected ones
-/// included: those never reach the resolver, so they carry `cache: "n/a"`.
+/// included: those never reach the resolver, so they carry `cache: "n/a"` —
+/// as does every request when `resolver` has no cache (see [`cache_label`]).
 fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
     let started = Instant::now();
     let target = request.url().to_string();
@@ -338,7 +339,13 @@ fn escape_for_log(s: &str) -> String {
 /// order is the declaration order. `method`, `path` and `accept` are client
 /// text and are escaped (`escape_for_log`) before they are JSON-encoded, so a
 /// control character shows as its Rust escape rather than reaching the
-/// terminal; `did` is the re-encoded parse result, never client bytes.
+/// terminal. That is two layers: after JSON-decoding the field a consumer
+/// holds `char::escape_default` text (`\"`, `\u{e9}`, `\u{1b}`), not the
+/// request-target, and must unescape once more to compare with what the
+/// client sent; for percent-encoded ASCII the two coincide. `did` is the
+/// re-encoded parse result, never client bytes. `cache` is `hit`, `miss` or
+/// `n/a`, and `n/a` means either that the resolver was not reached or that
+/// the resolver serving the request has no cache — see [`cache_label`].
 #[derive(Serialize)]
 struct RequestLog<'a> {
     method: String,
@@ -351,9 +358,12 @@ struct RequestLog<'a> {
     network: Option<&'a str>,
 }
 
-/// The `cache` field: `hit`, `miss`, or `n/a` when the resolver was not reached
-/// (a rejected request, `/health`, or a panic) — or, for a resolver without a
-/// cache, always (production wraps [`CachingResolver`], so never there).
+/// The `cache` field: `hit`, `miss`, or `n/a`. `n/a` has two readings — the
+/// resolver was not reached (a rejected request, `/health`, or a panic), or
+/// the resolver that served the request has no cache (the default
+/// [`Resolve::resolve_traced`] reports `None`). The shipped binary always
+/// wraps [`CachingResolver`], so there it means the former; a shell serving
+/// the bare resolver would log `n/a` on every request.
 fn cache_label(outcome: Option<CacheOutcome>) -> &'static str {
     match outcome {
         Some(CacheOutcome::Hit) => "hit",
