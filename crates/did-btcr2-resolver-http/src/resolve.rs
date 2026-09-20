@@ -30,12 +30,17 @@ pub trait Resolve {
     /// Resolve `did` under `opts`, or fail with the facade's error.
     fn resolve(&self, did: &Did, opts: ResolutionOptions) -> Result<ResolutionResult, Error>;
 
-    /// The cache outcome of the most recent `resolve` on this handle, taken so
-    /// the next request starts clean; `None` for a resolver without a cache or
-    /// when `resolve` has not run since the last take. The shell reads it once
-    /// per request for the log line; a handle serves one request at a time.
-    fn take_cache_outcome(&self) -> Option<CacheOutcome> {
-        None
+    /// Resolve and report whether a cache answered: `Some(Hit)` or
+    /// `Some(Miss)` from a caching resolver, `None` from one without a cache.
+    /// The outcome travels with the result it describes, so it belongs to the
+    /// call that produced it however many threads share the handle. The shell
+    /// uses it for the log line.
+    fn resolve_traced(
+        &self,
+        did: &Did,
+        opts: ResolutionOptions,
+    ) -> (Result<ResolutionResult, Error>, Option<CacheOutcome>) {
+        (self.resolve(did, opts), None)
     }
 }
 
@@ -56,7 +61,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// Whether a resolver answered the most recent request from its cache.
+/// Whether a resolver answered a request from its cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheOutcome {
     /// Served from memory; the upstream resolver was not called.
@@ -84,15 +89,15 @@ struct Entry {
 /// A response cache over any [`Resolve`]: successful results for `ttl`, at
 /// most `capacity` of them, keyed by DID and the three scalar options. Errors
 /// are passed through and never stored (`Error` is not `Clone`, so they cannot
-/// be). Cloning shares the cache — every `serve` worker sees the same entries —
-/// and gives the clone its own cache-outcome slot.
+/// be). Cloning shares the cache — every `serve` worker sees the same entries.
+/// The hit/miss outcome is returned from [`Resolve::resolve_traced`], never
+/// stored on the handle, so one handle may serve any number of threads.
 pub struct CachingResolver<R> {
     inner: R,
     ttl: Duration,
     capacity: NonZeroUsize,
     clock: Arc<dyn Clock>,
     entries: Arc<Mutex<HashMap<CacheKey, Entry>>>,
-    last: Mutex<Option<CacheOutcome>>,
 }
 
 impl<R> CachingResolver<R> {
@@ -114,7 +119,6 @@ impl<R> CachingResolver<R> {
             capacity,
             clock,
             entries: Arc::new(Mutex::new(HashMap::new())),
-            last: Mutex::new(None),
         }
     }
 
@@ -173,10 +177,6 @@ impl<R> CachingResolver<R> {
             },
         );
     }
-
-    fn record(&self, outcome: CacheOutcome) {
-        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
-    }
 }
 
 impl<R: Clone> Clone for CachingResolver<R> {
@@ -187,7 +187,6 @@ impl<R: Clone> Clone for CachingResolver<R> {
             capacity: self.capacity,
             clock: Arc::clone(&self.clock),
             entries: Arc::clone(&self.entries),
-            last: Mutex::new(None),
         }
     }
 }
@@ -204,6 +203,14 @@ impl<R> fmt::Debug for CachingResolver<R> {
 
 impl<R: Resolve> Resolve for CachingResolver<R> {
     fn resolve(&self, did: &Did, opts: ResolutionOptions) -> Result<ResolutionResult, Error> {
+        self.resolve_traced(did, opts).0
+    }
+
+    fn resolve_traced(
+        &self,
+        did: &Did,
+        opts: ResolutionOptions,
+    ) -> (Result<ResolutionResult, Error>, Option<CacheOutcome>) {
         let key = CacheKey {
             did: did.encode().to_owned(),
             version_id: opts.version_id,
@@ -212,21 +219,15 @@ impl<R: Resolve> Resolve for CachingResolver<R> {
         };
         let now = self.clock.now();
         if let Some(result) = self.lookup(&key, now) {
-            self.record(CacheOutcome::Hit);
-            return Ok(result);
+            return (Ok(result), Some(CacheOutcome::Hit));
         }
-        self.record(CacheOutcome::Miss);
-        // An `Err` leaves here; nothing is inserted.
-        let result = self.inner.resolve(did, opts)?;
+        let result = match self.inner.resolve(did, opts) {
+            Ok(result) => result,
+            // An `Err` leaves here; nothing is inserted.
+            Err(e) => return (Err(e), Some(CacheOutcome::Miss)),
+        };
         self.insert(key, self.clock.now(), result.clone());
-        Ok(result)
-    }
-
-    fn take_cache_outcome(&self) -> Option<CacheOutcome> {
-        self.last
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        (Ok(result), Some(CacheOutcome::Miss))
     }
 }
 
@@ -276,7 +277,7 @@ impl Resolve for ClientResolver {
 // The FSM is built and consumed inside `Client::resolve`; nothing about the
 // resolver crosses a thread except this handle, which workers clone. The
 // cache's `Arc<dyn Clock>` is Send + Sync because `Clock` requires both, and
-// its outcome slot is a `Mutex`.
+// the entry map is behind a `Mutex`; there is no other per-handle state.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<ClientResolver>();
@@ -827,38 +828,123 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
+    /// Each call carries its own outcome: the first is a miss, the second a
+    /// hit, an error is a miss (the upstream was called), a call past the TTL
+    /// is a miss again, and a clone sharing the entries reports a hit for what
+    /// the original populated. Nothing is read back from the handle.
     #[test]
-    fn take_cache_outcome_is_per_handle_and_taken_once() {
+    fn resolve_traced_returns_the_outcome_of_that_call() {
+        let clock = ManualClock::new();
+        let attempt = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&attempt);
+        let (inner, calls) = counting(move |did, _| {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                Err(Error::NoDefaultEndpoint("regtest"))
+            } else {
+                Ok(ok_result(did, false))
+            }
+        });
+        let resolver = cache(inner, &clock);
+        let (a, b) = (did_on(Network::Mainnet), did_on(Network::Mainnet));
+
+        let (first, outcome) = resolver.resolve_traced(&a, ResolutionOptions::default());
+        assert!(first.is_ok());
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+
+        let (second, outcome) = resolver.resolve_traced(&a, ResolutionOptions::default());
+        assert!(second.is_ok());
+        assert_eq!(outcome, Some(CacheOutcome::Hit));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // The second upstream call fails: a miss, and the error comes back
+        // with it.
+        let (failed, outcome) = resolver.resolve_traced(&b, ResolutionOptions::default());
+        assert!(
+            matches!(failed, Err(Error::NoDefaultEndpoint(_))),
+            "{failed:?}"
+        );
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        assert_eq!(resolver.len(), 1, "the error was not stored");
+
+        let other_handle = resolver.clone();
+        let (_, outcome) = other_handle.resolve_traced(&a, ResolutionOptions::default());
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Hit),
+            "a clone shares the entries"
+        );
+
+        clock.advance(CACHE_TTL);
+        let (_, outcome) = resolver.resolve_traced(&a, ResolutionOptions::default());
+        assert_eq!(outcome, Some(CacheOutcome::Miss), "expired: upstream again");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// One handle shared by several threads: every thread gets the outcome of
+    /// its own call, not a neighbour's. Each thread misses on its own DID and
+    /// then hits it; with a shared slot, a thread could read another's miss as
+    /// its hit or find the slot empty.
+    #[test]
+    fn resolve_traced_outcomes_are_attributed_per_call_across_threads() {
+        let clock = ManualClock::new();
+        let (inner, calls) = ok_counting();
+        let resolver = cache(inner, &clock);
+        let dids: Vec<Did> = (0..8).map(|_| did_on(Network::Mainnet)).collect();
+
+        std::thread::scope(|scope| {
+            for did in &dids {
+                scope.spawn(|| {
+                    let (first, outcome) =
+                        resolver.resolve_traced(did, ResolutionOptions::default());
+                    assert!(first.is_ok());
+                    assert_eq!(outcome, Some(CacheOutcome::Miss), "{}", did.encode());
+                    let (second, outcome) =
+                        resolver.resolve_traced(did, ResolutionOptions::default());
+                    assert!(second.is_ok());
+                    assert_eq!(outcome, Some(CacheOutcome::Hit), "{}", did.encode());
+                });
+            }
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), dids.len());
+        assert_eq!(resolver.len(), dids.len());
+    }
+
+    /// A resolver without a cache reports no outcome, and `handle` attributes
+    /// the outcome to the request it served: a rejected request never reaches
+    /// the resolver and carries `None`; the two that do carry their own.
+    #[test]
+    fn resolvers_without_a_cache_report_none_and_handle_carries_the_outcome() {
+        // `Client::for_did` fails before any I/O for a network with no hosted
+        // endpoint, so the bare production resolver is exercised offline.
+        let bare = ClientResolver::new(HashMap::new());
+        let (result, outcome) =
+            bare.resolve_traced(&did_on(Network::Regtest), ResolutionOptions::default());
+        assert!(matches!(result, Err(Error::NoDefaultEndpoint(_))));
+        assert_eq!(outcome, None);
+        let (result, outcome) = Scripted(Arc::new(|did, _| Ok(ok_result(did, false))))
+            .resolve_traced(&did_on(Network::Mainnet), ResolutionOptions::default());
+        assert!(result.is_ok());
+        assert_eq!(outcome, None);
+
         let clock = ManualClock::new();
         let (inner, _) = ok_counting();
         let resolver = cache(inner, &clock);
         let did = did_on(Network::Mainnet);
 
-        assert_eq!(resolver.take_cache_outcome(), None);
+        let mut rejected = get(&did, Some("application/did-resolution"));
+        rejected.query = Some("versionId=abc".to_string());
+        let (response, outcome) = crate::handle_traced(&rejected, &resolver);
+        assert_eq!(response.status, 400);
+        assert_eq!(outcome, None, "the resolver was not reached");
 
-        resolver
-            .resolve(&did, ResolutionOptions::default())
-            .expect("resolves");
-        assert_eq!(resolver.take_cache_outcome(), Some(CacheOutcome::Miss));
-        assert_eq!(resolver.take_cache_outcome(), None);
-
-        resolver
-            .resolve(&did, ResolutionOptions::default())
-            .expect("resolves");
-        assert_eq!(resolver.take_cache_outcome(), Some(CacheOutcome::Hit));
-        assert_eq!(resolver.take_cache_outcome(), None);
-
-        resolver
-            .resolve(&did, ResolutionOptions::default())
-            .expect("resolves");
-        let other_handle = resolver.clone();
-        assert_eq!(other_handle.take_cache_outcome(), None);
-        assert_eq!(resolver.take_cache_outcome(), Some(CacheOutcome::Hit));
-
-        assert_eq!(
-            ClientResolver::new(HashMap::new()).take_cache_outcome(),
-            None
-        );
+        let (response, outcome) =
+            crate::handle_traced(&get(&did, Some("application/did-resolution")), &resolver);
+        assert_eq!(response.status, 200);
+        assert_eq!(outcome, Some(CacheOutcome::Miss));
+        let (response, outcome) = crate::handle_traced(&get(&did, None), &resolver);
+        assert_eq!(response.status, 200);
+        assert_eq!(outcome, Some(CacheOutcome::Hit));
     }
 
     #[test]

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use did_btcr2::document::ResolutionResult;
+use did_btcr2::document::{ResolutionOptions, ResolutionResult};
 use did_btcr2::error::{Btcr2Error, ProblemDetails};
 use did_btcr2::identifier::Did;
 use did_btcr2_client::network_name;
@@ -84,70 +84,20 @@ pub struct Response {
 /// Only a request that reaches the resolution function gets a
 /// resolution-result body; the route and method rejections are bodiless.
 pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
-    let encoded_did = match route(&req.path) {
-        Route::NotFound => return plain(404, vec![]),
-        Route::Health if req.method == "GET" || req.method == "HEAD" => return health(),
-        Route::Health => return plain(405, vec![("Allow", "GET, HEAD".to_string())]),
-        Route::Resolve { encoded_did } => encoded_did,
+    handle_traced(req, resolver).0
+}
+
+/// [`handle`], plus the cache outcome of the resolution it made: `None` when
+/// the request was rejected before the resolver or the resolver has no cache.
+/// The shell logs it; the outcome comes back with the response it belongs
+/// to, so nothing is read from the resolver after the fact.
+fn handle_traced(req: &Request, resolver: &impl Resolve) -> (Response, Option<CacheOutcome>) {
+    let (did, opts, mode) = match prepare(req) {
+        Ok(ready) => ready,
+        Err(response) => return (response, None),
     };
-    if req.method != "GET" {
-        return plain(405, vec![("Allow", "GET".to_string())]);
-    }
-    let decoded = match percent_decode(encoded_did) {
-        Ok(d) => d,
-        Err(e) => {
-            return problem_response(
-                details_of(&Btcr2Error::InvalidDid(format!(
-                    "the DID path segment is not valid percent-encoding: {e}"
-                ))),
-                None,
-            );
-        }
-    };
-    if decoded.is_empty() {
-        return problem_response(
-            details_of(&Btcr2Error::InvalidDid(
-                "the DID path segment is empty".to_string(),
-            )),
-            None,
-        );
-    }
-    let did: Did = match decoded.parse() {
-        Ok(did) => did,
-        Err(did_btcr2::identifier::Error::DidUrl) => {
-            return problem_response(
-                details_of(&Problem::FeatureNotSupported(
-                    "DID URL dereferencing is not supported by this resolver; supply a DID without a path, query or fragment"
-                        .to_string(),
-                )),
-                None,
-            );
-        }
-        Err(e) => return problem_response(details_of(&Btcr2Error::from(e)), None),
-    };
-    let mut opts = match parse_options(req.query.as_deref()) {
-        Ok(o) => o,
-        Err(e) => return problem_response(e.details(), None),
-    };
-    let accept = header_values(req, "accept");
-    let mode = match negotiate(accept.as_deref()) {
-        Ok(m) => m,
-        Err(offered) => {
-            // The 406 exists only because of what `Accept` said: a cache
-            // must not hand it to a client whose `Accept` would negotiate.
-            let mut response = problem_response(
-                details_of(&Problem::RepresentationNotSupported(format!(
-                    "none of the requested media types is supported; offered: {}",
-                    offered.join(", ")
-                ))),
-                None,
-            );
-            response.headers.push(vary_accept());
-            return response;
-        }
-    };
-    opts.accept = Some(mode.opts_accept().to_string());
-    match resolver.resolve(&did, opts) {
+    let (result, outcome) = resolver.resolve_traced(&did, opts);
+    let response = match result {
         Err(e) => {
             let (details, diagnostic) = map_client_error(e);
             problem_response(details, diagnostic)
@@ -169,7 +119,70 @@ pub fn handle(req: &Request, resolver: &impl Resolve) -> Response {
                 }
             }
         }
+    };
+    (response, outcome)
+}
+
+/// Everything [`handle`] does before the resolver: route, method, decode,
+/// empty, parse the DID, options, `Accept`. `Ok` is what the resolution
+/// call needs; `Err` is the response that ends the request here.
+fn prepare(req: &Request) -> Result<(Did, ResolutionOptions, Mode), Response> {
+    let encoded_did = match route(&req.path) {
+        Route::NotFound => return Err(plain(404, vec![])),
+        Route::Health if req.method == "GET" || req.method == "HEAD" => return Err(health()),
+        Route::Health => return Err(plain(405, vec![("Allow", "GET, HEAD".to_string())])),
+        Route::Resolve { encoded_did } => encoded_did,
+    };
+    if req.method != "GET" {
+        return Err(plain(405, vec![("Allow", "GET".to_string())]));
     }
+    let decoded = percent_decode(encoded_did).map_err(|e| {
+        problem_response(
+            details_of(&Btcr2Error::InvalidDid(format!(
+                "the DID path segment is not valid percent-encoding: {e}"
+            ))),
+            None,
+        )
+    })?;
+    if decoded.is_empty() {
+        return Err(problem_response(
+            details_of(&Btcr2Error::InvalidDid(
+                "the DID path segment is empty".to_string(),
+            )),
+            None,
+        ));
+    }
+    let did: Did = match decoded.parse() {
+        Ok(did) => did,
+        Err(did_btcr2::identifier::Error::DidUrl) => {
+            return Err(problem_response(
+                details_of(&Problem::FeatureNotSupported(
+                    "DID URL dereferencing is not supported by this resolver; supply a DID without a path, query or fragment"
+                        .to_string(),
+                )),
+                None,
+            ));
+        }
+        Err(e) => return Err(problem_response(details_of(&Btcr2Error::from(e)), None)),
+    };
+    let mut opts =
+        parse_options(req.query.as_deref()).map_err(|e| problem_response(e.details(), None))?;
+    let accept = header_values(req, "accept");
+    let mode = negotiate(accept.as_deref()).map_err(|offered| {
+        // The 406 exists only because of what `Accept` said: a cache
+        // must not hand it to a client whose `Accept` would negotiate.
+        let mut response = problem_response(
+            details_of(&Problem::RepresentationNotSupported(format!(
+                "none of the requested media types is supported; offered: {}",
+                offered.join(", ")
+            ))),
+            None,
+        );
+        response.headers.push(vary_accept());
+        response
+    })?;
+    opts.accept = Some(mode.opts_accept().to_string());
+    Ok((did, opts, mode))
 }
 
 /// Run `threads` workers over `server`, each taking requests with `recv()`,
@@ -258,12 +271,11 @@ fn serve_one(request: tiny_http::Request, resolver: &impl Resolve) {
             })
             .collect(),
     };
-    let (response, cache) = match catch_unwind(AssertUnwindSafe(|| handle(&plain, resolver))) {
-        Ok(response) => (response, resolver.take_cache_outcome()),
+    let (response, cache) = match catch_unwind(AssertUnwindSafe(|| handle_traced(&plain, resolver)))
+    {
+        Ok(served) => served,
         Err(payload) => {
             eprintln!("handler panicked on {shown_target}; the worker continues");
-            // A panic after a cache access must not leak the outcome onto the 500 line.
-            let _ = resolver.take_cache_outcome();
             (
                 problem_response(
                     problem::internal("the resolver failed internally"),
@@ -340,7 +352,8 @@ struct RequestLog<'a> {
 }
 
 /// The `cache` field: `hit`, `miss`, or `n/a` when the resolver was not reached
-/// (a rejected request, `/health`, or a panic).
+/// (a rejected request, `/health`, or a panic) — or, for a resolver without a
+/// cache, always (production wraps [`CachingResolver`], so never there).
 fn cache_label(outcome: Option<CacheOutcome>) -> &'static str {
     match outcome {
         Some(CacheOutcome::Hit) => "hit",
@@ -453,7 +466,6 @@ fn header_values(req: &Request, name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    use did_btcr2::document::ResolutionOptions;
     use did_btcr2::identifier::{DidComponents, DidVersion, IdType, Network};
 
     /// A resolver the request must never reach.
