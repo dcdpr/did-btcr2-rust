@@ -35,12 +35,26 @@
 //! too: its members are `genesisDocument`, `updates`, `casUpdates` and
 //! `smtProofs`, and any other is rejected — the core's deserialiser would
 //! ignore it, and a mis-keyed `update` would resolve without the updates.
+//!
+//! A member given more than once is rejected as in the query form. The body
+//! is read member by member through a `Deserialize` over serde's `MapAccess`,
+//! which streams every key as written, because `serde_json::Value` collapses
+//! a repeat to its last occurrence before the binding could see it. The check
+//! stops at the top level: `sidecar` is taken as a `Value`, so a member
+//! repeated inside it takes the last occurrence. That is deliberate. The
+//! sidecar is evidence the resolver verifies against the chain — update
+//! hashes against beacon signals, the genesis document against the
+//! identifier, CAS and SMT entries against their hashes and roots — so a
+//! collapsed duplicate there fails verification or changes nothing, while a
+//! repeated option is an instruction with two readings and no backstop.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use did_btcr2::document::{ResolutionOptions, SidecarData};
 use did_btcr2::error::{Btcr2Error, ProblemDetails};
+use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 use crate::path::percent_decode;
@@ -172,6 +186,70 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
     Ok(opts)
 }
 
+/// A request body as serde_json read it, before duplicates collapse: the
+/// members of an object in document order, every occurrence kept; or not an
+/// object at all.
+enum Body {
+    Object(Vec<(String, Value)>),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for Body {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BodyVisitor;
+
+        impl<'de> Visitor<'de> for BodyVisitor {
+            type Value = Body;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON value")
+            }
+
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Body, E> {
+                Ok(Body::Other)
+            }
+
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Body, E> {
+                Ok(Body::Other)
+            }
+
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Body, E> {
+                Ok(Body::Other)
+            }
+
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Body, E> {
+                Ok(Body::Other)
+            }
+
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Body, E> {
+                Ok(Body::Other)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Body, E> {
+                Ok(Body::Other)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Body, A::Error> {
+                // Drain it: serde_json expects the closing bracket after the
+                // visitor returns, and a truncated array must still surface
+                // as the syntax error it is.
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(Body::Other)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Body, A::Error> {
+                let mut members = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    members.push((key, map.next_value::<Value>()?));
+                }
+                Ok(Body::Object(members))
+            }
+        }
+
+        deserializer.deserialize_any(BodyVisitor)
+    }
+}
+
 /// What a `POST` body yielded: the options, and what the log line reports
 /// about the sidecar it carried.
 #[derive(Debug)]
@@ -193,8 +271,11 @@ pub struct BodyOptions {
 /// not be turned away); `versionTime` is a string, `noCache` a boolean.
 ///
 /// An empty or all-whitespace body is `{}`: every option unset. A member
-/// given more than once takes `serde_json`'s default, the last occurrence —
-/// unlike the query parser, which rejects a repeated name.
+/// given more than once is rejected, as in the query form; the members are
+/// read in document order and checked before any is interpreted, so the
+/// detail names the duplicate whatever else the body carries. Inside
+/// `sidecar` a repeated member takes the last occurrence (see the module
+/// doc).
 pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
     let mut opts = ResolutionOptions::default();
     let mut sidecar_updates = None;
@@ -204,14 +285,23 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
             sidecar_updates,
         });
     }
-    let value: Value = serde_json::from_slice(body)
-        .map_err(|e| invalid(format!("the request body is not valid JSON: {e}")))?;
-    let Value::Object(map) = value else {
-        return Err(invalid(
-            "the request body must be a JSON object of resolution options".to_string(),
-        ));
+    let members = match serde_json::from_slice::<Body>(body) {
+        Ok(Body::Object(members)) => members,
+        Ok(Body::Other) => {
+            return Err(invalid(
+                "the request body must be a JSON object of resolution options".to_string(),
+            ));
+        }
+        Err(e) => return Err(invalid(format!("the request body is not valid JSON: {e}"))),
     };
-    for (key, value) in map {
+    // Before any member is interpreted, so the detail names the duplicate
+    // whatever else the body carries. Linear: a body at the limit can hold
+    // ~10^5 members, so no pairwise scan.
+    let mut seen = HashSet::new();
+    if let Some((key, _)) = members.iter().find(|(key, _)| !seen.insert(key.as_str())) {
+        return Err(invalid(format!("member `{key}` is given more than once")));
+    }
+    for (key, value) in members {
         match key.as_str() {
             "versionId" => {
                 opts.version_id = Some(
@@ -601,6 +691,12 @@ mod tests {
             assert!(parsed.opts.sidecar_data.is_some(), "{empty_sidecar}");
             assert_eq!(parsed.sidecar_updates, Some(0), "{empty_sidecar}");
         }
+        // The duplicate check stops at the top level: a member repeated
+        // inside `sidecar` takes the last occurrence (see the module doc).
+        let nested = r#"{"sidecar": {"updates": [], "updates": []}}"#;
+        let parsed = body(nested);
+        assert!(parsed.opts.sidecar_data.is_some(), "{nested}");
+        assert_eq!(parsed.sidecar_updates, Some(0), "{nested}");
 
         // A real sidecar: the update count is read from the fixture, never
         // hardcoded, so a re-capture of the file does not break the test.
@@ -628,7 +724,20 @@ mod tests {
             ("[]", "JSON object"),
             ("\"x\"", "JSON object"),
             ("42", "JSON object"),
+            ("null", "JSON object"),
             ("{", "valid JSON"),
+            ("[1, 2", "valid JSON"),
+            // A repeated member is rejected as a duplicate, before the value
+            // is looked at.
+            ("{\"versionId\": 1, \"versionId\": 2}", "versionId"),
+            ("{\"versionId\": 1, \"versionId\": 2}", "more than once"),
+            (
+                "{\"versionId\": \"abc\", \"versionId\": 1}",
+                "more than once",
+            ),
+            ("{\"sidecar\": {}, \"sidecar\": {}}", "sidecar"),
+            ("{\"sidecar\": {}, \"sidecar\": {}}", "more than once"),
+            ("{\"foo\": 1, \"foo\": 2}", "more than once"),
             ("{\"versionId\": 0}", "versionId"),
             ("{\"versionId\": -1}", "versionId"),
             ("{\"versionId\": 1.5}", "versionId"),
@@ -716,13 +825,12 @@ mod tests {
             assert_body_rejected(body, FEATURE_NOT_SUPPORTED, names);
         }
 
-        // A repeated member is serde_json's default: the last one wins.
+        // The duplicate detail is the bare sentence: the check runs outside
+        // serde's error channel, so no ` at line N column M` suffix.
+        let err = parse_body_options(br#"{"minConf": 1, "minConf": 1}"#).expect_err("rejected");
         assert_eq!(
-            body(r#"{"versionId": 1, "versionId": 2}"#)
-                .opts
-                .version_id
-                .map(NonZeroU64::get),
-            Some(2)
+            err.details()["detail"],
+            "member `minConf` is given more than once"
         );
 
         let invalid = parse_body_options(b"{\"foo\":1}").expect_err("rejected");
