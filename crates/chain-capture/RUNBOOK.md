@@ -516,19 +516,25 @@ Record them here after the session, so anyone who encounters them knows what
 they are:
 
 - `clean-rotating-beacons`:
+  `did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk`
+  — minted on mutinynet at blocks 3443744 / 3443745 / 3443746, captured at tip
+  3443751, resolves to version 4 and is deactivated; the version 3 announcement
+  (block 3443745) is on the P2WPKH beacon the version 2 update added. Replaced
+  the regtest mint of
   `did:btcr2:k1qgp74wu5cs4lq3vzxsgez4hjl9g23kf88gzl4lu2wpttv4y225zzk5sz2xa24`
-  — minted on the disposable Polar regtest chain at blocks 760 / 762 / 764,
-  captured at tip 769, resolves to version 4 and is deactivated. The version 3
-  announcement (block 762) is on the P2WPKH beacon the version 2 update added.
+  (blocks 760 / 762 / 764, tip 769) on 2026-09-21. The transaction ids, the
+  funding transactions and the key disposition are recorded in
+  `crates/did-btcr2-resolver-http/FIXTURES.md` §7.2.
 - `late-publishing-fork`:
   `did:btcr2:k1qgph42l3n43ktt53mp7tnaty6wkddyy34caxkmgzkrw7zt0ee7pmp8sxx05pd`
-  — minted on the same chain at blocks 771 / 773, captured at tip 778, two
-  conflicting version 2 announcements from one beacon.
+  — minted on the disposable Polar regtest chain at blocks 771 / 773, captured
+  at tip 778, two conflicting version 2 announcements from one beacon.
 
 Both were minted with the settling step, so each tip sits five blocks past the
 last announcement and the replay tests run under the default `minConf`. The
-fork's heights follow from where the clean session left the tip: minting it
-second on the same chain starts from 769.
+fork is still the regtest mint: its heights follow from where the original
+regtest clean session left that chain's tip (769), which is why they start at
+771 although the clean fixture no longer carries those heights.
 
 The second one is a **deliberately malformed DID history, published for
 testing**. Resolving it raises the spec's late-publishing error, which is the
@@ -564,6 +570,11 @@ What does not change: fresh keys, new DIDs, the fixtures regenerated wholesale,
 and **no test edit**. The replay reads the DID, the heights and the block times
 out of the fixture, so moving chains is an operator session rather than a code
 change.
+
+`clean` has climbed this rung: the command above ran on mutinynet on 2026-09-21
+(the entry under "The minted DIDs"), asking 6 000 sats per announcing beacon
+(`--fee` plus a 5 000 sat margin) and finishing in about five minutes.
+`poisoned` is still the regtest mint.
 
 ---
 

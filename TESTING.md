@@ -87,7 +87,7 @@ operation-vector coverage: 22 vectors, 100 rows
   stale update @context: 17 vector(s) predate the spec's pinned update @context (regenerated upstream; Resolve rows skipped under StaleContext until the bump): mutinynet, regtest
 
 minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counted in the upstream ledger above)
-  minted/clean-rotating-beacons (minted on regtest)
+  minted/clean-rotating-beacons (minted on mutinynet)
     driven by minted_chain_sequences_updates_across_rotating_beacons
     covers: multi-update sequencing across rotating beacons
     covers: an update announced from a beacon an earlier update added, scanned mid-walk
@@ -357,9 +357,12 @@ all: `q5puld7y`, `q5g3smvu`, `qh66uy2s`, `qgpakaw4`, `q2fz9mz6`.
 
 Two scenarios are minted in-repo and are deliberately **not** counted in the
 upstream ledger; `ledger_summary_never_mentions_a_minted_scenario`
-(`src/test_vectors.rs`) enforces the exclusion. Both were minted on regtest, and
-both fixtures are in-repo, so these two tests run even when the `test-suite/`
-submodule is not checked out.
+(`src/test_vectors.rs`) enforces the exclusion. `clean-rotating-beacons` was
+re-minted on mutinynet (a public test network; the capture carries the endpoint
+and tip it was read at, and a network reset means re-minting),
+`late-publishing-fork` on the disposable Polar regtest chain; both fixtures are
+in-repo, so these two tests run even when the `test-suite/` submodule is not
+checked out.
 
 | Scenario | Driver test | Covers | Expected |
 |---|---|---|---|
@@ -382,7 +385,7 @@ addresses captured; `signals` is the number of OP_RETURN announcements found.
 | regtest/k1/qgpy0hmm.json | regtest | http://localhost:3000 | 758 | 4 | 1 | 681 |
 | regtest/x1/q26jeds9.json | regtest | http://localhost:3000 | 758 | 2 | 1 | 694 |
 | regtest/x1/qfl7se8f.json | regtest | http://localhost:3000 | 758 | 1 | 1 | 706 |
-| minted/clean-rotating-beacons.json | regtest | http://localhost:3000 | 769 | 4 | 3 | 760, 762, 764 |
+| minted/clean-rotating-beacons.json | mutinynet | https://mutinynet.com/api | 3443751 | 4 | 3 | 3443744, 3443745, 3443746 |
 | minted/late-publishing-fork.json | regtest | http://localhost:3000 | 778 | 3 | 2 | 771, 773 |
 
 The other 4 driven vectors (`q5puld7y`, `q5g3smvu`, `qgpakaw4`, `q2fz9mz6`) are
@@ -395,9 +398,9 @@ shipped — and that is exactly what makes the vectors' stated confirmations agr
 `tip - signal_height + 1` gives 758−666+1 = 93, 758−681+1 = 78, 758−694+1 = 65
 and 758−706+1 = 53, matching the 93 / 78 / 65 / 53 in the vector table.
 
-Mining on a fresh unpack of that export is how the minted scenarios below are
-produced; the vendor rows replay from their files regardless of what any live
-chain does. Re-capturing a vendor regtest vector needs a fresh unpack, since its
+Mining on a fresh unpack of that export is how the `late-publishing-fork`
+scenario below was produced (the `clean` scenario now lives on mutinynet); the
+vendor rows replay from their files regardless of what any live chain does. Re-capturing a vendor regtest vector needs a fresh unpack, since its
 `confirmations` only reproduce from the untouched tip.
 
 The three mutinynet captures share tip 3307267 and all announce at height
@@ -429,10 +432,11 @@ The resolver processes a beacon signal only once it has
 `resolutionOptions.minConf` confirmations — six by default — measured as
 `tip - signal_height + 1` against the tip the fixture pins. Every vendor capture
 clears that by a wide margin. The two minted captures are settled: the mint
-tool mines `SETTLEMENT_BLOCKS` (5) past the last announcement before it
-captures, so the committed tips (769 for the clean chain, whose last
-announcement is at 764; 778 for the fork, whose last announcement is at 773)
-give the last signal exactly six confirmations, and
+tool mines (on regtest) or waits for (on a public chain) `SETTLEMENT_BLOCKS`
+(5) past the last announcement before it captures, so the committed tips
+(3443751 for the clean chain on mutinynet, whose last announcement is at
+3443746; 778 for the fork on regtest, whose last announcement is at 773) give
+the last signal exactly six confirmations, and
 `minted_chain_sequences_updates_across_rotating_beacons` and
 `minted_fork_raises_late_publishing` run under the default. A re-mint that
 skipped the settling step would stop the walk short under the default and fail
