@@ -144,7 +144,10 @@ opposite on purpose: each has a real on-chain update history on **mutinynet**, a
 that is periodically reset, so their records name transaction ids (64-hex) and one of them has a
 secret that is deliberately kept. They are the inputs to `DEPLOY.md` §10 and appear in no suite
 config. `tests/fixtures.rs` scans this section separately: a 64-hex token is allowed here only on a
-line that labels it `txid`.
+line that labels it `txid`; the §7.1 DID must be the one `demo/updated-v2.sidecar.json` names, and
+the §7.2 record must describe `fixtures/chain/minted/clean-rotating-beacons.json` as committed —
+the same DID (also under "The minted DIDs" in the `chain-capture` RUNBOOK), network, capture tip,
+signal txids and heights, and end state — so a re-mint without a new record fails the build.
 
 Record shape (one subsection per DID): the DID; the exact mint command; public key and derivation;
 funding txid; update / deactivate txids in version order; key disposition (kept where, or thrown

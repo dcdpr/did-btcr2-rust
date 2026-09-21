@@ -24,7 +24,15 @@
 //!   statements, with at least six labelled txids and no txid bullet that
 //!   quotes anything but a 64-hex token;
 //! - the committed sidecar `demo/updated-v2.sidecar.json` parses as the core's
-//!   `SidecarData`, holds one update, and names the updated DID.
+//!   `SidecarData`, holds one update, and names the updated DID;
+//! - the minted fixture `fixtures/chain/minted/clean-rotating-beacons.json` holds
+//!   the DID the `deactivated` record names, on the network, at the tip, with the
+//!   signal txids and heights and the end state (`versionId "4"`, deactivated)
+//!   the record describes, and the `chain-capture` RUNBOOK's "The minted DIDs"
+//!   entry names the same DID. The fixture is re-minted under a fresh key after
+//!   every mutinynet reset, and the regtest recipe writes to the same path, so
+//!   without this the record would keep naming a DID the file no longer holds
+//!   while every replay test — which reads the DID from the file — stayed green.
 //!
 //! The token extractors have their own negative cases below, so the guard cannot
 //! pass by extracting nothing.
@@ -35,6 +43,9 @@ use did_btcr2::identifier::{Did, DidVersion, IdType, Network};
 const CONFIG: &str = include_str!("../w3c/localConfig.cjs");
 const RECORD: &str = include_str!("../FIXTURES.md");
 const DEMO_SIDECAR: &str = include_str!("../demo/updated-v2.sidecar.json");
+const CLEAN_FIXTURE: &str =
+    include_str!("../../../fixtures/chain/minted/clean-rotating-beacons.json");
+const CAPTURE_RUNBOOK: &str = include_str!("../../chain-capture/RUNBOOK.md");
 // No host constant: the guard asserts the endpoint's SHAPE, not a literal host, so a host move
 // is a config edit with nothing to change here. The host is still in the binary — `CONFIG`
 // above embeds the whole file — so when the droplet is destroyed, the config is what to update
@@ -273,14 +284,34 @@ fn demo_dids() -> Vec<(&'static str, Did)> {
         .collect()
 }
 
-/// The DID named in the `### 7.1 updated` heading.
-fn updated_did() -> &'static str {
-    let heading = after(demo_section(), "### 7.1 updated");
-    let line = heading.lines().next().expect("the heading has a line");
+/// The DID named on the heading line that starts with `heading`, in the demo section.
+fn heading_did(heading: &str) -> &'static str {
+    let rest = after(demo_section(), heading);
+    let line = rest.lines().next().expect("the heading has a line");
     btcr2_dids(line)
         .first()
         .copied()
-        .unwrap_or_else(|| panic!("the 7.1 heading names a DID: {line:?}"))
+        .unwrap_or_else(|| panic!("the `{heading}` heading names a DID: {line:?}"))
+}
+
+/// The DID named in the `### 7.1 updated` heading.
+fn updated_did() -> &'static str {
+    heading_did("### 7.1 updated")
+}
+
+/// The DID named in the `### 7.2 deactivated` heading.
+fn deactivated_did() -> &'static str {
+    heading_did("### 7.2 deactivated")
+}
+
+/// The `### 7.2 deactivated` record: from its heading to the next `### ` heading or the
+/// end of the file.
+fn deactivated_record() -> &'static str {
+    let rest = after(demo_section(), "### 7.2 deactivated");
+    match rest.find("\n### ") {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
 }
 
 #[test]
@@ -369,6 +400,92 @@ fn demo_sidecar_parses_and_names_the_updated_did() {
         any_hex64(DEMO_SIDECAR),
         None,
         "the sidecar holds no 64-hex token (a secret)"
+    );
+}
+
+/// The minted fixture is the DID the `deactivated` record describes, and the record
+/// describes the fixture: the same DID, on mutinynet, captured at the tip the record
+/// states, every signal's txid and block height on a labelled line of the record, three
+/// sidecar updates, and the end state the `DEPLOY.md` §10 row promises — `versionId "4"`,
+/// deactivated. The RUNBOOK's "The minted DIDs" entry names the same DID. A re-mint (or
+/// the regtest recipe run as written, which writes to the same path) that is not followed
+/// by a new record fails here, not in front of the operator.
+#[test]
+fn minted_fixture_is_the_deactivated_demo_did() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(CLEAN_FIXTURE).expect("the minted fixture is JSON");
+    let deactivated = deactivated_did();
+    let did: Did = deactivated
+        .parse()
+        .unwrap_or_else(|e| panic!("`{deactivated}` parses: {e}"));
+    assert_eq!(did.components().network(), Network::Mutinynet);
+    assert_ne!(deactivated, updated_did(), "the two demo DIDs differ");
+    assert!(
+        demo_dids().iter().any(|(t, _)| *t == deactivated),
+        "the deactivated DID is one of the demo section's DIDs"
+    );
+
+    assert_eq!(
+        fixture["did"], deactivated,
+        "the fixture holds the DID the 7.2 record names"
+    );
+    assert_eq!(fixture["network"], "mutinynet", "the record says mutinynet");
+    let metadata = &fixture["expected"]["didDocumentMetadata"];
+    assert_eq!(
+        metadata["versionId"], "4",
+        "the record says versionId \"4\""
+    );
+    assert_eq!(metadata["deactivated"], true, "the record says deactivated");
+    assert_eq!(
+        fixture["sidecar"]["updates"].as_array().map(Vec::len),
+        Some(3),
+        "the record says three sidecar updates"
+    );
+
+    let record = deactivated_record();
+    let tip = fixture["tip_height"]
+        .as_u64()
+        .expect("the fixture records its tip height");
+    assert!(
+        record.contains(&format!("tip {tip}")),
+        "the record states the capture tip {tip}"
+    );
+    let signals = fixture["signals"]
+        .as_array()
+        .expect("the fixture records its signals");
+    assert_eq!(signals.len(), 3, "one signal per update");
+    for signal in signals {
+        let txid = signal["txid"].as_str().expect("a signal has a txid");
+        let height = signal["block_height"]
+            .as_u64()
+            .expect("a signal has a block height");
+        let line = record
+            .lines()
+            .find(|l| l.contains(txid))
+            .unwrap_or_else(|| panic!("the record names signal txid {txid}"));
+        assert!(
+            line.contains("txid"),
+            "the signal txid sits on a line that labels it: {line:?}"
+        );
+        assert!(
+            record.contains(&format!("block {height}")),
+            "the record states block {height} for txid {txid}"
+        );
+    }
+
+    // The RUNBOOK's entry for the scenario names the DID the fixture holds; the first
+    // DID after the scenario's label is the current mint (the replaced one follows).
+    let entry = after(
+        after(CAPTURE_RUNBOOK, "### The minted DIDs"),
+        "`clean-rotating-beacons`:",
+    );
+    let runbook_did = btcr2_dids(entry)
+        .first()
+        .copied()
+        .expect("the RUNBOOK entry for clean-rotating-beacons names a DID");
+    assert_eq!(
+        runbook_did, deactivated,
+        "the RUNBOOK's minted-DIDs entry names the fixture's DID"
     );
 }
 
