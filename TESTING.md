@@ -13,7 +13,7 @@ Run everything from the workspace root `did-btcr2-rust/`.
 
 ```bash
 cargo test -p did-btcr2 -p did-btcr2-client -p did-btcr2-cli -p chain-capture -p did-btcr2-resolver-http
-cargo test -p did-btcr2-resolver-http --test conformance --test guard --test schema --test smoke --test fixtures
+cargo test -p did-btcr2-resolver-http --test conformance --test post --test guard --test schema --test smoke --test fixtures
 cargo test -p did-btcr2 --lib op_vectors -- --nocapture     # prints the coverage ledger
 cargo test -p did-btcr2 --lib minted_chain -- --nocapture   # minted clean chain
 cargo test -p did-btcr2 --lib minted_fork -- --nocapture    # minted fork
@@ -28,9 +28,13 @@ above. Always name crates with `-p`.
 
 The HTTP binding's suite (`did-btcr2-resolver-http`, second line) runs offline
 against a scripted resolver; only `smoke` opens a socket, on loopback at an
-ephemeral port. See §9 for the vendored W3C suite that `guard` and `schema`
-read. `fixtures` reads the committed `w3c/localConfig.cjs` and `FIXTURES.md` at
-compile time.
+ephemeral port. `conformance` is the GET binding's rows against the W3C suite;
+`post` is the POST binding's own rows — DID Resolution §12.1 makes POST a MAY
+and the pinned suite issues GET only, so they claim no `CONFORMANCE.md` row
+(the binding note there lists them; `guard` checks the list against the file).
+See §9 for the vendored W3C suite that `guard` and `schema` read. `fixtures`
+reads the committed `w3c/localConfig.cjs`, `FIXTURES.md`, the demo sidecar,
+the minted `clean` fixture and the `chain-capture` RUNBOOK at compile time.
 
 ## 2. What ships
 
@@ -40,7 +44,7 @@ compile time.
 | `did-btcr2-client` | 64 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
 | `chain-capture` | 185 |
-| `did-btcr2-resolver-http` | 45 lib + 9 bin + 47 conformance + 7 fixtures + 9 guard + 5 schema + 2 smoke |
+| `did-btcr2-resolver-http` | 62 lib + 9 bin + 47 conformance + 10 fixtures + 12 guard + 11 post + 5 schema + 6 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
 
@@ -543,7 +547,9 @@ To check the submodule out, see the one-time setup in
 package by the root `Cargo.toml` `include` allowlist; `cargo package --list`
 does not mention it.
 
-Two test binaries of `did-btcr2-resolver-http` read it at runtime:
+Two test binaries of `did-btcr2-resolver-http` read it at runtime, and a third
+guards the config the suite is pointed at (compiled in with `include_str!`; it
+does not read the submodule):
 
 - **`tests/guard.rs`** — the traceability guard. It extracts every `it()` title
   from the suite's `tests/4-did-resolution.js` and `tests/10-bindings.js` and
@@ -561,11 +567,19 @@ Two test binaries of `did-btcr2-resolver-http` read it at runtime:
   `include_str!`) and asserts mainnet / version 1 / `k1` for `valid` and
   mainnet / version 1 / `x1` for `notFound`, that `notFound` is a bare string
   (the pinned suite reads it as a scalar), that the endpoint is the resolver
-  path, and that both DIDs appear verbatim in `FIXTURES.md`. The extractor has
-  its own negative test.
+  path, and that both DIDs appear verbatim in `FIXTURES.md`, whose mainnet part
+  must hold no 64-hex token. Its `FIXTURES.md` §7 rows cover the funded
+  mutinynet demo DIDs: exactly two, mutinynet / version 1 / `k1`, every 64-hex
+  token on a line labelled `txid`; `demo/updated-v2.sidecar.json` parses as
+  `SidecarData`, holds one update and names the §7.1 DID; and the minted
+  `fixtures/chain/minted/clean-rotating-beacons.json` holds the §7.2 DID on
+  mutinynet at the recorded tip, with the recorded signal txids and heights,
+  three sidecar updates and the `versionId "4"` / deactivated end state, the
+  same DID the `chain-capture` RUNBOOK's "The minted DIDs" entry names. The
+  extractors have their own negative tests.
 
-**Absence behaviour.** When the submodule is absent or unpopulated these tests
-**fail**, naming `git submodule update --init w3c-resolution-suite`. This
+**Absence behaviour.** When the submodule is absent or unpopulated the first
+two **fail**, naming `git submodule update --init w3c-resolution-suite`. This
 deliberately differs from §8: the operation-vector drivers skip because their
 fixtures are upstream-owned and optional; the W3C rows are the binding's
 conformance claim, and a claim that silently skips is not a claim. It is the
