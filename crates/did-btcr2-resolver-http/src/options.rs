@@ -298,8 +298,13 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
                     .and_then(Value::as_array)
                     .map(Vec::len)
                     .unwrap_or(0);
+                // The serde error is dropped, not interpolated: for a type
+                // mismatch it renders the offending value, which would echo
+                // arbitrary client text (up to the body limit) into the
+                // detail. The body form names a rejected member but never
+                // echoes a rejected value.
                 let sidecar = SidecarData::from_json_value(value)
-                    .map_err(|e| invalid(format!("sidecar does not parse as sidecar data: {e}")))?;
+                    .map_err(|_| invalid("sidecar does not parse as sidecar data".to_string()))?;
                 opts.sidecar_data = Some(sidecar);
                 sidecar_updates = Some(n);
             }
@@ -684,11 +689,21 @@ mod tests {
             err.details()["detail"],
             "versionId and versionTime are mutually exclusive; supply at most one"
         );
-        // The value is not echoed: the body form's detail carries no client text.
+        // The value is not echoed: the body form's detail names the member,
+        // never the client's value — for a scalar, and for a sidecar whose
+        // serde error would render the offending value.
         let err = parse_body_options(br#"{"versionId": "abc"}"#).expect_err("rejected");
         assert_eq!(
             err.details()["detail"],
             "versionId must be a positive integer, as a JSON number or a string of decimal digits"
+        );
+        let marker = "MARKER-".repeat(64);
+        let err =
+            parse_body_options(format!(r#"{{"sidecar": {{"updates": "{marker}"}}}}"#).as_bytes())
+                .expect_err("rejected");
+        assert_eq!(
+            err.details()["detail"],
+            "sidecar does not parse as sidecar data"
         );
 
         // FEATURE_NOT_SUPPORTED for the registered-but-unimplemented pair.

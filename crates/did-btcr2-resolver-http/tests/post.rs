@@ -354,7 +354,8 @@ fn post_percent_encoded_did_matches_raw() {
 /// 400 `INVALID_OPTIONS`;
 /// `noCache: true` and `expandRelativeUrls` — 501 `FEATURE_NOT_SUPPORTED`.
 /// Every row carries the problem body and never reaches the resolver. The
-/// rejected value is never echoed; the controls show a digit string and
+/// rejected value is never echoed — not a scalar's, and not the sidecar's,
+/// whose serde error would render it; the controls show a digit string and
 /// `noCache: false` are accepted.
 #[test]
 fn post_rejections_are_400_or_501_before_the_resolver() {
@@ -427,6 +428,26 @@ fn post_rejections_are_400_or_501_before_the_resolver() {
             assert!(!detail.contains("abc"), "the value is echoed: {detail}");
         }
     }
+
+    // A rejected sidecar echoes no client text either: serde's type-mismatch
+    // error renders the offending value, and that value can be as long as
+    // the body limit allows. The detail is fixed and the marker is absent.
+    let marker = "MARKER-".repeat(64);
+    let payload = format!(r#"{{"sidecar": {{"updates": "{marker}"}}}}"#);
+    let resp = handle(
+        &post_full(&resolve_path(VALID_DID), payload.as_bytes()),
+        &Untouchable,
+    );
+    assert_eq!(resp.status, 400);
+    assert_error_result(&resp, INVALID_OPTIONS);
+    let detail = error_detail(&resp);
+    assert_eq!(detail, "sidecar does not parse as sidecar data");
+    assert!(!detail.contains(&marker), "the value is echoed: {detail}");
+    assert!(
+        resp.body.len() < payload.len(),
+        "the error body is not as large as the request"
+    );
+    assert!(resp.diagnostic.is_none());
 
     // The controls: `noCache: false` is the default and resolves; a digit
     // string is the same `versionId` as the number.
