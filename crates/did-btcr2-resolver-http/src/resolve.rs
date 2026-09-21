@@ -1,7 +1,8 @@
 //! The one seam the binding composes: resolve a DID to a result, or fail.
 //! Production composes [`CachingResolver`] over [`ClientResolver`]: a miss
 //! costs one `did-btcr2-client` resolution including the chain-tip fetch, a
-//! hit costs a map lookup and a clone.
+//! hit costs a map lookup and a clone. A `POST` resolution bypasses the cache
+//! entirely (`resolve_uncached`).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -45,6 +46,18 @@ pub trait Resolve {
     ) -> (Result<ResolutionResult, Error>, Option<CacheOutcome>) {
         (self.resolve(did, opts), None)
     }
+
+    /// Resolve without consulting or filling any cache. The `POST` binding's
+    /// path, and the only one on which `opts.sidecar_data` may be set: a
+    /// sidecar-resolved result must never be served to a later request that
+    /// carried no sidecar, so it never enters a cache. Default: [`Resolve::resolve`].
+    fn resolve_uncached(
+        &self,
+        did: &Did,
+        opts: ResolutionOptions,
+    ) -> Result<ResolutionResult, Error> {
+        self.resolve(did, opts)
+    }
 }
 
 /// A source of monotonic time, so the cache's expiry is testable without
@@ -71,6 +84,10 @@ pub enum CacheOutcome {
     Hit,
     /// The upstream resolver was called (whatever it answered).
     Miss,
+    /// The cache was neither read nor written: the request was a `POST`,
+    /// served through [`Resolve::resolve_uncached`]. Stamped by the handler,
+    /// never returned by [`Resolve::resolve_traced`].
+    Bypass,
 }
 
 /// `(did, versionId, versionTime, minConf)` — the projection of the options
@@ -114,7 +131,10 @@ struct Entry {
 /// the contract with a `debug_assert!`, so a test shell that broke it would
 /// fail loudly rather than serve a mismatched hit. (`accept` is excluded
 /// because representation is chosen after the result exists: one resolution
-/// serves every `Accept`.)
+/// serves every `Accept`.) A sidecar travels only through
+/// [`Resolve::resolve_uncached`], which forwards to the inner resolver without
+/// touching the map; `resolve_traced` still asserts that `sidecar_data` is
+/// unset.
 pub struct CachingResolver<R> {
     inner: R,
     ttl: Duration,
@@ -265,6 +285,15 @@ impl<R: Resolve> Resolve for CachingResolver<R> {
         // the age of the data (the chain tip it reflects), not of the entry.
         self.insert(key, now, result.clone());
         (Ok(result), Some(CacheOutcome::Miss))
+    }
+
+    /// Straight to the inner resolver: no key, no lookup, no insert.
+    fn resolve_uncached(
+        &self,
+        did: &Did,
+        opts: ResolutionOptions,
+    ) -> Result<ResolutionResult, Error> {
+        self.inner.resolve(did, opts)
     }
 }
 
@@ -537,6 +566,7 @@ mod tests {
             headers: accept
                 .map(|a| vec![("Accept".to_string(), a.to_string())])
                 .unwrap_or_default(),
+            body: Vec::new(),
         }
     }
 
@@ -796,15 +826,72 @@ mod tests {
         // The binding's own path passes: `Accept` and every query option.
         let mut request = get(&did, Some("application/did-resolution"));
         request.query = Some("versionId=1&minConf=3&noCache=false".to_string());
-        let (response, outcome) = crate::handle_traced(&request, &resolver);
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&request, &resolver);
         assert_eq!(response.status, 200, "{response:?}");
         assert_eq!(outcome, Some(CacheOutcome::Miss));
         let mut request = get(&did, None);
         request.query = Some("versionTime=2026-01-01T00:00:00Z".to_string());
-        let (response, outcome) = crate::handle_traced(&request, &resolver);
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&request, &resolver);
         assert_eq!(response.status, 200, "{response:?}");
         assert_eq!(outcome, Some(CacheOutcome::Miss));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The uncached path forwards every call to the inner resolver and
+    /// leaves the map alone: a sidecar goes through without tripping the
+    /// contract assertion, nothing is looked up, nothing is stored, and a
+    /// later traced call still misses. The trait default forwards to
+    /// `resolve`.
+    #[test]
+    fn resolve_uncached_forwards_to_the_inner_resolver_and_stores_nothing() {
+        use did_btcr2::document::SidecarData;
+
+        let clock = ManualClock::new();
+        let (inner, calls) = ok_counting();
+        let resolver = cache(inner, &clock);
+        let did = did_on(Network::Mainnet);
+        let with_sidecar = || ResolutionOptions {
+            sidecar_data: Some(SidecarData::default()),
+            ..Default::default()
+        };
+
+        resolver
+            .resolve_uncached(&did, with_sidecar())
+            .expect("resolves through the inner resolver");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(resolver.is_empty(), "nothing was inserted");
+
+        resolver
+            .resolve_uncached(&did, with_sidecar())
+            .expect("resolves again");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "nothing was served from memory"
+        );
+        assert!(resolver.is_empty());
+
+        let (_, outcome) = resolver.resolve_traced(&did, ResolutionOptions::default());
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Miss),
+            "the uncached calls filled nothing"
+        );
+        let (_, outcome) = resolver.resolve_traced(&did, ResolutionOptions::default());
+        assert_eq!(outcome, Some(CacheOutcome::Hit));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // The trait default: a resolver without a cache forwards to `resolve`.
+        let plain = Scripted(Arc::new(|did, _| Ok(ok_result(did, false))));
+        assert!(plain.resolve_uncached(&did, with_sidecar()).is_ok());
     }
 
     /// The entry's age is counted from the instant the lookup missed, not
@@ -1145,15 +1232,26 @@ mod tests {
 
         let mut rejected = get(&did, Some("application/did-resolution"));
         rejected.query = Some("versionId=abc".to_string());
-        let (response, outcome) = crate::handle_traced(&rejected, &resolver);
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&rejected, &resolver);
         assert_eq!(response.status, 400);
         assert_eq!(outcome, None, "the resolver was not reached");
 
-        let (response, outcome) =
-            crate::handle_traced(&get(&did, Some("application/did-resolution")), &resolver);
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&get(&did, Some("application/did-resolution")), &resolver);
         assert_eq!(response.status, 200);
         assert_eq!(outcome, Some(CacheOutcome::Miss));
-        let (response, outcome) = crate::handle_traced(&get(&did, None), &resolver);
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&get(&did, None), &resolver);
         assert_eq!(response.status, 200);
         assert_eq!(outcome, Some(CacheOutcome::Hit));
     }

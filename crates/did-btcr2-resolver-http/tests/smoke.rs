@@ -210,11 +210,11 @@ fn socket_round_trip_through_the_tiny_http_shell() {
     assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
 
     let resp = agent
-        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .put(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
         .send_empty()
-        .expect("POST the resolver path");
+        .expect("PUT the resolver path");
     assert_eq!(resp.status().as_u16(), 405);
-    assert_eq!(header(&resp, "allow"), Some("GET"));
+    assert_eq!(header(&resp, "allow"), Some("GET, POST"));
 
     let mut resp = agent
         .get(format!("http://{addr}/1.0/identifiers/did:example"))

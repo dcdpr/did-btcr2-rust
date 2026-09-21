@@ -1,12 +1,12 @@
-//! In-process conformance suite for the GET binding.
+//! In-process conformance suite for the GET binding, plus the binding's own rules.
 //!
 //! Mirrors `w3c/did-resolution-test-suite` at
 //! `2649fdf719beadbd3c684d358eea23c3c2e514fe`: one `#[test]` per `it()` in
 //! `tests/4-did-resolution.js` and `tests/10-bindings.js` that has in-process
 //! behaviour, the two result-shape helpers of `tests/assertions.js`, and one
-//! test per rule the binding itself adds (bodiless 404/405, strict
-//! percent-decoding, DID URLs, query options, network policy, the 500
-//! categories, the 410 shape). Each test's doc quotes the `it()` title and its
+//! test per rule the binding itself adds (bodiless 404/405, the method set
+//! (`GET`, `POST`), strict percent-decoding, DID URLs, query options, network
+//! policy, the 500 categories, the 410 shape). Each test's doc quotes the `it()` title and its
 //! `file:line` at the pin.
 //!
 //! Every test calls `handle` directly against a scripted `Resolve`: no port,
@@ -140,6 +140,7 @@ fn request(method: &str, path: &str, headers: &[(&str, &str)]) -> Request {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        body: Vec::new(),
     }
 }
 
@@ -772,23 +773,27 @@ fn unknown_path_is_plain_404_without_body() {
     }
 }
 
-/// A non-GET on the resolver path is a bodiless 405 with `Allow: GET`,
-/// before any parsing of the DID.
+/// A method other than GET or POST on the resolver path is a bodiless 405
+/// with `Allow: GET, POST`, before any parsing of the DID.
 #[test]
-fn non_get_on_resolver_path_is_405_with_allow_get() {
-    for method in ["POST", "HEAD", "PUT"] {
+fn other_methods_on_resolver_path_are_405_with_allow_get_post() {
+    for method in ["HEAD", "PUT", "DELETE"] {
         let resp = handle(
             &request(method, &resolve_path(VALID_DID), &[("Accept", FULL)]),
             &Untouchable,
         );
         assert_eq!(resp.status, 405, "{method}");
-        assert_eq!(resp.headers, vec![("Allow", "GET".to_string())], "{method}");
+        assert_eq!(
+            resp.headers,
+            vec![("Allow", "GET, POST".to_string())],
+            "{method}"
+        );
         assert!(resp.body.is_empty(), "{method}");
     }
     // Even a segment that would be rejected as a DID is answered by the
     // method check first.
     let resp = handle(
-        &request("POST", "/1.0/identifiers/not-a-did", &[]),
+        &request("PUT", "/1.0/identifiers/not-a-did", &[]),
         &Untouchable,
     );
     assert_eq!(resp.status, 405);

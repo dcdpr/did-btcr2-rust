@@ -1,4 +1,4 @@
-//! `did-btcr2-resolver-http` — serve the W3C DID Resolution GET binding for
+//! `did-btcr2-resolver-http` — serve the W3C DID Resolution GET and POST bindings for
 //! `did:btcr2` over plain HTTP. One process serves every network: the Esplora
 //! endpoint is derived from each DID's own network, with `--esplora-url`
 //! overrides for networks that have no hosted default (regtest, testnet4,
@@ -38,7 +38,7 @@ const HELP_TEXT: &str = concat!(
     " v",
     env!("CARGO_PKG_VERSION"),
     "\n",
-    "Serve the DID Resolution HTTP GET binding for did:btcr2.\n",
+    "Serve the DID Resolution HTTP GET and POST bindings for did:btcr2.\n",
     "\n",
     "Usage:\n",
     "  did-btcr2-resolver-http [flags]\n",
@@ -55,10 +55,13 @@ const HELP_TEXT: &str = concat!(
     "  -V, --version                  Show the version\n",
     "\n",
     "Endpoint: GET /1.0/identifiers/{did}[?versionId=|versionTime=|minConf=]\n",
+    "          POST /1.0/identifiers/{did} with a JSON body of options, e.g. {\"sidecar\": {...}, \"versionId\": 2};\n",
+    "          versionId/minConf as a JSON number or a digit string; body <= 1 MiB, Content-Type absent or JSON;\n",
+    "          a POST is never served from or written to the cache\n",
     "Health:   GET|HEAD /health -> 200 {\"status\":\"ok\"} (liveness only; no Esplora probe)\n",
     "Cache:    successful results for 60 s, keyed by DID + versionId/versionTime/minConf (not Accept);\n",
     "          errors are never cached; noCache=false (the default) is accepted, noCache=true answers 501 FEATURE_NOT_SUPPORTED\n",
-    "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network\n",
+    "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network, body_bytes, sidecar_updates\n",
 );
 
 /// The parsed command line.
@@ -318,8 +321,12 @@ mod tests {
         assert!(HELP_TEXT.contains("Cache:    successful results for 60 s"));
         assert!(HELP_TEXT.contains("noCache=false (the default) is accepted"));
         assert!(HELP_TEXT.contains("noCache=true answers 501 FEATURE_NOT_SUPPORTED"));
+        assert!(HELP_TEXT.contains("POST /1.0/identifiers/{did} with a JSON body of options"));
+        assert!(HELP_TEXT.contains("versionId/minConf as a JSON number or a digit string"));
+        assert!(HELP_TEXT.contains("body <= 1 MiB, Content-Type absent or JSON"));
+        assert!(HELP_TEXT.contains("a POST is never served from or written to the cache"));
         assert!(HELP_TEXT.contains(
-            "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network"
+            "Log:      one JSON object per request on stderr: method, path, did, accept, status, latency_ms, cache, network, body_bytes, sidecar_updates\n"
         ));
     }
 }
