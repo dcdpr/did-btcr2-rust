@@ -194,7 +194,7 @@ Verification line: `sha256sum` on the droplet copy equals `sha256sum` on the lap
 `/etc/systemd/system/did-btcr2-resolver-http.service`:
 ```ini
 [Unit]
-Description=did:btcr2 DID Resolution HTTP GET binding (loopback; TLS via Caddy)
+Description=did:btcr2 DID Resolution HTTP GET/POST binding (loopback; TLS via Caddy)
 After=network-online.target
 Wants=network-online.target
 
