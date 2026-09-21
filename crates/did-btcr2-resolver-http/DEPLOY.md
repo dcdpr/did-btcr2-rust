@@ -74,8 +74,9 @@ Exactly this, and nothing more:
   `400 INVALID_OPTIONS`. Every other method on the resolver path answers `405` with
   `Allow: GET, POST`. The binary's limit bounds honest bodies only: the shell library drains a
   `Content-Length` remainder the client never sent with one allocation sized by the declaration
-  and sets no socket read timeout, so the host bounds the declared length and the body read time
-  in Caddy (§6) before a request reaches the binary. See §10.
+  and sets no socket read timeout, so the host bounds the declared length (a header matcher —
+  Caddy's `request_body max_size` does not check it) and the body read time in Caddy (§6)
+  before a request reaches the binary. See §10.
 - **Liveness:** `GET /health` or `HEAD /health` → `200`, body `{"status":"ok"}` (`HEAD` returns the
   headers only), without touching Esplora. Point an uptime poller or `curl -I` at
   `https://<host>/health`; the proxy's own upstream health checks are unnecessary.
@@ -231,22 +232,42 @@ caddy version     # v2.11.x (the shakedown got v2.11.4)
 }
 
 <HOST> {
+	@declared_oversize header_regexp Content-Length ^[0-9]{8,}$
+	respond @declared_oversize 413
 	request_body {
 		max_size 1MiB
 	}
 	reverse_proxy 127.0.0.1:8080
 }
 ```
-The two bounds are the proxy's job, not the binary's. The binary reads at most 1 MiB of an
+The three bounds are the proxy's job, not the binary's. The binary reads at most 1 MiB of an
 honest `POST` body and answers `413` past it, but the shell library it runs on drains a
 `Content-Length` remainder the client never sent with one allocation sized by the declaration —
 a request declaring terabytes and sending a few kilobytes makes the process allocate that much
 and abort after the response is written, on any method — and it sets no read timeout on the
 socket, so a client that dribbles a body holds a handler thread for as long as it likes.
-`request_body max_size 1MiB` rejects on the declared length (and on bytes read) before the
-request reaches the binary; `read_body 30s` ends a slow body. §10's last row shows the proxy's
-`413`. A deployment without Caddy in front, or with a proxy that forwards the declared length,
-is exposed to both.
+
+Each line covers one of those, and none covers the others:
+
+- `request_body max_size 1MiB` bounds the bytes Caddy actually reads: an honest body one byte
+  past 1 MiB is `413` from Caddy. It does **not** look at the declared `Content-Length` — Caddy
+  v2.11.4 wraps the body in Go's `http.MaxBytesReader` and nothing else
+  (`modules/caddyhttp/requestbody/requestbody.go`), so a request that declares terabytes and
+  sends 2 KiB passes straight through it to the binary, which then aborts. The first
+  installation of this file carried only `max_size` and was proven that way: the lying-length
+  `POST` got no response, and the journal showed `memory allocation of 99999999997952 bytes
+  failed` followed by the unit's restart.
+- `@declared_oversize` / `respond … 413` is the guard on the declared length: a `Content-Length`
+  of eight or more digits (10 000 000 and up) is answered `413` by the matcher before the
+  request reaches `reverse_proxy`, so the binary never sees it. §10's last row shows this `413`.
+  The gap between the two lines — a lying length from 1 MiB + 1 up to 9 999 999 — still reaches
+  the binary; its drop-drain then allocates under 10 MB — a wasted allocation and a worker
+  held until `read_body` closes the upstream side, not an abort. A request with no
+  `Content-Length` (chunked) is not matched and is bounded by `max_size` alone.
+- `read_body 30s` ends a slow body.
+
+A deployment without Caddy in front, or with a proxy that forwards the declared length, is
+exposed to all three.
 ```sh
 # droplet
 caddy validate --config /etc/caddy/Caddyfile
@@ -378,7 +399,7 @@ sleep 3
 curl -sS -i -H "$H" -H "$J" --data-binary @/tmp/deactivated.body "https://$HOST/1.0/identifiers/$DEACTIVATED_DID"       # 410, deactivated true, versionId "4"
 curl -sS -i -H "$H" -H "$J" --data-binary @/tmp/updated.body "https://$HOST/1.0/identifiers/$UPDATED_DID?versionId=1"   # 400 INVALID_OPTIONS — options go in the body
 curl -sS -i -H "$H" -H 'Content-Type: text/plain' --data 'x' "https://$HOST/1.0/identifiers/$UPDATED_DID"               # 415, no body
-curl -sS -o /dev/null -w '%{http_code}\n' --max-time 20 --http1.1 -X POST -H "$J" -H 'Content-Length: 100000000000000' --data-binary @/tmp/2k.bin "https://$HOST/1.0/identifiers/$UPDATED_DID"   # 413 from Caddy (§6): the declared length is over the proxy's bound; the binary never sees the request
+curl -sS -o /dev/null -w '%{http_code}\n' --max-time 20 --http1.1 -X POST -H "$J" -H 'Content-Length: 100000000000000' --data-binary @/tmp/2k.bin "https://$HOST/1.0/identifiers/$UPDATED_DID"   # 413 from Caddy's declared-length guard (§6); the binary never sees the request
 ```
 
 `-H "$J"` is on every JSON row because curl's default `Content-Type` for `--data` is
