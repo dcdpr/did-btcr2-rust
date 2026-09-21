@@ -152,7 +152,11 @@ signal txids and heights, and end state — so a re-mint without a new record fa
 Record shape (one subsection per DID): the DID; the exact mint command; public key and derivation;
 funding txid; update / deactivate txids in version order; key disposition (kept where, or thrown
 away); the `curl` rows of `DEPLOY.md` §10 that use it. After a mutinynet reset both DIDs resolve to
-version 1 and must be re-minted with the same commands; the old records stay, dated, above the new.
+version 1 and must be re-minted with the same commands. What happens to the record differs: §7.1
+keeps its DID (the secret is kept), so a dated new record goes below the old one; §7.2 gets a fresh
+key at the same fixture path, so its record is updated in place and the guard fails the build until
+it matches the committed fixture. A new dated record is for a new scenario or a new fixture file
+only.
 
 ### 7.1 updated — `did:btcr2:k1q5pdy265auv0wht5ah5ljjk94xjyas34dm4cl9c8x4vq4qpczl46xxqly88yr`
 
@@ -199,8 +203,9 @@ Verification line: `POST` with the sidecar answers `200`, `"versionId":"2"`, and
 `assertionMethod` of length 2.
 
 After a mutinynet reset this DID resolves to `versionId "1"` (the signal is gone; the sidecar is
-never consulted). Re-mint with the same commands — the kept secret makes that the same DID — and
-append a dated new record below this one; do not edit this one.
+never consulted). Re-mint with the same commands — the kept secret makes that the same DID, which
+is why this record is appended to rather than replaced — and append a dated new record below this
+one; do not edit this one.
 
 ### 7.2 deactivated — `did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk`
 
@@ -252,6 +257,10 @@ This capture is rung 2 of the minting ladder for `clean` (`crates/chain-capture/
 
 After a mutinynet reset this DID resolves to `versionId "1"` and `200`, not `410`. The state file
 re-emits the fixture without broadcasting, but a reset chain has no signals to re-emit against:
-re-mint with the same command under a fresh key and state file, commit the new capture, and append
-a dated new record below this one; the replay tests read the DID and heights from the file and
-need no edit.
+re-mint with the same command under a fresh key and state file, commit the new capture, and update
+this record in place — heading DID, mint date, tool commit, public key, funding and signal txids,
+block heights, capture tip — to describe the new capture; `tests/fixtures.rs` fails the build until
+the record matches the committed fixture. The superseded capture is gone from the file at that
+path, so its record goes with it; git history keeps both. Append a dated new record only for a new
+scenario or a new fixture file. The replay tests read the DID and heights from the file and need
+no edit.
