@@ -73,9 +73,10 @@ Exactly this, and nothing more:
   `versionId` and `minConf` are accepted as a JSON number or as a string of decimal digits
   (`"2"`), `versionTime` as a string, `noCache` as a boolean; `Accept` stays in the header — so
   a caller can hand the resolver the off-chain update payload a Singleton beacon leaves off the
-  chain. The body is read to at most 1 MiB (fixed; past it a bodiless `413`), and only on a
-  `POST` — a body on a `GET` is not read. The `Content-Type` must be absent, `application/json`
-  or any `*/*+json` (else a bodiless `415`), and a query string on a `POST` is a
+  chain. The `Content-Type` must be absent, `application/json` or any `*/*+json`, else a
+  bodiless `415` decided on the headers before any body byte is read — a refused media type is
+  `415` whatever its size. The body of a `POST` that passes is read to at most 1 MiB (fixed;
+  past it a bodiless `413`); a body on a `GET` is not read. A query string on a `POST` is a
   `400 INVALID_OPTIONS`. Every other method on the resolver path answers `405` with
   `Allow: GET, POST`. The binary's limit bounds honest bodies only: the shell library drains a
   `Content-Length` remainder the client never sent with one allocation sized by the declaration
@@ -88,7 +89,8 @@ Exactly this, and nothing more:
 - **Logs:** one JSON object per request on stderr, fields in this order: `method`, `path` (the
   raw request-target), `did` (the decoded DID when the path parsed as one, else `null`),
   `accept`, `status`, `latency_ms`, `cache`, `network`, `body_bytes` (bytes of request body the
-  shell read; `0` for a bodiless request and for every method but `POST`), `sidecar_updates`
+  shell read; `0` for a bodiless request, for every method but `POST`, and for a `POST` refused
+  on its `Content-Type`), `sidecar_updates`
   (the length of the sidecar's `updates` array when a `POST` carried one and reached the
   resolver, else `null`). `/health` requests are logged in the
   same shape (`did` and `network` `null`, `cache` `n/a`); the error chain behind a 500 follows

@@ -2,8 +2,9 @@
 //! directly. These bind an ephemeral loopback port, run the `tiny_http`
 //! worker pool over a scripted resolver, and drive it with `ureq` to prove
 //! the request/response adaptation, the status and header plumbing, the
-//! request-body plumbing (a JSON body of options, the media-type gate, the
-//! honest body limit, a body on a GET), and the `unblock` shutdown path.
+//! request-body plumbing (a JSON body of options, the media-type gate decided
+//! before the body is read, the honest body limit, a body on a GET), and the
+//! `unblock` shutdown path.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
@@ -415,6 +416,62 @@ fn sidecar_body_reaches_the_resolver_through_the_socket() {
         saw_sidecar.load(Ordering::SeqCst),
         "the POST body became the resolver's sidecar"
     );
+
+    server.unblock();
+    for worker in workers {
+        worker.join().expect("worker exits after unblock");
+    }
+}
+
+/// The media-type check is decided on the headers before any body byte is
+/// read, so a refused `Content-Type` is a 415 whatever the body's size — a
+/// `text/plain` body one byte past the limit is not a 413. The size check
+/// still applies to a media type that passes: the same oversize body under
+/// `application/json` is a 413. One worker, and the same agent throughout, so
+/// the trailing `/health` proves that worker and the connection survived both.
+#[test]
+fn oversize_non_json_post_is_415_before_the_body_is_read() {
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+    let addr = server.server_addr().to_ip().expect("TCP listener");
+    let workers = serve(Arc::clone(&server), NonZeroUsize::MIN, OkMock);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let url = format!("http://{addr}/1.0/identifiers/{VALID_DID}");
+
+    let oversize_text = vec![b'x'; BODY_LIMIT + 1];
+    let mut resp = agent
+        .post(&url)
+        .header("Content-Type", "text/plain")
+        .send(&oversize_text)
+        .expect("POST an oversize text/plain body");
+    assert_eq!(
+        resp.status().as_u16(),
+        415,
+        "a refused media type is decided on the headers, before the size check"
+    );
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+
+    let oversize_json = vec![b' '; BODY_LIMIT + 1];
+    let mut resp = agent
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send(&oversize_json)
+        .expect("POST an oversize JSON body");
+    assert_eq!(
+        resp.status().as_u16(),
+        413,
+        "a media type that passes still meets the body limit"
+    );
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+
+    let resp = agent
+        .get(format!("http://{addr}/health"))
+        .call()
+        .expect("the worker still serves after the 415 and the 413");
+    assert_eq!(resp.status().as_u16(), 200);
 
     server.unblock();
     for worker in workers {

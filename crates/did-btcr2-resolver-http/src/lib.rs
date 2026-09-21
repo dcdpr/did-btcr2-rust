@@ -56,6 +56,9 @@ pub use resolve::{
 /// The most request-body bytes the shell reads: 1 MiB, fixed. A signed update
 /// is a few KB, so a sidecar of hundreds of updates fits; past the limit the
 /// shell answers a bodiless 413 without handing the request to [`handle`].
+/// The limit applies to a body the shell reads — a `POST` whose `Content-Type`
+/// is absent or JSON. A `POST` whose media type is refused is not read at
+/// all: it is a 415, whatever its size.
 /// Read-then-check: the shell reads at most `BODY_LIMIT + 1` bytes and never
 /// trusts `Content-Length`. This bounds what the shell reads for an honest
 /// body; what the shell library does with a declared-but-unsent remainder
@@ -74,8 +77,9 @@ pub struct Request {
     /// Header field/value pairs as received; names compared case-insensitively.
     pub headers: Vec<(String, String)>,
     /// Request body bytes as read by the shell — at most [`BODY_LIMIT`], and
-    /// only for a `POST`; empty for every other method (a body on a `GET` is
-    /// not read by the shell).
+    /// only for a `POST` whose `Content-Type` is absent or JSON; empty
+    /// otherwise (a body on a `GET`, or on a `POST` whose media type is
+    /// refused, is not read by the shell).
     pub body: Vec<u8>,
 }
 
@@ -192,10 +196,7 @@ fn prepare(req: &Request) -> Result<(Did, ResolutionOptions, Mode, Option<usize>
     if req.method != "GET" && req.method != "POST" {
         return Err(plain(405, vec![("Allow", "GET, POST".to_string())]));
     }
-    if req.method == "POST"
-        && let Some(content_type) = header_values(req, "content-type")
-        && !body_media_type_is_json(&content_type)
-    {
+    if req.method == "POST" && refuses_post_body(&req.headers) {
         // A transport-level rejection like the 405: no resolution error type
         // exists for it.
         return Err(plain(415, vec![]));
@@ -258,7 +259,7 @@ fn prepare(req: &Request) -> Result<(Did, ResolutionOptions, Mode, Option<usize>
             None,
         ),
     };
-    let accept = header_values(req, "accept");
+    let accept = header_values(&req.headers, "accept");
     let mode = negotiate(accept.as_deref()).map_err(|offered| {
         // The 406 exists only because of what `Accept` said: a cache
         // must not hand it to a client whose `Accept` would negotiate.
@@ -341,9 +342,11 @@ where
 /// included: those never reach the resolver, so they carry `cache: "n/a"` —
 /// as does every `GET` when `resolver` has no cache (see [`cache_label`]).
 ///
-/// The body is read here, for a `POST` only, at most [`BODY_LIMIT`] + 1
-/// bytes; past the limit the request is answered with a bodiless 413 and
-/// never handed to the handler, and a read failure is a bodiless 400.
+/// The body is read here, only for a `POST` whose `Content-Type` is absent or
+/// JSON (a refused media type is not read: the handler answers it 415 on the
+/// headers), at most [`BODY_LIMIT`] + 1 bytes; past the limit the request is
+/// answered with a bodiless 413 and never handed to the handler, and a read
+/// failure is a bodiless 400.
 fn serve_one(mut request: tiny_http::Request, resolver: &impl Resolve) {
     let started = Instant::now();
     let method = request.method().as_str().to_string();
@@ -373,10 +376,14 @@ fn serve_one(mut request: tiny_http::Request, resolver: &impl Resolve) {
     // declared length. The library also sets no socket read timeout, so a
     // slow body sender holds this worker until it finishes.
     let mut body = Vec::new();
-    // Only a POST carries options in its body. Nothing else is read: a body
-    // on a GET stays with the shell library, which drains an honest one when
-    // the request is dropped.
-    let read = if method == "POST" {
+    // Only a POST whose `Content-Type` the handler will accept has its body
+    // read. Nothing else is read: a body on a GET, or on a POST whose media
+    // type is refused, stays with the shell library, which drains an honest
+    // one when the request is dropped (a `Content-Length` body is read off
+    // the socket to its declared end on drop). The refused POST reaches the
+    // handler with an empty body, and the handler answers the 415 on the
+    // headers, so a refused media type is 415 whatever its size.
+    let read = if method == "POST" && !refuses_post_body(&headers) {
         request
             .as_reader()
             .take(BODY_LIMIT as u64 + 1)
@@ -433,7 +440,7 @@ fn serve_one(mut request: tiny_http::Request, resolver: &impl Resolve) {
             &req.method,
             &target,
             did_for_log(&req.path).as_ref(),
-            header_values(&req, "accept").as_deref(),
+            header_values(&req.headers, "accept").as_deref(),
             response.status,
             started.elapsed(),
             cache,
@@ -490,7 +497,8 @@ fn escape_for_log(s: &str) -> String {
 /// `bypass` or `n/a`, and `n/a` means either that the resolver was not
 /// reached or that the resolver serving the request has no cache — see
 /// [`cache_label`]. `body_bytes` is the count the shell read (at most
-/// `BODY_LIMIT + 1`; always `0` for a method other than `POST`),
+/// `BODY_LIMIT + 1`; always `0` for a method other than `POST`, and for a
+/// `POST` refused on its `Content-Type`),
 /// `sidecar_updates` the length of the sidecar's `updates` array when a
 /// `POST` carried one and reached the resolver, else `null`.
 #[derive(Serialize)]
@@ -619,14 +627,22 @@ fn details_of(p: &impl ProblemDetails) -> Value {
 
 /// All values of a header, case-insensitive on the name, joined with `, `
 /// (RFC 9110 §5.3 list semantics). `None` when the header is absent.
-fn header_values(req: &Request, name: &str) -> Option<String> {
-    let values: Vec<&str> = req
-        .headers
+fn header_values(headers: &[(String, String)], name: &str) -> Option<String> {
+    let values: Vec<&str> = headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
         .collect();
     (!values.is_empty()).then(|| values.join(", "))
+}
+
+/// Whether a `POST`'s `Content-Type` refuses the body: the header is present
+/// and does not name JSON ([`body_media_type_is_json`] over the `, `-joined
+/// values); an absent header is accepted. This is the one media-type
+/// decision: the shell calls it to skip the body read, and [`prepare`] calls
+/// it to answer the 415, so the two cannot disagree.
+fn refuses_post_body(headers: &[(String, String)]) -> bool {
+    header_values(headers, "content-type").is_some_and(|value| !body_media_type_is_json(&value))
 }
 
 /// Whether a `Content-Type` names a JSON body: `application/json` or any
@@ -1014,6 +1030,37 @@ mod tests {
             "",
         ] {
             assert!(!body_media_type_is_json(other), "{other:?}");
+        }
+    }
+
+    /// The one predicate the shell (skip the read) and `prepare` (answer 415)
+    /// share, over the header slice: absent accepted, JSON and `+json`
+    /// accepted whatever the case or parameters, anything else refused, and a
+    /// repeated header refused as a whole because its joined list is not JSON.
+    #[test]
+    fn refuses_post_body_rows() {
+        let headers = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        for accepted in [
+            headers(&[]),
+            headers(&[("Content-Type", "application/json")]),
+            headers(&[("content-type", "Application/JSON; charset=utf-8")]),
+            headers(&[("Content-Type", "application/ld+json")]),
+        ] {
+            assert!(!refuses_post_body(&accepted), "{accepted:?}");
+        }
+        for refused in [
+            headers(&[("Content-Type", "text/plain")]),
+            headers(&[
+                ("Content-Type", "application/json"),
+                ("content-type", "text/plain"),
+            ]),
+        ] {
+            assert!(refuses_post_body(&refused), "{refused:?}");
         }
     }
 
