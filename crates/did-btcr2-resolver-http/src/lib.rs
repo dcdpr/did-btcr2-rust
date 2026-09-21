@@ -56,9 +56,10 @@ pub use resolve::{
 /// The most request-body bytes the shell reads: 1 MiB, fixed. A signed update
 /// is a few KB, so a sidecar of hundreds of updates fits; past the limit the
 /// shell answers a bodiless 413 without handing the request to [`handle`].
-/// The limit applies to a body the shell reads — a `POST` whose `Content-Type`
-/// is absent or JSON. A `POST` whose media type is refused is not read at
-/// all: it is a 415, whatever its size.
+/// The limit applies to a body the shell reads — a `POST` on the resolver path
+/// whose `Content-Type` is absent or JSON. A `POST` whose media type is
+/// refused, or to any other route, is not read at all: it is a 415 (or the
+/// route's 404 / 405), whatever its size.
 /// Read-then-check: the shell reads at most `BODY_LIMIT + 1` bytes and never
 /// trusts `Content-Length`. This bounds what the shell reads for an honest
 /// body; what the shell library does with a declared-but-unsent remainder
@@ -77,9 +78,10 @@ pub struct Request {
     /// Header field/value pairs as received; names compared case-insensitively.
     pub headers: Vec<(String, String)>,
     /// Request body bytes as read by the shell — at most [`BODY_LIMIT`], and
-    /// only for a `POST` whose `Content-Type` is absent or JSON; empty
-    /// otherwise (a body on a `GET`, or on a `POST` whose media type is
-    /// refused, is not read by the shell).
+    /// only for a `POST` on the resolver path whose `Content-Type` is absent
+    /// or JSON; empty otherwise (a body on a `GET`, on a `POST` to another
+    /// route, or on a `POST` whose media type is refused, is not read by the
+    /// shell).
     pub body: Vec<u8>,
 }
 
@@ -342,11 +344,13 @@ where
 /// included: those never reach the resolver, so they carry `cache: "n/a"` —
 /// as does every `GET` when `resolver` has no cache (see [`cache_label`]).
 ///
-/// The body is read here, only for a `POST` whose `Content-Type` is absent or
-/// JSON (a refused media type is not read: the handler answers it 415 on the
-/// headers), at most [`BODY_LIMIT`] + 1 bytes; past the limit the request is
-/// answered with a bodiless 413 and never handed to the handler, and a read
-/// failure is a bodiless 400.
+/// The body is read here, only for a `POST` on the resolver path whose
+/// `Content-Type` is absent or JSON ([`reads_body`]; a refused media type or
+/// another route is not read: the handler answers 415, 404 or 405 on the
+/// request line and headers), at most [`BODY_LIMIT`] + 1 bytes; past the
+/// limit the request is answered with a bodiless 413 and never handed to the
+/// handler, and a read failure (a malformed chunked body, a connection that
+/// drops mid-body) is a bodiless 400.
 fn serve_one(mut request: tiny_http::Request, resolver: &impl Resolve) {
     let started = Instant::now();
     let method = request.method().as_str().to_string();
@@ -376,14 +380,15 @@ fn serve_one(mut request: tiny_http::Request, resolver: &impl Resolve) {
     // declared length. The library also sets no socket read timeout, so a
     // slow body sender holds this worker until it finishes.
     let mut body = Vec::new();
-    // Only a POST whose `Content-Type` the handler will accept has its body
-    // read. Nothing else is read: a body on a GET, or on a POST whose media
-    // type is refused, stays with the shell library, which drains an honest
-    // one when the request is dropped (a `Content-Length` body is read off
-    // the socket to its declared end on drop). The refused POST reaches the
-    // handler with an empty body, and the handler answers the 415 on the
-    // headers, so a refused media type is 415 whatever its size.
-    let read = if method == "POST" && !refuses_post_body(&headers) {
+    // Only a POST on the resolver path whose `Content-Type` the handler will
+    // accept has its body read. Nothing else is read: a body on a GET, on a
+    // POST to another route, or on a POST whose media type is refused, stays
+    // with the shell library, which drains an honest one when the request is
+    // dropped (a `Content-Length` body is read off the socket to its declared
+    // end on drop). Such a POST reaches the handler with an empty body, and
+    // the handler answers the 404 / 405 / 415 on the request line and the
+    // headers, so those rejections come whatever the body's size.
+    let read = if reads_body(&method, &path, &headers) {
         request
             .as_reader()
             .take(BODY_LIMIT as u64 + 1)
@@ -497,8 +502,9 @@ fn escape_for_log(s: &str) -> String {
 /// `bypass` or `n/a`, and `n/a` means either that the resolver was not
 /// reached or that the resolver serving the request has no cache — see
 /// [`cache_label`]. `body_bytes` is the count the shell read (at most
-/// `BODY_LIMIT + 1`; always `0` for a method other than `POST`, and for a
-/// `POST` refused on its `Content-Type`),
+/// `BODY_LIMIT + 1`; always `0` for a method other than `POST`, for a `POST`
+/// to a route other than the resolver path, and for a `POST` refused on its
+/// `Content-Type`),
 /// `sidecar_updates` the length of the sidecar's `updates` array when a
 /// `POST` carried one and reached the resolver, else `null`.
 #[derive(Serialize)]
@@ -643,6 +649,17 @@ fn header_values(headers: &[(String, String)], name: &str) -> Option<String> {
 /// it to answer the 415, so the two cannot disagree.
 fn refuses_post_body(headers: &[(String, String)]) -> bool {
     header_values(headers, "content-type").is_some_and(|value| !body_media_type_is_json(&value))
+}
+
+/// Whether the shell reads a request's body: a `POST` on the resolver path
+/// whose `Content-Type` does not refuse it ([`refuses_post_body`]). The route
+/// is known from the request line as the media type is from the headers, and
+/// [`prepare`] answers a `POST` to any other route (404, or 405 on the
+/// liveness route) from the path alone, so a body there is never looked at:
+/// reading it would cost a bounded read for a request the route rejects, and
+/// past [`BODY_LIMIT`] would answer 413 where the route answers 404 / 405.
+fn reads_body(method: &str, path: &str, headers: &[(String, String)]) -> bool {
+    method == "POST" && matches!(route(path), Route::Resolve { .. }) && !refuses_post_body(headers)
 }
 
 /// Whether a `Content-Type` names a JSON body: `application/json` or any
@@ -1061,6 +1078,46 @@ mod tests {
             ]),
         ] {
             assert!(refuses_post_body(&refused), "{refused:?}");
+        }
+    }
+
+    /// The shell reads a body for exactly one shape of request: a `POST` on
+    /// the resolver path whose media type is not refused. Method, route and
+    /// media type each veto the read on their own.
+    #[test]
+    fn reads_body_rows() {
+        let headers = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let json = headers(&[("Content-Type", "application/json")]);
+        let none = headers(&[]);
+        let text = headers(&[("Content-Type", "text/plain")]);
+        let resolver = "/1.0/identifiers/did%3Abtcr2%3Ak1abc";
+        assert!(reads_body("POST", resolver, &json));
+        assert!(reads_body("POST", resolver, &none));
+        // The route, not the DID: an empty or unparseable segment is still the
+        // resolver path, and the handler answers those from the body-parsed
+        // request as it does today.
+        assert!(reads_body("POST", "/1.0/identifiers/", &json));
+        assert!(reads_body("POST", "/1.0/identifiers/a/b", &json));
+        for (method, path, headers) in [
+            ("GET", resolver, &json),
+            ("HEAD", resolver, &json),
+            ("PUT", resolver, &json),
+            ("post", resolver, &json),
+            ("POST", HEALTH_PATH, &json),
+            ("POST", HEALTH_PATH, &none),
+            ("POST", "/nope", &json),
+            ("POST", "/1.0/identifiers", &json),
+            ("POST", resolver, &text),
+        ] {
+            assert!(
+                !reads_body(method, path, headers),
+                "{method} {path} {headers:?}"
+            );
         }
     }
 

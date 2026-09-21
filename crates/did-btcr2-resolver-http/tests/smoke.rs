@@ -2,9 +2,9 @@
 //! directly. These bind an ephemeral loopback port, run the `tiny_http`
 //! worker pool over a scripted resolver, and drive it with `ureq` to prove
 //! the request/response adaptation, the status and header plumbing, the
-//! request-body plumbing (a JSON body of options, the media-type gate decided
-//! before the body is read, the honest body limit, a body on a GET), and the
-//! `unblock` shutdown path.
+//! request-body plumbing (a JSON body of options, the media-type and route
+//! gates decided before the body is read, the honest body limit, a body on a
+//! GET), and the `unblock` shutdown path.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
@@ -471,6 +471,70 @@ fn oversize_non_json_post_is_415_before_the_body_is_read() {
         .get(format!("http://{addr}/health"))
         .call()
         .expect("the worker still serves after the 415 and the 413");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    server.unblock();
+    for worker in workers {
+        worker.join().expect("worker exits after unblock");
+    }
+}
+
+/// The route is decided on the request line before any body byte is read, as
+/// the media type is on the headers: a `POST` to the liveness route or to an
+/// unknown path is answered 405 / 404 from the path alone, so an oversize JSON
+/// body there is not a 413 and is not read by the shell. One worker, the same
+/// agent throughout, and a trailing `/health` to prove the worker and the
+/// connection survived the unread bodies.
+#[test]
+fn oversize_post_off_the_resolver_path_is_405_or_404_before_the_body_is_read() {
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+    let addr = server.server_addr().to_ip().expect("TCP listener");
+    let workers = serve(Arc::clone(&server), NonZeroUsize::MIN, OkMock);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+
+    let oversize_json = vec![b' '; BODY_LIMIT + 1];
+    let mut resp = agent
+        .post(format!("http://{addr}/health"))
+        .header("Content-Type", "application/json")
+        .send(&oversize_json)
+        .expect("POST an oversize JSON body to the liveness route");
+    assert_eq!(
+        resp.status().as_u16(),
+        405,
+        "the liveness route answers its 405 from the path, before the size check"
+    );
+    assert_eq!(header(&resp, "allow"), Some("GET, HEAD"));
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+
+    let mut resp = agent
+        .post(format!("http://{addr}/nope"))
+        .header("Content-Type", "application/json")
+        .send(&oversize_json)
+        .expect("POST an oversize JSON body to an unknown path");
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "an unknown path answers its 404 from the path, before the size check"
+    );
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+
+    // The control: the same body on the resolver path is read, and is the 413.
+    let mut resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Content-Type", "application/json")
+        .send(&oversize_json)
+        .expect("POST an oversize JSON body to the resolver path");
+    assert_eq!(resp.status().as_u16(), 413);
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+
+    let resp = agent
+        .get(format!("http://{addr}/health"))
+        .call()
+        .expect("the worker still serves after the unread bodies");
     assert_eq!(resp.status().as_u16(), 200);
 
     server.unblock();
