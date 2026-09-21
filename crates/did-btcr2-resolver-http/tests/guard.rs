@@ -145,7 +145,7 @@ const CURATED: &[Row] = &[
         line: 50,
         title: "All HTTPS bindings MUST use TLS",
         status: Status::NotApplicable(
-            "TLS is a property of the deployed host, not of the handler; the deployment is a later phase",
+            "TLS is a property of the deployed host, not of the handler; DEPLOY.md §6 terminates TLS at the reverse proxy in front of the loopback-bound binary",
         ),
     },
     Row {

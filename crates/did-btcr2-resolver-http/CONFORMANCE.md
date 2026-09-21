@@ -40,7 +40,7 @@ Every `it()` in `tests/4-did-resolution.js` and `tests/10-bindings.js`, and each
 
 | Line (at pin) | it() title | Status | Rust test / reason |
 |---|---|---|---|
-| 50 | All HTTPS bindings MUST use TLS | Not applicable | TLS is a property of the deployed host, not of the handler; the deployment is a later phase |
+| 50 | All HTTPS bindings MUST use TLS | Not applicable | TLS is a property of the deployed host, not of the handler; DEPLOY.md §6 terminates TLS at the reverse proxy in front of the loopback-bound binary |
 | 66 | All conforming DID resolvers MUST implement the GET version of the HTTPS binding | Covered | `explicit_get_returns_200` |
 | 80 | If Accept is application/did-resolution, HTTP body MUST contain a DID resolution result | Covered | `accept_did_resolution_body_is_a_resolution_result` |
 | 94 | If function is successful and returns a didDocument, HTTP response status code MUST be 200 | Covered | `successful_resolution_status_is_200` |
