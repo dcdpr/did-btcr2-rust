@@ -1,8 +1,9 @@
-//! The one test through a socket; every other conformance test calls `handle`
-//! directly. This binds an ephemeral loopback port, runs the `tiny_http`
-//! worker pool over a scripted resolver, and drives it with `ureq` to prove
-//! the request/response adaptation, the status and header plumbing, and the
-//! `unblock` shutdown path.
+//! The tests through a socket; every other conformance test calls `handle`
+//! directly. These bind an ephemeral loopback port, run the `tiny_http`
+//! worker pool over a scripted resolver, and drive it with `ureq` to prove
+//! the request/response adaptation, the status and header plumbing, the
+//! request-body plumbing (a JSON body of options, the media-type gate, the
+//! honest body limit, a body on a GET), and the `unblock` shutdown path.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
@@ -16,7 +17,7 @@ use did_btcr2::document::{
     ResolutionResult,
 };
 use did_btcr2::identifier::Did;
-use did_btcr2_resolver_http::{Resolve, serve};
+use did_btcr2_resolver_http::{BODY_LIMIT, Resolve, serve};
 
 /// A regtest key-based DID; the scripted resolver never touches a network.
 const VALID_DID: &str = "did:btcr2:k1qgpakaw4lwemekywf0lyth9hf6j8r2td7gqtrs4aztqfky50jnx7s8gfapup6";
@@ -68,6 +69,24 @@ impl Resolve for PanicsOnce {
     ) -> Result<ResolutionResult, did_btcr2_client::Error> {
         if !self.0.swap(true, Ordering::SeqCst) {
             panic!("scripted panic on the first resolution");
+        }
+        Ok(ok_result(did))
+    }
+}
+
+/// A resolver that raises its flag when the options it receives carry a
+/// sidecar, and answers like `OkMock`.
+#[derive(Clone)]
+struct RecordsSidecar(Arc<AtomicBool>);
+
+impl Resolve for RecordsSidecar {
+    fn resolve(
+        &self,
+        did: &Did,
+        opts: ResolutionOptions,
+    ) -> Result<ResolutionResult, did_btcr2_client::Error> {
+        if opts.sidecar_data.is_some() {
+            self.0.store(true, Ordering::SeqCst);
         }
         Ok(ok_result(did))
     }
@@ -216,6 +235,87 @@ fn socket_round_trip_through_the_tiny_http_shell() {
     assert_eq!(resp.status().as_u16(), 405);
     assert_eq!(header(&resp, "allow"), Some("GET, POST"));
 
+    // POST: an empty body resolves like a GET (uncached) …
+    let mut resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Accept", "application/did-resolution")
+        .send_empty()
+        .expect("POST with no body");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.body_mut().read_to_string().expect("body")).expect("JSON");
+    assert_eq!(body["didDocument"]["id"], VALID_DID);
+    // … a JSON body of options is read through the shell, number or digit
+    // string alike …
+    let resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Content-Type", "application/json")
+        .send(br#"{"versionId": 1}"#)
+        .expect("POST a JSON body");
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Content-Type", "application/json")
+        .send(br#"{"versionId": "1"}"#)
+        .expect("POST a JSON body with a digit string");
+    assert_eq!(resp.status().as_u16(), 200);
+    // … a non-JSON Content-Type is a bodiless 415 …
+    let mut resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Content-Type", "text/plain")
+        .send(b"versionId=1")
+        .expect("POST text/plain");
+    assert_eq!(resp.status().as_u16(), 415);
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+    // … a body of exactly the limit is read in full: whitespace parses as an
+    // empty body, so this resolves …
+    let at_limit = vec![b' '; BODY_LIMIT];
+    let resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Content-Type", "application/json")
+        .send(&at_limit)
+        .expect("POST exactly the limit");
+    assert_eq!(resp.status().as_u16(), 200);
+    // … one byte past the limit, sent in full with an honest Content-Length,
+    // is a bodiless 413 that does not retire the worker. This row exercises
+    // the honest oversize path only: the shell reads every byte before
+    // answering. It says nothing about a Content-Length that declares more
+    // than the client sends — that remainder is the shell library's to
+    // drain, and it is not sent here.
+    let oversize = vec![b' '; BODY_LIMIT + 1];
+    let mut resp = agent
+        .post(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Content-Type", "application/json")
+        .send(&oversize)
+        .expect("POST one byte past the limit");
+    assert_eq!(resp.status().as_u16(), 413);
+    assert_eq!(resp.body_mut().read_to_string().expect("body"), "");
+    let resp = agent
+        .get(format!("http://{addr}/health"))
+        .call()
+        .expect("the worker still serves after a 413");
+    assert_eq!(resp.status().as_u16(), 200);
+    // … and a GET that carries a small honest body is answered as a plain
+    // GET: the shell reads a body only on POST, the library drains this one
+    // when the request is dropped, and the connection is still usable
+    // afterwards.
+    let mut resp = agent
+        .get(format!("http://{addr}/1.0/identifiers/{VALID_DID}"))
+        .header("Accept", "application/did-resolution")
+        .header("Content-Type", "application/json")
+        .force_send_body()
+        .send(br#"{"versionId": 9}"#)
+        .expect("GET with a body");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.body_mut().read_to_string().expect("body")).expect("JSON");
+    assert_eq!(body["didDocument"]["id"], VALID_DID);
+    let resp = agent
+        .get(format!("http://{addr}/health"))
+        .call()
+        .expect("the worker still serves after a GET with a body");
+    assert_eq!(resp.status().as_u16(), 200);
+
     let mut resp = agent
         .get(format!("http://{addr}/1.0/identifiers/did:example"))
         .call()
@@ -268,6 +368,55 @@ fn socket_round_trip_through_the_tiny_http_shell() {
     for _ in 0..threads.get() {
         server.unblock();
     }
+    for worker in workers {
+        worker.join().expect("worker exits after unblock");
+    }
+}
+
+/// The bytes `tiny_http` hands the shell become the resolver's
+/// `sidecar_data`: a POST whose body carries `sidecar` raises the resolver's
+/// flag, and a GET (whose body the shell never reads) does not.
+#[test]
+fn sidecar_body_reaches_the_resolver_through_the_socket() {
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+    let addr = server.server_addr().to_ip().expect("TCP listener");
+    let saw_sidecar = Arc::new(AtomicBool::new(false));
+    let workers = serve(
+        Arc::clone(&server),
+        NonZeroUsize::MIN,
+        RecordsSidecar(Arc::clone(&saw_sidecar)),
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let url = format!("http://{addr}/1.0/identifiers/{VALID_DID}");
+
+    let resp = agent
+        .get(&url)
+        .header("Content-Type", "application/json")
+        .force_send_body()
+        .send(br#"{"sidecar": {"updates": []}}"#)
+        .expect("GET with a sidecar body");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        !saw_sidecar.load(Ordering::SeqCst),
+        "a GET's body is never read, so no sidecar reaches the resolver"
+    );
+
+    let resp = agent
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send(br#"{"sidecar": {"updates": []}}"#)
+        .expect("POST a sidecar");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        saw_sidecar.load(Ordering::SeqCst),
+        "the POST body became the resolver's sidecar"
+    );
+
+    server.unblock();
     for worker in workers {
         worker.join().expect("worker exits after unblock");
     }

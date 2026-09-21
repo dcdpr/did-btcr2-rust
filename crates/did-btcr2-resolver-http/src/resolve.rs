@@ -570,6 +570,23 @@ mod tests {
         }
     }
 
+    /// A POST asking for the full result with a JSON body.
+    fn post(did: &Did, body: &[u8]) -> Request {
+        Request {
+            method: "POST".into(),
+            path: format!("/1.0/identifiers/{}", did.encode()),
+            query: None,
+            headers: vec![
+                (
+                    "Accept".to_string(),
+                    "application/did-resolution".to_string(),
+                ),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            body: body.to_vec(),
+        }
+    }
+
     fn header<'a>(response: &'a crate::Response, name: &str) -> Option<&'a str> {
         response
             .headers
@@ -894,6 +911,98 @@ mod tests {
         assert!(plain.resolve_uncached(&did, with_sidecar()).is_ok());
     }
 
+    /// A POST never reads from or writes to the cache, in either direction,
+    /// through the handler over a real `CachingResolver`. Not gated on
+    /// `debug_assertions`: the test profile has them on, and the point is
+    /// that the cache's sidecar assertion is never reached by a POST — the
+    /// handler takes the uncached path, not a path around the assertion.
+    /// Writes: after a POST the map is empty. Reads: a POST after a GET
+    /// filled the map still reaches upstream, even with a body whose options
+    /// key the cached entry exactly. A rejected POST reports no outcome.
+    #[test]
+    fn post_bypasses_the_cache_in_both_directions() {
+        let clock = ManualClock::new();
+        let (inner, calls) = ok_counting();
+        let resolver = cache(inner, &clock);
+        let did = did_on(Network::Mainnet);
+        let with_sidecar = br#"{"sidecar": {"updates": []}}"#;
+
+        let crate::Handled {
+            response,
+            cache: outcome,
+            sidecar_updates,
+        } = crate::handle_traced(&post(&did, with_sidecar), &resolver);
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(outcome, Some(CacheOutcome::Bypass));
+        assert_eq!(sidecar_updates, Some(0));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(resolver.is_empty(), "the POST wrote nothing");
+
+        let crate::Handled {
+            response,
+            cache: outcome,
+            sidecar_updates,
+        } = crate::handle_traced(&get(&did, Some("application/did-resolution")), &resolver);
+        assert_eq!(response.status, 200);
+        assert_eq!(outcome, Some(CacheOutcome::Miss), "the POST cached nothing");
+        assert_eq!(sidecar_updates, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(resolver.len(), 1, "the GET cached its result");
+
+        let crate::Handled {
+            response,
+            cache: outcome,
+            sidecar_updates,
+        } = crate::handle_traced(&post(&did, b""), &resolver);
+        assert_eq!(response.status, 200);
+        assert_eq!(outcome, Some(CacheOutcome::Bypass));
+        assert_eq!(sidecar_updates, None);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the fresh GET entry was not served to the POST"
+        );
+        assert_eq!(resolver.len(), 1, "the empty POST wrote nothing either");
+
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&get(&did, Some("application/did-resolution")), &resolver);
+        assert_eq!(response.status, 200);
+        assert_eq!(outcome, Some(CacheOutcome::Hit));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // The strongest form of "never read": the GET entry is keyed on
+        // `versionId: 1`, and a POST naming exactly that still goes upstream.
+        let crate::Handled {
+            response,
+            cache: outcome,
+            sidecar_updates,
+        } = crate::handle_traced(
+            &post(&did, br#"{"sidecar": {"updates": []}, "versionId": 1}"#),
+            &resolver,
+        );
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(outcome, Some(CacheOutcome::Bypass));
+        assert_eq!(sidecar_updates, Some(0));
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(resolver.len(), 1);
+
+        let mut rejected = post(&did, b"{}");
+        rejected.query = Some("versionId=1".to_string());
+        let crate::Handled {
+            response,
+            cache: outcome,
+            sidecar_updates,
+        } = crate::handle_traced(&rejected, &resolver);
+        assert_eq!(response.status, 400);
+        assert_eq!(outcome, None, "the resolver was not reached");
+        assert_eq!(sidecar_updates, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(resolver.len(), 1);
+    }
+
     /// The entry's age is counted from the instant the lookup missed, not
     /// from the instant the upstream answered: with a resolution that takes
     /// `latency`, the entry expires at `miss + TTL`, so a call at
@@ -1210,7 +1319,9 @@ mod tests {
 
     /// A resolver without a cache reports no outcome, and `handle` attributes
     /// the outcome to the request it served: a rejected request never reaches
-    /// the resolver and carries `None`; the two that do carry their own.
+    /// the resolver and carries `None`; the two that do carry their own. A
+    /// POST carries `Bypass` whatever resolver sits behind the handler — the
+    /// label is the handler's, not the cache's.
     #[test]
     fn resolvers_without_a_cache_report_none_and_handle_carries_the_outcome() {
         // `Client::for_did` fails before any I/O for a network with no hosted
@@ -1220,10 +1331,22 @@ mod tests {
             bare.resolve_traced(&did_on(Network::Regtest), ResolutionOptions::default());
         assert!(matches!(result, Err(Error::NoDefaultEndpoint(_))));
         assert_eq!(outcome, None);
-        let (result, outcome) = Scripted(Arc::new(|did, _| Ok(ok_result(did, false))))
-            .resolve_traced(&did_on(Network::Mainnet), ResolutionOptions::default());
+        let plain = Scripted(Arc::new(|did, _| Ok(ok_result(did, false))));
+        let (result, outcome) =
+            plain.resolve_traced(&did_on(Network::Mainnet), ResolutionOptions::default());
         assert!(result.is_ok());
         assert_eq!(outcome, None);
+        let crate::Handled {
+            response,
+            cache: outcome,
+            ..
+        } = crate::handle_traced(&post(&did_on(Network::Mainnet), b"{}"), &plain);
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            outcome,
+            Some(CacheOutcome::Bypass),
+            "the handler stamps the bypass, not the resolver"
+        );
 
         let clock = ManualClock::new();
         let (inner, _) = ok_counting();
