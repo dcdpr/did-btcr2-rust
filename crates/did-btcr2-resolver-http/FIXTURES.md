@@ -20,6 +20,8 @@ weekly against them and nothing can change what they resolve to.**
 | `valid` | `did:btcr2:k1qqphzydl2apenfzenkm8lcs4cnxz4nryeetpvhqwlgs6k0ul8p95u8q5tzlsv` | `k1` key-based | `200` | — | chain tip + 3 address lookups, all empty |
 | `notFound` | `did:btcr2:x1qp98pkkg4mp3e4k2yj9a5z5uu4x8jxkr0cqcvkt0s58k7fe87uh3v63tlqq` | `x1` external | `404` | `https://www.w3.org/ns/did#NOT_FOUND` | chain tip only; no beacon scan |
 
+§7 lists two **funded** mutinynet demo DIDs used by `DEPLOY.md` §10; they are not in the suite config.
+
 Both are mainnet, version 1. The `valid` DID resolves to its deterministic initial document with
 zero confirmations because no beacon address derived from its key has ever received a payment.
 The `notFound` DID fails before any beacon scan because its Genesis Document was never published
@@ -148,3 +150,105 @@ Record shape (one subsection per DID): the DID; the exact mint command; public k
 funding txid; update / deactivate txids in version order; key disposition (kept where, or thrown
 away); the `curl` rows of `DEPLOY.md` §10 that use it. After a mutinynet reset both DIDs resolve to
 version 1 and must be re-minted with the same commands; the old records stay, dated, above the new.
+
+### 7.1 updated — `did:btcr2:k1q5pdy265auv0wht5ah5ljjk94xjyas34dm4cl9c8x4vq4qpczl46xxqly88yr`
+
+- Mint date: **2026-09-21** (UTC).
+- Tool: `did-btcr2-cli` at `did-btcr2-rust` commit `92c421663c874d19833206d5ed1daf966c280ab7`
+  (`crates/did-btcr2-cli/RUNBOOK.md` steps 1–5).
+- Toolchain: `rustc 1.94.0 (4a4ef493e 2026-03-02)`.
+
+The exact commands, from the workspace root. Step 1 generated the key; the secret line of its
+output went straight into a mode-0600 file outside the repository and the capture was shredded.
+Step 2 (funding) was a faucet visit; step 4 spent the funded UTXO as the beacon signal:
+```sh
+# laptop
+cargo run -q -p did-btcr2-cli -- create --generate --network mutinynet
+printf '[{"op":"add","path":"/assertionMethod/-","value":"%s#initialKey"}]\n' "$DID" > patch.json
+cargo run -q -p did-btcr2-cli -- update "$DID" --patch patch.json --key-file <secret> --network mutinynet --sidecar-out updated-v2.sidecar.json --yes
+```
+
+- Public key: `zQ3shbZChKmK2V4cDuYsSwh63egEyFBJkVvoYvgJXRocM5xTy` (Multikey, secp256k1
+  compressed) — the `publicKeyMultibase` of `#initialKey`.
+- Derivation: mutinynet, version 1, `k1` = bech32m of the key-based components (`k` HRP, the
+  version/network byte, the 33-byte compressed key).
+- Funding txid: `eb70debed238d1e5f01bfe8d34df7c72b24df6319df474a038fabc3782b8f551` — faucet
+  payment to the `#initialP2WPKH` beacon `tb1qcc7406lzakzllkkxlatlr3p52szxx8ftkyunxd`, confirmed
+  in block 3443715.
+- Update txid (version 2): `dd6c7991dc8bf3c50515ea41ca13a0027ac386374be967a1bf4df21bb94f7fd8` —
+  the beacon signal, confirmed in block 3443718. Patch: append `#initialKey` to
+  `assertionMethod`.
+- Sidecar: `demo/updated-v2.sidecar.json` (one signed update in wire form; the on-chain signal is
+  its 32-byte commitment, so the update itself is only available from this file).
+
+> **The secret is kept.** It lives outside the repository in a gitignored working file on the minting laptop so this DID can be updated again for a later demo; it is not in this record, not in the sidecar, and not on the host.
+
+Resolves to (`DEPLOY.md` §10 rows 1–3): `versionId "2"` with two `assertionMethod` entries via
+`POST` with the sidecar; `versionId "1"` via `POST` with the sidecar and `versionId: 1`;
+`500 MISSING_UPDATE_DATA` via `GET`, which carries no sidecar. On the laptop the same three
+answers come from `did-btcr2-cli resolve --network mutinynet` with and without
+`--sidecar demo/updated-v2.sidecar.json`; without it the CLI fails with "Update payload could not
+be located in the sidecar data or CAS" (the same did:btcr2 error, rendered as its message rather
+than its code). The CLI's `--min-conf` defaults to 6, so a resolve inside the first few blocks
+after the signal still reports `"1"`.
+
+Verification line: `POST` with the sidecar answers `200`, `"versionId":"2"`, and
+`assertionMethod` of length 2.
+
+After a mutinynet reset this DID resolves to `versionId "1"` (the signal is gone; the sidecar is
+never consulted). Re-mint with the same commands — the kept secret makes that the same DID — and
+append a dated new record below this one; do not edit this one.
+
+### 7.2 deactivated — `did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk`
+
+- Mint date: **2026-09-21** (UTC).
+- Tool: `chain-capture` at `did-btcr2-rust` commit `92c421663c874d19833206d5ed1daf966c280ab7`
+  (`crates/chain-capture/RUNBOOK.md` Part 3, the `clean` scenario on its mutinynet rung).
+- Toolchain: `rustc 1.94.0 (4a4ef493e 2026-03-02)`.
+
+The exact command, from the workspace root; the key and state files live outside both working
+trees, as the RUNBOOK requires:
+```sh
+# laptop
+cargo run -q -p chain-capture -- mint --scenario clean --network mutinynet --key-file ~/.btcr2-mint/clean-mutinynet.hex --state-file ~/.btcr2-mint/clean-mutinynet-state.json --fee 1000 --yes
+```
+The tool printed the DID and the three announcing beacons to fund (6 000 sats each, one faucet
+visit), then broadcast each update once the previous one confirmed and waited five settlement
+blocks before writing the fixture.
+
+- Public key: `zQ3shppC94ES3CSSdSTNBtNWZhqQkCApN9ikjHdvACU4qqFAG` (Multikey, secp256k1
+  compressed) — the `publicKeyMultibase` of `#initialKey`.
+- Derivation: mutinynet, version 1, `k1` = bech32m of the key-based components (`k` HRP, the
+  version/network byte, the 33-byte compressed key).
+- Funding txids, one per announcing beacon in signal order (faucet payments):
+  - `#initialP2WPKH` `tb1qgsdeutk5gcyndy8mtjceedvfxtzmrgl2wn3zm4` — funding txid `3095a2ecbca72006db05f681f2eaabbc66f2a7ee1aa49c95d5a5458402706ec1`
+  - the P2WPKH beacon the version 2 update added, `tb1qy35te8sk60dnrvxu7u6uerwhnsd37a5mdnjagg` — funding txid `296a61773a3164ecc4d86c0a91c4a47e2b80f5103030da87740ce1a53f11f9a4`
+  - `#initialP2PKH` `mmj5L2Lscg8kiWigEfcSg4NtWXDW4EuhmP` — funding txid `02d1341750e8a21443752eb8fcecfc12af756d8557beeadfb66f3d109bae20e2`
+- Update txid (version 2): `a365d3c765e545fd81ba04397659ec440a232de485bcdadd5b6481ebc3e1ff5d` — block 3443744, from `#initialP2WPKH`; adds a P2WPKH beacon service.
+- Update txid (version 3): `52b7859599a05f52a2ee28ffb27841d0d8c4ff6662bc153611d01ef5cea02419` — block 3443745, from the beacon version 2 added; adds a non-beacon service.
+- Deactivate txid (version 4): `54becf8b2e972a91655a0f003f9cbf37811cae992b1a0e4afaa6fa031bd4f4ad` — block 3443746, from `#initialP2PKH`.
+- Captured at tip 3443751 (five blocks past the last announcement, so the replay runs under the
+  default `minConf`).
+- Sidecar: `fixtures/chain/minted/clean-rotating-beacons.json`, its `.sidecar` member (three
+  updates). `DEPLOY.md` §10 extracts it with one `jq` line; it is not committed twice.
+
+> **The key is a throwaway.** The DID is deactivated on chain; nothing further can be done with the key and nothing depends on it. The replay tests (`src/test_vectors.rs`, `src/resolver.rs`) read this DID, its heights and block times from the fixture.
+
+Resolves to (`DEPLOY.md` §10 row 4): `410` with `deactivated: true` and `versionId "4"` via
+`POST` with the sidecar. Without a sidecar (`GET`, or the CLI's `resolve` with no `--sidecar`) it
+fails at the first signal exactly as §7.1 does.
+
+Verification line: `POST` with the sidecar answers `410`, `"deactivated":true` and
+`"versionId":"4"`.
+
+This capture is rung 2 of the minting ladder for `clean` (`crates/chain-capture/RUNBOOK.md`,
+"Climbing to a public chain") and replaced the regtest capture at the same path — the
+`k1qgp74wu…` DID recorded under "The minted DIDs" in that RUNBOOK, announcements at blocks
+760 / 762 / 764, tip 769, on a disposable Polar chain that no longer exists.
+`late-publishing-fork` stays on regtest.
+
+After a mutinynet reset this DID resolves to `versionId "1"` and `200`, not `410`. The state file
+re-emits the fixture without broadcasting, but a reset chain has no signals to re-emit against:
+re-mint with the same command under a fresh key and state file, commit the new capture, and append
+a dated new record below this one; the replay tests read the DID and heights from the file and
+need no edit.

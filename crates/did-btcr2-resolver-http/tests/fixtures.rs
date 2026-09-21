@@ -18,15 +18,23 @@
 //! - the record names both identifiers verbatim, carries the two custody
 //!   statements and the exact `NOT_FOUND` type URI, and holds no 64-hex token
 //!   above the `## 7.` heading; below it (the funded mutinynet demo DIDs) a
-//!   64-hex token is a transaction id and must sit on a line that says `txid`.
+//!   64-hex token is a transaction id and must sit on a line that says `txid`;
+//! - the demo section records exactly two DIDs, both mutinynet / version 1 / `k1`,
+//!   under an `updated` and a `deactivated` subsection with their custody
+//!   statements, with at least six labelled txids and no txid bullet that
+//!   quotes anything but a 64-hex token;
+//! - the committed sidecar `demo/updated-v2.sidecar.json` parses as the core's
+//!   `SidecarData`, holds one update, and names the updated DID.
 //!
 //! The token extractors have their own negative cases below, so the guard cannot
 //! pass by extracting nothing.
 
+use did_btcr2::document::SidecarData;
 use did_btcr2::identifier::{Did, DidVersion, IdType, Network};
 
 const CONFIG: &str = include_str!("../w3c/localConfig.cjs");
 const RECORD: &str = include_str!("../FIXTURES.md");
+const DEMO_SIDECAR: &str = include_str!("../demo/updated-v2.sidecar.json");
 // No host constant: the guard asserts the endpoint's SHAPE, not a literal host, so a host move
 // is a config edit with nothing to change here. The host is still in the binary — `CONFIG`
 // above embeds the whole file — so when the droplet is destroyed, the config is what to update
@@ -50,10 +58,10 @@ fn unlabelled_hex64(text: &str) -> Option<&str> {
 }
 
 /// Every token that starts with `did:btcr2:` in `source`, split on the characters
-/// that cannot appear in a DID: `"`, `'`, `,`, whitespace.
+/// that cannot appear in a DID: `"`, `'`, `` ` ``, `,`, whitespace.
 fn btcr2_dids(source: &str) -> Vec<&str> {
     source
-        .split(|c: char| c == '"' || c == '\'' || c == ',' || c.is_whitespace())
+        .split(|c: char| c == '"' || c == '\'' || c == '`' || c == ',' || c.is_whitespace())
         .filter(|t| t.starts_with("did:btcr2:"))
         .collect()
 }
@@ -243,12 +251,133 @@ fn record_names_both_dids_verbatim() {
     );
 }
 
+/// The demo section of the record (everything below `DEMO_HEADING`).
+fn demo_section() -> &'static str {
+    RECORD
+        .split_once(DEMO_HEADING)
+        .expect("the demo heading is present")
+        .1
+}
+
+/// The two demo DIDs, sorted and deduplicated, each parsed and round-tripped.
+fn demo_dids() -> Vec<(&'static str, Did)> {
+    let mut dids = btcr2_dids(demo_section());
+    dids.sort_unstable();
+    dids.dedup();
+    dids.into_iter()
+        .map(|t| {
+            let did: Did = t.parse().unwrap_or_else(|e| panic!("`{t}` parses: {e}"));
+            assert_eq!(did.encode(), t, "`{t}` round-trips through Did");
+            (t, did)
+        })
+        .collect()
+}
+
+/// The DID named in the `### 7.1 updated` heading.
+fn updated_did() -> &'static str {
+    let heading = after(demo_section(), "### 7.1 updated");
+    let line = heading.lines().next().expect("the heading has a line");
+    btcr2_dids(line)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("the 7.1 heading names a DID: {line:?}"))
+}
+
+#[test]
+fn demo_section_records_two_mutinynet_k1_dids_with_labelled_txids() {
+    let below = demo_section();
+    let dids = demo_dids();
+    assert_eq!(
+        dids.len(),
+        2,
+        "the demo section names exactly two DIDs: {:?}",
+        dids.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+    );
+    for (token, did) in &dids {
+        let c = did.components();
+        assert_eq!(c.network(), Network::Mutinynet, "`{token}` is mutinynet");
+        assert_eq!(c.version(), DidVersion::One, "`{token}` is version 1");
+        assert!(
+            matches!(c.id_type(), IdType::Key(_)),
+            "`{token}` is key-based"
+        );
+        assert!(did.public_key().is_some(), "`{token}` carries its key");
+    }
+    let txid_lines: Vec<&str> = below.lines().filter(|l| l.contains("txid")).collect();
+    let labelled = txid_lines.iter().filter(|l| any_hex64(l).is_some()).count();
+    assert!(
+        labelled >= 6,
+        "at least six txid lines carry a 64-hex token (one funding + one update for the updated \
+         DID, three funding + two updates + one deactivate for the deactivated one), got {labelled}"
+    );
+    // A bullet that labels a txid and quotes a value (backticks) must quote a real one; the
+    // §7 intro and a bullet that only introduces a list may say `txid` without a token.
+    for line in txid_lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("- ") && l.contains('`'))
+    {
+        assert!(
+            any_hex64(line).is_some(),
+            "a txid bullet that quotes a value quotes a 64-hex token: {line:?}"
+        );
+    }
+    for needle in [
+        "### 7.1 updated",
+        "### 7.2 deactivated",
+        "The secret is kept",
+        "The key is a throwaway",
+    ] {
+        assert!(
+            below.contains(needle),
+            "the demo section contains `{needle}`"
+        );
+    }
+    let updated_at = below.find("### 7.1 updated").expect("7.1");
+    let deactivated_at = below.find("### 7.2 deactivated").expect("7.2");
+    assert!(updated_at < deactivated_at, "7.1 precedes 7.2");
+}
+
+#[test]
+fn demo_sidecar_parses_and_names_the_updated_did() {
+    let parsed = serde_json::from_str::<SidecarData>(DEMO_SIDECAR);
+    assert!(
+        parsed.is_ok(),
+        "the demo sidecar parses: {:?}",
+        parsed.err()
+    );
+    let raw: serde_json::Value =
+        serde_json::from_str(DEMO_SIDECAR).expect("the demo sidecar is JSON");
+    assert_eq!(
+        raw["updates"].as_array().map(Vec::len),
+        Some(1),
+        "the demo sidecar holds exactly one update"
+    );
+    let updated = updated_did();
+    let did: Did = updated
+        .parse()
+        .unwrap_or_else(|e| panic!("`{updated}` parses: {e}"));
+    assert_eq!(did.components().network(), Network::Mutinynet);
+    assert!(
+        DEMO_SIDECAR.contains(updated),
+        "the demo sidecar names the updated DID `{updated}`"
+    );
+    assert!(
+        demo_dids().iter().any(|(t, _)| *t == updated),
+        "the updated DID is one of the demo section's DIDs"
+    );
+    assert_eq!(
+        any_hex64(DEMO_SIDECAR),
+        None,
+        "the sidecar holds no 64-hex token (a secret)"
+    );
+}
+
 #[test]
 fn extractor_negative_cases() {
-    let mixed = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK 'did:btcr2:k1abc',\"did:btcr2:x1def\"";
+    let mixed = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK 'did:btcr2:k1abc',\"did:btcr2:x1def\" `did:btcr2:k1ghi`";
     assert_eq!(
         btcr2_dids(mixed),
-        vec!["did:btcr2:k1abc", "did:btcr2:x1def"]
+        vec!["did:btcr2:k1abc", "did:btcr2:x1def", "did:btcr2:k1ghi"]
     );
     assert!(btcr2_dids("").is_empty());
 
