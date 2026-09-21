@@ -94,12 +94,15 @@ fn invalid(detail: String) -> OptionsError {
 const SIDECAR_MEMBERS: [&str; 4] = ["genesisDocument", "updates", "casUpdates", "smtProofs"];
 
 /// Parse the query string into the core's typed options. Accepted:
-/// `versionId` (positive integer), `versionTime` (RFC 3339, normalised to
-/// UTC), `minConf` (positive integer) — `versionId` and `versionTime` not
-/// together — and `noCache=false`, the default, which sets nothing.
-/// `noCache=true` and `expandRelativeUrls` are declined as unsupported
-/// features; a `noCache` value other than `true`/`false` is invalid, as is
-/// any other name, including `accept` (header-only in the HTTP binding).
+/// `versionId` (a string of decimal digits, no sign, no point; positive),
+/// `versionTime` (RFC 3339, normalised to UTC), `minConf` (a string of
+/// decimal digits, no sign, no point; positive) — `versionId` and
+/// `versionTime` not together — and `noCache=false`, the default, which sets
+/// nothing. `noCache=true` and `expandRelativeUrls` are declined as
+/// unsupported features; a `noCache` value other than `true`/`false` is
+/// invalid, as is any other name, including `accept` (header-only in the
+/// HTTP binding). The integer grammar is the body form's `digits_to_u64`,
+/// so `+2`, `-1`, `1.0` and ` 1` are rejected in both forms alike.
 pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsError> {
     let Some(query) = query.filter(|s| !s.is_empty()) else {
         return Ok(ResolutionOptions::default());
@@ -125,11 +128,15 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
         }
         match key.as_str() {
             "versionId" => {
-                opts.version_id = Some(value.parse::<NonZeroU64>().map_err(|_| {
-                    invalid(format!(
-                        "versionId must be a positive integer, got `{value}`"
-                    ))
-                })?);
+                opts.version_id = Some(
+                    digits_to_u64(&value)
+                        .and_then(NonZeroU64::new)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "versionId must be a positive integer, got `{value}`"
+                            ))
+                        })?,
+                );
             }
             "versionTime" => {
                 opts.version_time = Some(
@@ -143,9 +150,14 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
                 );
             }
             "minConf" => {
-                opts.min_conf = Some(value.parse::<NonZeroU32>().map_err(|_| {
-                    invalid(format!("minConf must be a positive integer, got `{value}`"))
-                })?);
+                opts.min_conf = Some(
+                    digits_to_u64(&value)
+                        .and_then(|n| u32::try_from(n).ok())
+                        .and_then(NonZeroU32::new)
+                        .ok_or_else(|| {
+                            invalid(format!("minConf must be a positive integer, got `{value}`"))
+                        })?,
+                );
             }
             "noCache" => match value.as_str() {
                 // The spec's default: caching is allowed. Nothing to set.
@@ -500,6 +512,13 @@ mod tests {
         assert_eq!(opts.min_conf.map(NonZeroU32::get), Some(1));
         assert!(opts.version_id.is_none());
 
+        // The full u32 range, and leading zeros are digits — as the body
+        // form already asserts.
+        let opts = parse_options(Some("minConf=4294967295")).expect("u32::MAX");
+        assert_eq!(opts.min_conf.map(NonZeroU32::get), Some(u32::MAX));
+        let opts = parse_options(Some("versionId=007")).expect("leading zeros");
+        assert_eq!(opts.version_id.map(NonZeroU64::get), Some(7));
+
         let opts = parse_options(Some("versionTime=2026-01-02T03:04:05Z")).expect("versionTime");
         assert_eq!(
             opts.version_time,
@@ -536,6 +555,14 @@ mod tests {
             ("versionId", "versionId"),
             ("minConf=0", "minConf"),
             ("minConf=six", "minConf"),
+            // A sign is not a digit: the query form and the body form reject
+            // the same strings.
+            ("versionId=+1", "versionId"),
+            ("versionId=%2B1", "versionId"),
+            ("minConf=+1", "minConf"),
+            ("versionId=18446744073709551616", "versionId"),
+            ("minConf=4294967296", "minConf"),
+            ("versionId= 1", "versionId"),
             ("versionTime=yesterday", "versionTime"),
             ("versionTime=2026-01-02", "versionTime"),
             ("foo=1", "foo"),
