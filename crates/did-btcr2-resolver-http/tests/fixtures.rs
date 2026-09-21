@@ -16,10 +16,12 @@
 //!   edit with nothing to change here. The config is compiled in (`include_str!`),
 //!   so the test binary does carry whatever host the config names;
 //! - the record names both identifiers verbatim, carries the two custody
-//!   statements and the exact `NOT_FOUND` type URI, and holds no 64-hex token.
+//!   statements and the exact `NOT_FOUND` type URI, and holds no 64-hex token
+//!   above the `## 7.` heading; below it (the funded mutinynet demo DIDs) a
+//!   64-hex token is a transaction id and must sit on a line that says `txid`.
 //!
-//! The token extractor has its own negative cases below, so the guard cannot pass
-//! by extracting nothing.
+//! The token extractors have their own negative cases below, so the guard cannot
+//! pass by extracting nothing.
 
 use did_btcr2::identifier::{Did, DidVersion, IdType, Network};
 
@@ -29,6 +31,23 @@ const RECORD: &str = include_str!("../FIXTURES.md");
 // is a config edit with nothing to change here. The host is still in the binary — `CONFIG`
 // above embeds the whole file — so when the droplet is destroyed, the config is what to update
 // (`DEPLOY.md`, "Cleanup").
+
+/// The heading that separates the unfunded, secret-free mainnet fixtures from the funded
+/// mutinynet demo DIDs whose records legitimately carry transaction ids.
+const DEMO_HEADING: &str = "\n## 7. mutinynet demo DIDs";
+
+/// The first 64-hex token in `text`, labelled or not.
+fn any_hex64(text: &str) -> Option<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|t| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The first 64-hex token in `text` that does not sit on a line naming `txid`.
+fn unlabelled_hex64(text: &str) -> Option<&str> {
+    text.lines()
+        .filter(|line| !line.contains("txid"))
+        .find_map(any_hex64)
+}
 
 /// Every token that starts with `did:btcr2:` in `source`, split on the characters
 /// that cannot appear in a DID: `"`, `'`, `,`, whitespace.
@@ -209,10 +228,19 @@ fn record_names_both_dids_verbatim() {
     ] {
         assert!(RECORD.contains(needle), "the record contains `{needle}`");
     }
-    let hex64 = RECORD
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|t| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()));
-    assert_eq!(hex64, None, "the record holds no 64-hex token (a secret)");
+    let (above, below) = RECORD
+        .split_once(DEMO_HEADING)
+        .expect("the demo heading is present");
+    assert_eq!(
+        any_hex64(above),
+        None,
+        "the mainnet part of the record holds no 64-hex token (a secret)"
+    );
+    assert_eq!(
+        unlabelled_hex64(below),
+        None,
+        "a 64-hex token in the demo section must be a labelled txid"
+    );
 }
 
 #[test]
@@ -235,5 +263,40 @@ fn extractor_negative_cases() {
     assert_eq!(
         endpoint("x \"endpoint\": \"https://h/1.0/identifiers\", y"),
         "https://h/1.0/identifiers"
+    );
+
+    // The two hex extractors find tokens, so the record checks cannot pass by
+    // scanning nothing: 64 hex digits are found, 63 are not, and a label of
+    // `txid` on the same line is the only thing that excuses one.
+    let a64 = "a".repeat(64);
+    let z64 = "0".repeat(64);
+    assert_eq!(any_hex64(&z64), Some(z64.as_str()));
+    assert_eq!(
+        any_hex64(&format!("a {}", &a64[..63])),
+        None,
+        "63 hex is not a token"
+    );
+    assert_eq!(
+        any_hex64(&format!("txid: {a64}")),
+        Some(a64.as_str()),
+        "any_hex64 ignores labels"
+    );
+    assert_eq!(unlabelled_hex64(&format!("txid: {a64}")), None);
+    assert_eq!(
+        unlabelled_hex64(&format!("secret {a64}")),
+        Some(a64.as_str())
+    );
+    assert_eq!(
+        unlabelled_hex64(&format!("funding txid {a64}\nkey {z64}")),
+        Some(z64.as_str()),
+        "the label excuses its own line only"
+    );
+    assert!(
+        RECORD.contains(DEMO_HEADING),
+        "the record has the demo heading"
+    );
+    assert!(
+        RECORD.matches(DEMO_HEADING).count() == 1,
+        "the demo heading occurs once, so the split is unambiguous"
     );
 }

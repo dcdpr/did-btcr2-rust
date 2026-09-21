@@ -417,6 +417,42 @@ fn status_cells(status: Status) -> (&'static str, String) {
     }
 }
 
+/// The binding's own POST rows in `tests/post.rs`, named by the third binding note.
+/// `binding_note_names_existing_post_tests` fails when one is renamed away.
+const POST_TESTS: &[&str] = &[
+    "sidecar_body_reaches_the_resolver_typed",
+    "post_rejections_are_400_or_501_before_the_resolver",
+    "post_content_type_gate_is_bodiless_415",
+    "post_with_query_string_is_400_invalid_options",
+    "post_empty_body_resolves_like_get",
+    "post_deactivated_result_is_410",
+    "post_accept_negotiation_applies",
+    "clean_fixture_sidecar_resolves_through_the_binding",
+];
+
+/// The 405 row in `tests/conformance.rs` the note points at.
+const POST_ALLOW_TEST: &str = "other_methods_on_resolver_path_are_405_with_allow_get_post";
+
+/// The cache-bypass invariant in `src/resolve.rs` the note points at.
+const POST_BYPASS_TEST: &str = "post_bypasses_the_cache_in_both_directions";
+
+/// The third binding note: why the POST binding adds no suite rows and where its
+/// own tests live. One line, no trailing newline.
+fn post_binding_note() -> String {
+    let names = POST_TESTS
+        .iter()
+        .map(|t| format!("`{t}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "- `POST /1.0/identifiers/{{did}}` (DID Resolution §12.1, a MAY) adds no suite rows: the \
+         pinned suite issues GET only. The binding's own POST rows live in `tests/post.rs` — \
+         {names} — beside the 405 row `{POST_ALLOW_TEST}` in `tests/conformance.rs` \
+         (`Allow: GET, POST`); the cache-bypass invariant is `{POST_BYPASS_TEST}` in \
+         `src/resolve.rs`."
+    )
+}
+
 /// Render the curated table as the `CONFORMANCE.md` document. Deterministic,
 /// `\n` line ends, no trailing whitespace.
 fn render() -> String {
@@ -449,8 +485,10 @@ fn render() -> String {
         "- A raw `?` in the request-target starts the query string (an unknown name answers 400 \
          `INVALID_OPTIONS`, test `raw_query_on_the_resolver_path_is_options_not_a_did_url`); only \
          the percent-encoded `%3F` form is a DID URL and answers 501 `FEATURE_NOT_SUPPORTED` (test \
-         `did_url_segment_is_501_feature_not_supported`).\n\n",
+         `did_url_segment_is_501_feature_not_supported`).\n",
     );
+    out.push_str(&post_binding_note());
+    out.push_str("\n\n");
 
     let (mut covered, mut na, mut none) = (0usize, 0usize, 0usize);
     for row in CURATED {
@@ -629,6 +667,45 @@ fn submodule_is_at_the_recorded_pin() {
 #[test]
 fn conformance_md_matches_golden() {
     bless_or_assert(&render(), GOLDEN);
+}
+
+#[test]
+fn binding_note_names_existing_post_tests() {
+    let post_rs = include_str!("post.rs");
+    let resolve_rs = include_str!("../src/resolve.rs");
+    let missing: Vec<&str> = POST_TESTS
+        .iter()
+        .copied()
+        .filter(|name| !test_exists_in(&[post_rs], name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the POST binding note names tests that are not `#[test] fn`s in tests/post.rs: \
+         {missing:#?}"
+    );
+    assert!(
+        test_exists(POST_ALLOW_TEST),
+        "`{POST_ALLOW_TEST}` is a `#[test] fn` in tests/conformance.rs"
+    );
+    assert!(
+        test_exists_in(&[resolve_rs], POST_BYPASS_TEST),
+        "`{POST_BYPASS_TEST}` is a `#[test] fn` in src/resolve.rs"
+    );
+    // The rendered note carries every name it is built from, backticked.
+    let note = post_binding_note();
+    for name in POST_TESTS
+        .iter()
+        .copied()
+        .chain([POST_ALLOW_TEST, POST_BYPASS_TEST])
+    {
+        assert!(note.contains(&format!("`{name}`")), "note names `{name}`");
+    }
+    assert!(note.starts_with("- `POST /1.0/identifiers/{did}`"));
+    assert!(!note.ends_with('\n'), "render() supplies the line ends");
+    assert!(
+        render().contains(&format!("{note}\n\n**Totals:**")),
+        "the note is the last binding note, right before the Totals line"
+    );
 }
 
 // ---------------------------------------------------------------------------

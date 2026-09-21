@@ -134,3 +134,17 @@ trailing slash). A typo in either file fails the build, not the weekly report.
   the old identifier stays documented here so an old report can be read.
 - **Never commit a `localConfig.cjs` inside the `w3c-resolution-suite` submodule.** The
   vendored tree tracks upstream `main`; the config is copied in for a run and left uncommitted.
+
+## 7. mutinynet demo DIDs (funded; POST-with-sidecar demonstration)
+
+Everything above this heading is unfunded and secret-free. The two identifiers below are the
+opposite on purpose: each has a real on-chain update history on **mutinynet**, a public test network
+that is periodically reset, so their records name transaction ids (64-hex) and one of them has a
+secret that is deliberately kept. They are the inputs to `DEPLOY.md` §10 and appear in no suite
+config. `tests/fixtures.rs` scans this section separately: a 64-hex token is allowed here only on a
+line that labels it `txid`.
+
+Record shape (one subsection per DID): the DID; the exact mint command; public key and derivation;
+funding txid; update / deactivate txids in version order; key disposition (kept where, or thrown
+away); the `curl` rows of `DEPLOY.md` §10 that use it. After a mutinynet reset both DIDs resolve to
+version 1 and must be re-minted with the same commands; the old records stay, dated, above the new.

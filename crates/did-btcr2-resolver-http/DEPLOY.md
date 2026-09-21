@@ -57,16 +57,34 @@ Exactly this, and nothing more:
   transient Esplora fault is never pinned. `noCache=false` — the DID Resolution default, caching
   allowed — is accepted and changes nothing; `noCache=true` is answered `501 FEATURE_NOT_SUPPORTED`
   rather than honoured (an anonymous cache bypass would be a lever against the Esplora quota);
-  any other `noCache` value is a `400 INVALID_OPTIONS`.
+  any other `noCache` value is a `400 INVALID_OPTIONS`. A `POST` (next bullet) is never served
+  from the cache and never stored in it: a result computed from a caller's sidecar must not
+  answer a later `GET` that supplied none.
   No database, no writable filesystem beyond the journal. The cache is process memory only, so
   the process is still safe to restart at any time; the cost of a restart is one resolution per
   DID.
+- **`POST` with sidecar data:** `POST /1.0/identifiers/{did}` takes the resolution options as
+  one JSON object in the body (DID Resolution §12.1) — `{"sidecar": {…}, "versionId": 2}`;
+  `versionId` and `minConf` are accepted as a JSON number or as a string of decimal digits
+  (`"2"`), `versionTime` as a string, `noCache` as a boolean; `Accept` stays in the header — so
+  a caller can hand the resolver the off-chain update payload a Singleton beacon leaves off the
+  chain. The body is read to at most 1 MiB (fixed; past it a bodiless `413`), and only on a
+  `POST` — a body on a `GET` is not read. The `Content-Type` must be absent, `application/json`
+  or any `*/*+json` (else a bodiless `415`), and a query string on a `POST` is a
+  `400 INVALID_OPTIONS`. Every other method on the resolver path answers `405` with
+  `Allow: GET, POST`. The binary's limit bounds honest bodies only: the shell library drains a
+  `Content-Length` remainder the client never sent with one allocation sized by the declaration
+  and sets no socket read timeout, so the host bounds the declared length and the body read time
+  in Caddy (§6) before a request reaches the binary. See §10.
 - **Liveness:** `GET /health` or `HEAD /health` → `200`, body `{"status":"ok"}` (`HEAD` returns the
   headers only), without touching Esplora. Point an uptime poller or `curl -I` at
   `https://<host>/health`; the proxy's own upstream health checks are unnecessary.
 - **Logs:** one JSON object per request on stderr, fields in this order: `method`, `path` (the
   raw request-target), `did` (the decoded DID when the path parsed as one, else `null`),
-  `accept`, `status`, `latency_ms`, `cache`, `network`. `/health` requests are logged in the
+  `accept`, `status`, `latency_ms`, `cache`, `network`, `body_bytes` (bytes of request body the
+  shell read; `0` for a bodiless request and for every method but `POST`), `sidecar_updates`
+  (the length of the sidecar's `updates` array when a `POST` carried one and reached the
+  resolver, else `null`). `/health` requests are logged in the
   same shape (`did` and `network` `null`, `cache` `n/a`); the error chain behind a 500 follows
   on its own line. Under systemd that is `journalctl -u did-btcr2-resolver-http`; the
   encoded-target pass-through check above reads the `path` field.
@@ -78,7 +96,8 @@ Exactly this, and nothing more:
     `\u{1b}`). A consumer comparing `path` against what the client sent must unescape it once
     more. For a well-formed request — percent-encoded ASCII — the two forms coincide and the
     field reads as sent.
-  - `cache` is `hit`, `miss`, or `n/a`. `n/a` has two readings: the request never reached the
+  - `cache` is `hit`, `miss`, `bypass`, or `n/a`. `bypass` is every `POST` that reached the
+    resolver: neither read from nor written to the cache. `n/a` has two readings: the request never reached the
     resolver (a rejected request, `/health`, a handler panic), or the resolver that served it
     has no cache. The shipped binary always wraps the resolver in its cache, so in this
     deployment `n/a` means the former; only a build that serves the bare resolver would give
@@ -203,10 +222,31 @@ caddy version     # v2.11.x (the shakedown got v2.11.4)
 ```
 `/etc/caddy/Caddyfile`:
 ```caddyfile
+{
+	servers {
+		timeouts {
+			read_body 30s
+		}
+	}
+}
+
 <HOST> {
+	request_body {
+		max_size 1MiB
+	}
 	reverse_proxy 127.0.0.1:8080
 }
 ```
+The two bounds are the proxy's job, not the binary's. The binary reads at most 1 MiB of an
+honest `POST` body and answers `413` past it, but the shell library it runs on drains a
+`Content-Length` remainder the client never sent with one allocation sized by the declaration —
+a request declaring terabytes and sending a few kilobytes makes the process allocate that much
+and abort after the response is written, on any method — and it sets no read timeout on the
+socket, so a client that dribbles a body holds a handler thread for as long as it likes.
+`request_body max_size 1MiB` rejects on the declared length (and on bytes read) before the
+request reaches the binary; `read_body 30s` ends a slow body. §10's last row shows the proxy's
+`413`. A deployment without Caddy in front, or with a proxy that forwards the declared length,
+is exposed to both.
 ```sh
 # droplet
 caddy validate --config /etc/caddy/Caddyfile
@@ -310,6 +350,77 @@ gh workflow run mocha --repo danpape/btcr2-shakedown
 gh run watch --repo danpape/btcr2-shakedown && gh run view --repo danpape/btcr2-shakedown --log
 ```
 
+## 10. POST with sidecar: show an updated and a deactivated DID
+
+The GET binding resolves with no sidecar, so a DID whose Singleton beacon has announced an
+update answers `500 MISSING_UPDATE_DATA`: the on-chain signal is a 32-byte commitment and the
+update itself is off-chain. `POST` carries that update in the body (§1). Two mutinynet DIDs are
+kept for this (records in `FIXTURES.md` §7): one updated to version 2 by the
+`did-btcr2-cli/RUNBOOK.md` flow, whose sidecar is committed at `demo/updated-v2.sidecar.json`
+beside this file, and one minted by `chain-capture mint --scenario clean`, three updates ending in
+deactivation, whose sidecar is inside `fixtures/chain/minted/clean-rotating-beacons.json` (not
+committed twice — the `jq` line extracts it).
+
+```sh
+# laptop, from the did-btcr2-rust workspace root
+H='Accept: application/did-resolution'; J='Content-Type: application/json'
+UPDATED_DID=<FIXTURES.md §7.1>; DEACTIVATED_DID=<FIXTURES.md §7.2>
+jq -c '{sidecar: .}' crates/did-btcr2-resolver-http/demo/updated-v2.sidecar.json > /tmp/updated.body
+jq -c '{sidecar: ., versionId: 1}' crates/did-btcr2-resolver-http/demo/updated-v2.sidecar.json > /tmp/updated-v1.body
+jq -c '{sidecar: .sidecar}' fixtures/chain/minted/clean-rotating-beacons.json > /tmp/deactivated.body
+head -c 2048 /dev/zero > /tmp/2k.bin
+curl -sS -i -H "$H" "https://$HOST/1.0/identifiers/$UPDATED_DID"                                                        # 500 MISSING_UPDATE_DATA — GET cannot show it
+sleep 3
+curl -sS -i -H "$H" -H "$J" --data-binary @/tmp/updated.body "https://$HOST/1.0/identifiers/$UPDATED_DID"               # 200, versionId "2", assertionMethod has two entries
+sleep 3
+curl -sS -i -H "$H" -H "$J" --data-binary @/tmp/updated-v1.body "https://$HOST/1.0/identifiers/$UPDATED_DID"            # 200, versionId "1" — the genesis document
+sleep 3
+curl -sS -i -H "$H" -H "$J" --data-binary @/tmp/deactivated.body "https://$HOST/1.0/identifiers/$DEACTIVATED_DID"       # 410, deactivated true, versionId "4"
+curl -sS -i -H "$H" -H "$J" --data-binary @/tmp/updated.body "https://$HOST/1.0/identifiers/$UPDATED_DID?versionId=1"   # 400 INVALID_OPTIONS — options go in the body
+curl -sS -i -H "$H" -H 'Content-Type: text/plain' --data 'x' "https://$HOST/1.0/identifiers/$UPDATED_DID"               # 415, no body
+curl -sS -o /dev/null -w '%{http_code}\n' --max-time 20 --http1.1 -X POST -H "$J" -H 'Content-Length: 100000000000000' --data-binary @/tmp/2k.bin "https://$HOST/1.0/identifiers/$UPDATED_DID"   # 413 from Caddy (§6): the declared length is over the proxy's bound; the binary never sees the request
+```
+
+`-H "$J"` is on every JSON row because curl's default `Content-Type` for `--data` is
+`application/x-www-form-urlencoded`, which the binary answers `415`; `--data-binary` sends `jq`'s
+output byte for byte. The last row goes to the host only — never send a declared-but-unsent
+`Content-Length` to a bare binary (§6: the shell library aborts on it).
+
+The `sleep 3` between the resolving rows: every `POST` is uncached, and a mutinynet resolution
+that applies updates costs more Esplora calls than the four of §7's genesis-only request; the
+hosted endpoint rate-limits (§1).
+
+Journal evidence (`journalctl -u did-btcr2-resolver-http | grep identifiers` on the droplet):
+each `POST` line carries `"cache":"bypass"`, a non-zero `"body_bytes"` and
+`"sidecar_updates":1` (the updated DID) or `3` (the deactivated one); the `GET` line carries
+`"cache":"miss"` and `"status":500`; the `415` and `400` lines carry `"cache":"n/a"` and
+`"sidecar_updates":null`; the last row leaves no journal line at all — Caddy answered it. One
+line in the ten-field order, the DID and the two measured values elided:
+```
+{"method":"POST","path":"/1.0/identifiers/did:btcr2:k1…","did":"did:btcr2:k1…","accept":"application/did-resolution","status":200,"latency_ms":…,"cache":"bypass","network":"mutinynet","body_bytes":…,"sidecar_updates":1}
+```
+
+**Why a query string is refused (the `400` row):** the specification's own second `POST`
+example carries a query string (`…/did:example:1234?service=files&relativeRef=/resume.pdf`),
+but that request is a DID URL *dereference* — `service` and `relativeRef` are the DID URL's
+parameters, not resolution options — and this host does not dereference (a `GET` with that
+query is already `400 INVALID_OPTIONS`, unknown option). A `POST` answers exactly as the `GET`
+does; the resolution options of a `POST` live in the body only.
+
+**What a sidecar that does not verify answers:** a `genesisDocument` whose hash does not match
+an `x1` DID → `400 INVALID_DID`; an update that is missing for a signal, or present but failing
+proof or hash verification → `500` with the did:btcr2 error type kept verbatim
+(`…MISSING_UPDATE_DATA` / `…INVALID_DID_UPDATE` under `https://btcr2.dev/`). That `500` is the
+DID Resolution §12.1 catch-all for error types the specification does not map and is the
+conformant answer today; the mapping of did:btcr2 method errors onto DID Resolution statuses is
+open upstream (`w3c/did-resolution` PR #358) and is not this binary's to invent.
+
+**After a mutinynet reset:** mutinynet is periodically reset. The update's signal is then gone
+from the chain, the resolver never consults the sidecar's updates, and the `POST` answers `200`
+with `versionId "1"` — the genesis document — for the updated DID, and `200` (not `410`) for the
+deactivated one. That is not an error and there is nothing to fix on the host: re-mint the two
+DIDs (`FIXTURES.md` §7 records the commands) and update the records.
+
 ## Redeploy
 
 ```sh
@@ -336,3 +447,4 @@ droplet therefore includes editing both files** in the same change: point them a
 replacement host, or remove the URLs if there is none (`tests/fixtures.rs` only asserts the
 endpoint's shape, so it needs no edit for a host move). The scratch repo `danpape/btcr2-shakedown`
 holds its own copy of `localConfig.cjs` for the `mocha.yml` job and needs the same update.
+`DEPLOY.md` §10 and `FIXTURES.md` §7 use `$HOST`; only the two files already listed name it.

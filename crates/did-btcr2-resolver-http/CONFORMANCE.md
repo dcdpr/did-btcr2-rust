@@ -12,6 +12,7 @@ Every `it()` in `tests/4-did-resolution.js` and `tests/10-bindings.js`, and each
 
 - A non-ASCII request line is answered 400 by `tiny_http` before the handler runs, so no problem body exists for it.
 - A raw `?` in the request-target starts the query string (an unknown name answers 400 `INVALID_OPTIONS`, test `raw_query_on_the_resolver_path_is_options_not_a_did_url`); only the percent-encoded `%3F` form is a DID URL and answers 501 `FEATURE_NOT_SUPPORTED` (test `did_url_segment_is_501_feature_not_supported`).
+- `POST /1.0/identifiers/{did}` (DID Resolution §12.1, a MAY) adds no suite rows: the pinned suite issues GET only. The binding's own POST rows live in `tests/post.rs` — `sidecar_body_reaches_the_resolver_typed`, `post_rejections_are_400_or_501_before_the_resolver`, `post_content_type_gate_is_bodiless_415`, `post_with_query_string_is_400_invalid_options`, `post_empty_body_resolves_like_get`, `post_deactivated_result_is_410`, `post_accept_negotiation_applies`, `clean_fixture_sidecar_resolves_through_the_binding` — beside the 405 row `other_methods_on_resolver_path_are_405_with_allow_get_post` in `tests/conformance.rs` (`Allow: GET, POST`); the cache-bypass invariant is `post_bypasses_the_cache_in_both_directions` in `src/resolve.rs`.
 
 **Totals:** 37 rows — Covered 26 · Not applicable 9 · No assertion 2
 
