@@ -98,17 +98,25 @@ fn header<'a>(resp: &'a ureq::http::Response<ureq::Body>, name: &str) -> Option<
 }
 
 /// Send a `HEAD` for `path` over a bare socket and return everything the
-/// server writes back: to EOF when it honours `Connection: close`, otherwise
-/// until nothing more arrives within the read timeout. Unlike an HTTP client,
-/// this does not discard a body the server should not have sent.
+/// server writes back. Unlike an HTTP client, this does not discard a body
+/// the server should not have sent.
 fn raw_head(addr: std::net::SocketAddr, path: &str) -> String {
+    raw_exchange(
+        addr,
+        format!("HEAD {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+}
+
+/// Write `request` — a complete request, bytes as they go on the wire — over
+/// a bare socket and return everything the server writes back: to EOF when it
+/// honours `Connection: close`, otherwise until nothing more arrives within
+/// the read timeout. For the rows an HTTP client cannot send: a `HEAD` whose
+/// body must be inspected, a body the client library would refuse to encode.
+fn raw_exchange(addr: std::net::SocketAddr, request: &[u8]) -> String {
     let mut sock = TcpStream::connect(addr).expect("connect to the shell");
     sock.set_read_timeout(Some(Duration::from_secs(2)))
         .expect("set a read timeout");
-    sock.write_all(
-        format!("HEAD {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
-    )
-    .expect("write the request");
+    sock.write_all(request).expect("write the request");
     let mut raw = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -535,6 +543,78 @@ fn oversize_post_off_the_resolver_path_is_405_or_404_before_the_body_is_read() {
         .get(format!("http://{addr}/health"))
         .call()
         .expect("the worker still serves after the unread bodies");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    server.unblock();
+    for worker in workers {
+        worker.join().expect("worker exits after unblock");
+    }
+}
+
+/// A body the shell cannot read to its end is a bodiless 400: a chunked body
+/// whose chunk-size line is not hex fails the shell library's decoder on the
+/// first read, and the shell answers from that error rather than handing the
+/// handler a truncated body. An HTTP client will not send the malformed
+/// framing, so the row speaks raw HTTP. A well-formed chunked body on the
+/// same worker is the control (it resolves), and `/health` on a fresh
+/// connection proves the worker survived the failed read.
+#[test]
+fn malformed_chunked_post_body_is_a_bodiless_400_and_the_worker_keeps_serving() {
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind an ephemeral port"));
+    let addr = server.server_addr().to_ip().expect("TCP listener");
+    let workers = serve(Arc::clone(&server), NonZeroUsize::MIN, OkMock);
+
+    let malformed = format!(
+        "POST /1.0/identifiers/{VALID_DID} HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Connection: close\r\n\
+         \r\n\
+         zz\r\n\
+         {{}}\r\n\
+         0\r\n\
+         \r\n"
+    );
+    let raw = raw_exchange(addr, malformed.as_bytes());
+    assert!(raw.starts_with("HTTP/1.1 400 "), "{raw:?}");
+    let (headers, rest) = raw.split_once("\r\n\r\n").expect("a complete header block");
+    let headers = headers.to_ascii_lowercase();
+    assert!(headers.contains("\r\ncontent-length: 0"), "{raw:?}");
+    assert!(
+        !headers.contains("content-type:"),
+        "the 400 for a failed read is bodiless, not a problem body: {raw:?}"
+    );
+    assert_eq!(rest, "", "the 400 carries no body: {raw:?}");
+
+    let well_formed = format!(
+        "POST /1.0/identifiers/{VALID_DID} HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Accept: application/did-resolution\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Connection: close\r\n\
+         \r\n\
+         10\r\n\
+         {{\"versionId\": 1}}\r\n\
+         0\r\n\
+         \r\n"
+    );
+    let raw = raw_exchange(addr, well_formed.as_bytes());
+    assert!(raw.starts_with("HTTP/1.1 200 "), "{raw:?}");
+    let (_, body) = raw.split_once("\r\n\r\n").expect("a complete header block");
+    let body: serde_json::Value = serde_json::from_str(body).expect("a resolution result");
+    assert_eq!(body["didDocument"]["id"], VALID_DID);
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let resp = agent
+        .get(format!("http://{addr}/health"))
+        .call()
+        .expect("the worker still serves after the failed read");
     assert_eq!(resp.status().as_u16(), 200);
 
     server.unblock();
