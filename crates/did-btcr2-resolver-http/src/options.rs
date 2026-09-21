@@ -18,7 +18,9 @@
 //! Every other name is rejected, not ignored: a silently dropped `versionld`
 //! (or an `accept`, which the HTTP binding carries in the header only) would
 //! resolve the wrong version and report success. A duplicated name is rejected
-//! for the same reason — there is no "last one wins" to get wrong.
+//! for the same reason — there is no "last one wins" to get wrong. A detail
+//! that names the offending member shows at most 64 characters of it, so an
+//! error body never grows with the request; no detail echoes a value.
 //!
 //! `versionId` and `versionTime` together are rejected here as well as in the
 //! core's `Resolver::new`, with the same detail text. The core check comes
@@ -87,6 +89,22 @@ fn invalid(detail: String) -> OptionsError {
     OptionsError::Invalid(Btcr2Error::InvalidOptions(detail))
 }
 
+/// The most characters of a client-supplied name a rejection detail echoes.
+const SHOWN_NAME_CHARS: usize = 64;
+
+/// A client-supplied name as a detail shows it: at most [`SHOWN_NAME_CHARS`]
+/// characters, `…` appended when cut. A detail names the offending member so
+/// the client can find it, but a body at the limit can carry a member name a
+/// mebibyte long and the query form's names are bounded only by the request
+/// line; without the cut the error body would grow with the request.
+fn shown(name: &str) -> String {
+    let mut shown: String = name.chars().take(SHOWN_NAME_CHARS).collect();
+    if name.chars().nth(SHOWN_NAME_CHARS).is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
 /// The members of spec-form sidecar data, by their wire names — the exact set
 /// the core's `SidecarData` deserialiser reads (`did_btcr2::document`, the
 /// private `SidecarDataWire`). The core ignores any other member; the binding
@@ -113,17 +131,20 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
         let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(raw_key).map_err(|_| {
             invalid(format!(
-                "parameter `{raw_key}` is not valid percent-encoding"
+                "parameter `{}` is not valid percent-encoding",
+                shown(raw_key)
             ))
         })?;
         let value = percent_decode(raw_value).map_err(|_| {
             invalid(format!(
-                "the value of parameter `{key}` is not valid percent-encoding"
+                "the value of parameter `{}` is not valid percent-encoding",
+                shown(&key)
             ))
         })?;
         if !seen.insert(key.clone()) {
             return Err(invalid(format!(
-                "parameter `{key}` is given more than once"
+                "parameter `{}` is given more than once",
+                shown(&key)
             )));
         }
         match key.as_str() {
@@ -185,7 +206,12 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
                         .to_string(),
                 ));
             }
-            _ => return Err(invalid(format!("unknown resolution option `{key}`"))),
+            _ => {
+                return Err(invalid(format!(
+                    "unknown resolution option `{}`",
+                    shown(&key)
+                )));
+            }
         }
     }
     if opts.version_id.is_some() && opts.version_time.is_some() {
@@ -311,7 +337,10 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
     // ~10^5 members, so no pairwise scan.
     let mut seen = HashSet::new();
     if let Some((key, _)) = members.iter().find(|(key, _)| !seen.insert(key.as_str())) {
-        return Err(invalid(format!("member `{key}` is given more than once")));
+        return Err(invalid(format!(
+            "member `{}` is given more than once",
+            shown(key)
+        )));
     }
     for (key, value) in members {
         match key.as_str() {
@@ -389,7 +418,10 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
                     .as_object()
                     .and_then(|o| o.keys().find(|k| !SIDECAR_MEMBERS.contains(&k.as_str())))
                 {
-                    return Err(invalid(format!("unknown sidecar member `{unknown}`")));
+                    return Err(invalid(format!(
+                        "unknown sidecar member `{}`",
+                        shown(unknown)
+                    )));
                 }
                 // The count is taken from the raw JSON: the core's `updates`
                 // is not public, and its deserialiser fails the whole parse
@@ -410,7 +442,12 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
                 opts.sidecar_data = Some(sidecar);
                 sidecar_updates = Some(n);
             }
-            _ => return Err(invalid(format!("unknown resolution option `{key}`"))),
+            _ => {
+                return Err(invalid(format!(
+                    "unknown resolution option `{}`",
+                    shown(&key)
+                )));
+            }
         }
     }
     if opts.version_id.is_some() && opts.version_time.is_some() {
@@ -587,6 +624,53 @@ mod tests {
         ] {
             assert_rejected(query, FEATURE_NOT_SUPPORTED, names);
         }
+
+        // A parameter name is echoed, but cut, as in the body form: the
+        // unknown arm and the two percent-encoding failures. (The duplicate
+        // arm can only name a known parameter here: pairs are interpreted in
+        // order, so an unknown name is rejected at its first occurrence.)
+        let long = "x".repeat(4096);
+        let cut = format!("{}…", "x".repeat(64));
+        for (query, expected) in [
+            (
+                format!("{long}=1"),
+                format!("unknown resolution option `{cut}`"),
+            ),
+            (
+                format!("{long}%zz=1"),
+                format!("parameter `{cut}` is not valid percent-encoding"),
+            ),
+            (
+                format!("{long}=%zz"),
+                format!("the value of parameter `{cut}` is not valid percent-encoding"),
+            ),
+        ] {
+            let err = parse_options(Some(&query)).expect_err("rejected");
+            let details = err.details();
+            assert_eq!(details["detail"], expected, "{query:.80}");
+            let body = serde_json::to_vec(&details).expect("serialises");
+            assert!(
+                body.len() < 256 && body.len() < query.len() / 10,
+                "the error body ({} bytes) does not grow with the query ({} bytes)",
+                body.len(),
+                query.len()
+            );
+        }
+    }
+
+    #[test]
+    fn shown_cuts_at_sixty_four_characters() {
+        assert_eq!(shown(""), "");
+        assert_eq!(shown("versionId"), "versionId");
+        let exact = "a".repeat(64);
+        assert_eq!(shown(&exact), exact);
+        assert_eq!(shown(&"a".repeat(65)), format!("{exact}…"));
+        assert_eq!(shown(&"a".repeat(1 << 20)), format!("{exact}…"));
+        // Characters, not bytes: a two-byte character counts once and is never
+        // split.
+        let accented = "é".repeat(64);
+        assert_eq!(shown(&accented), accented);
+        assert_eq!(shown(&"é".repeat(65)), format!("{accented}…"));
     }
 
     /// `noCache` has three answers: `false` (the spec default) is accepted
@@ -840,6 +924,51 @@ mod tests {
         assert_eq!(
             err.details()["detail"],
             "sidecar does not parse as sidecar data"
+        );
+        // A member name is echoed, but cut: the detail of a body whose only
+        // content is a long name is a fraction of the body, in every arm that
+        // names a member — unknown option, unknown sidecar member, duplicate.
+        let long = "x".repeat(200_000);
+        let cut = format!("{}…", "x".repeat(64));
+        for (payload, expected) in [
+            (
+                format!(r#"{{"{long}": 1}}"#),
+                format!("unknown resolution option `{cut}`"),
+            ),
+            (
+                format!(r#"{{"sidecar": {{"{long}": 1}}}}"#),
+                format!("unknown sidecar member `{cut}`"),
+            ),
+            (
+                format!(r#"{{"{long}": 1, "{long}": 2}}"#),
+                format!("member `{cut}` is given more than once"),
+            ),
+        ] {
+            let err = parse_body_options(payload.as_bytes()).expect_err("rejected");
+            let details = err.details();
+            assert_eq!(details["detail"], expected);
+            let body = serde_json::to_vec(&details).expect("serialises");
+            assert!(
+                body.len() < 256 && body.len() < payload.len() / 100,
+                "the error body ({} bytes) does not grow with the request ({} bytes)",
+                body.len(),
+                payload.len()
+            );
+        }
+        // A name of exactly the cut is shown whole; the cut is in characters.
+        let exact = "y".repeat(64);
+        let err =
+            parse_body_options(format!(r#"{{"{exact}": 1}}"#).as_bytes()).expect_err("rejected");
+        assert_eq!(
+            err.details()["detail"],
+            format!("unknown resolution option `{exact}`")
+        );
+        let accented = "é".repeat(65);
+        let err =
+            parse_body_options(format!(r#"{{"{accented}": 1}}"#).as_bytes()).expect_err("rejected");
+        assert_eq!(
+            err.details()["detail"],
+            format!("unknown resolution option `{}…`", "é".repeat(64))
         );
 
         // FEATURE_NOT_SUPPORTED for the registered-but-unimplemented pair.
