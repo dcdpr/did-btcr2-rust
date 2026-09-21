@@ -9,8 +9,11 @@
 //! to bypass the response cache this resolver keeps, which it declines with
 //! `FEATURE_NOT_SUPPORTED`, the answer the spec requires of a resolver that
 //! denies resolution without caching; any other value is malformed, so
-//! `INVALID_OPTIONS`. `expandRelativeUrls` is not implemented for any value
-//! and is `FEATURE_NOT_SUPPORTED` outright.
+//! `INVALID_OPTIONS`. Declining is not a control — the cache is a latency and
+//! upstream-quota optimisation, and an empty-body `POST` reaches the backend
+//! every time — it is simply an option the binding does not implement.
+//! `expandRelativeUrls` is not implemented for any value and is
+//! `FEATURE_NOT_SUPPORTED` outright.
 //!
 //! Every other name is rejected, not ignored: a silently dropped `versionld`
 //! (or an `accept`, which the HTTP binding carries in the header only) would
@@ -126,7 +129,7 @@ pub fn parse_options(query: Option<&str>) -> Result<ResolutionOptions, OptionsEr
                 "false" => {}
                 "true" => {
                     return Err(OptionsError::Unsupported(Problem::FeatureNotSupported(
-                        "bypassing the response cache (noCache=true) is not permitted by this resolver"
+                        "bypassing the response cache (noCache=true) is not supported by this resolver"
                             .to_string(),
                     )));
                 }
@@ -244,7 +247,7 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
                 Value::Bool(false) => {}
                 Value::Bool(true) => {
                     return Err(OptionsError::Unsupported(Problem::FeatureNotSupported(
-                        "bypassing the response cache (noCache=true) is not permitted by this resolver"
+                        "bypassing the response cache (noCache=true) is not supported by this resolver"
                             .to_string(),
                     )));
                 }

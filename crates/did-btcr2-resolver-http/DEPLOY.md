@@ -56,10 +56,15 @@ Exactly this, and nothing more:
   entries — expired entries are evicted first, then the oldest. Errors are never cached, so a
   transient Esplora fault is never pinned. `noCache=false` — the DID Resolution default, caching
   allowed — is accepted and changes nothing; `noCache=true` is answered `501 FEATURE_NOT_SUPPORTED`
-  rather than honoured (an anonymous cache bypass would be a lever against the Esplora quota);
+  rather than honoured (the binary does not implement the option; nothing more is meant by it);
   any other `noCache` value is a `400 INVALID_OPTIONS`. A `POST` (next bullet) is never served
   from the cache and never stored in it: a result computed from a caller's sidecar must not
   answer a later `GET` that supplied none.
+  The cache is a latency and Esplora-quota optimisation for a *sequential* client, not a
+  control: an empty-body `POST`, or a `GET` with a `minConf` value not yet seen, reaches
+  Esplora every time, so a caller who wants to skip the cache already can. The rate-limit
+  note above stands on that footing — the cache lowers the Esplora call count for the
+  well-behaved case and bounds nothing.
   No database, no writable filesystem beyond the journal. The cache is process memory only, so
   the process is still safe to restart at any time; the cost of a restart is one resolution per
   DID.
