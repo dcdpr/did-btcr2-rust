@@ -11,6 +11,8 @@
 //! - the submodule's `HEAD` must be the recorded pin;
 //! - an absent or unpopulated submodule is a failure naming the fix, never a
 //!   skip;
+//! - the POST binding note names every `#[test]` in `tests/post.rs` and only
+//!   those (both directions are checked);
 //! - `CONFORMANCE.md` is rendered from the table and compared to the
 //!   checked-in golden (`BLESS=1` rewrites it).
 //!
@@ -380,22 +382,32 @@ fn line_of(src: &str, at: usize) -> u32 {
 // The Rust tests a row may claim
 // ---------------------------------------------------------------------------
 
+/// The `fn` names declared with `#[test]` within the three preceding non-blank
+/// lines (a `#[should_panic]` between them is allowed), in document order.
+fn test_fn_names(src: &str) -> Vec<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, l)| {
+            let name = l.trim_start().strip_prefix("fn ")?.split('(').next()?;
+            lines[..idx]
+                .iter()
+                .rev()
+                .filter(|p| !p.trim().is_empty())
+                .take(3)
+                .any(|p| p.trim() == "#[test]")
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
 /// True when some source declares `fn {name}(` with `#[test]` within the three
 /// preceding non-blank lines.
 fn test_exists_in(sources: &[&str], name: &str) -> bool {
-    let needle = format!("fn {name}(");
-    sources.iter().any(|src| {
-        let lines: Vec<&str> = src.lines().collect();
-        lines.iter().enumerate().any(|(idx, l)| {
-            l.trim_start().starts_with(&needle)
-                && lines[..idx]
-                    .iter()
-                    .rev()
-                    .filter(|p| !p.trim().is_empty())
-                    .take(3)
-                    .any(|p| p.trim() == "#[test]")
-        })
-    })
+    sources
+        .iter()
+        .any(|src| test_fn_names(src).iter().any(|n| n == name))
 }
 
 fn test_exists(name: &str) -> bool {
@@ -418,16 +430,21 @@ fn status_cells(status: Status) -> (&'static str, String) {
 }
 
 /// The binding's own POST rows in `tests/post.rs`, named by the third binding note.
-/// `binding_note_names_existing_post_tests` fails when one is renamed away.
+/// `binding_note_names_existing_post_tests` fails when one is renamed away;
+/// `every_post_test_is_in_the_binding_note` fails when a POST test is added
+/// without being named here.
 const POST_TESTS: &[&str] = &[
     "sidecar_body_reaches_the_resolver_typed",
+    "post_percent_encoded_did_matches_raw",
     "post_rejections_are_400_or_501_before_the_resolver",
+    "sidecar_in_a_get_query_is_400_invalid_options",
     "post_content_type_gate_is_bodiless_415",
     "post_with_query_string_is_400_invalid_options",
     "post_empty_body_resolves_like_get",
     "post_deactivated_result_is_410",
     "post_accept_negotiation_applies",
     "clean_fixture_sidecar_resolves_through_the_binding",
+    "post_error_from_the_resolver_keeps_the_get_mapping",
 ];
 
 /// The 405 row in `tests/conformance.rs` the note points at.
@@ -708,6 +725,25 @@ fn binding_note_names_existing_post_tests() {
     );
 }
 
+#[test]
+fn every_post_test_is_in_the_binding_note() {
+    let declared = test_fn_names(include_str!("post.rs"));
+    let unlisted: Vec<&String> = declared
+        .iter()
+        .filter(|n| !POST_TESTS.contains(&n.as_str()))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "`#[test] fn`s in tests/post.rs the POST binding note does not name — add them to \
+         POST_TESTS and re-bless CONFORMANCE.md: {unlisted:#?}"
+    );
+    assert_eq!(
+        POST_TESTS.len(),
+        declared.len(),
+        "POST_TESTS and tests/post.rs list the same tests"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The guard's own negatives
 // ---------------------------------------------------------------------------
@@ -736,6 +772,13 @@ fn test_exists_rejects_a_bogus_name_and_accepts_a_real_one() {
     let src = "fn helper() {}\n#[test]\nfn real() {}\n";
     assert!(test_exists_in(&[src], "real"));
     assert!(!test_exists_in(&[src], "helper"), "no #[test] above helper");
+}
+
+#[test]
+fn test_fn_names_takes_annotated_fns_in_order() {
+    let src = "fn helper() {}\n#[test]\nfn real() {}\n\n#[test]\n#[should_panic(expected = \"x\")]\nfn panics() {}\npub fn not_a_test() {}\n";
+    assert_eq!(test_fn_names(src), ["real", "panics"]);
+    assert!(test_fn_names("fn a() {}\nfn b() {}\n").is_empty());
 }
 
 #[test]
