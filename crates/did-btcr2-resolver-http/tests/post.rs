@@ -350,7 +350,8 @@ fn post_percent_encoded_did_matches_raw() {
 /// The query string's strictness applies to the body: a body that is not a
 /// JSON object, a malformed or zero `versionId`/`minConf` (number or string),
 /// `versionId` with `versionTime`, `accept` in the body, an unknown key, a
-/// `sidecar` that is not sidecar data — all 400 `INVALID_OPTIONS`;
+/// `sidecar` that is not sidecar data or that carries an unknown member — all
+/// 400 `INVALID_OPTIONS`;
 /// `noCache: true` and `expandRelativeUrls` — 501 `FEATURE_NOT_SUPPORTED`.
 /// Every row carries the problem body and never reaches the resolver. The
 /// rejected value is never echoed; the controls show a digit string and
@@ -395,6 +396,12 @@ fn post_rejections_are_400_or_501_before_the_resolver() {
             400,
             INVALID_OPTIONS,
             "sidecar",
+        ),
+        (
+            "{\"sidecar\": {\"update\": []}}",
+            400,
+            INVALID_OPTIONS,
+            "unknown sidecar member `update`",
         ),
         ("{\"noCache\": true}", 501, FEATURE_NOT_SUPPORTED, "noCache"),
         (

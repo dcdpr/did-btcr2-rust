@@ -31,7 +31,10 @@
 //! of decimal digits, `versionTime` as a string, `noCache` as a boolean —
 //! plus `sidecar`, the did:btcr2 method option carrying spec-form sidecar
 //! data. A body that is not a JSON object, or a `sidecar` that is not sidecar
-//! data, is `INVALID_OPTIONS`.
+//! data, is `INVALID_OPTIONS`. The unknown-name rule reaches into `sidecar`
+//! too: its members are `genesisDocument`, `updates`, `casUpdates` and
+//! `smtProofs`, and any other is rejected — the core's deserialiser would
+//! ignore it, and a mis-keyed `update` would resolve without the updates.
 
 use std::collections::HashSet;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -69,6 +72,12 @@ impl OptionsError {
 fn invalid(detail: String) -> OptionsError {
     OptionsError::Invalid(Btcr2Error::InvalidOptions(detail))
 }
+
+/// The members of spec-form sidecar data, by their wire names — the exact set
+/// the core's `SidecarData` deserialiser reads (`did_btcr2::document`, the
+/// private `SidecarDataWire`). The core ignores any other member; the binding
+/// rejects it.
+const SIDECAR_MEMBERS: [&str; 4] = ["genesisDocument", "updates", "casUpdates", "smtProofs"];
 
 /// Parse the query string into the core's typed options. Accepted:
 /// `versionId` (positive integer), `versionTime` (RFC 3339, normalised to
@@ -269,6 +278,17 @@ pub fn parse_body_options(body: &[u8]) -> Result<BodyOptions, OptionsError> {
                 ));
             }
             "sidecar" => {
+                // The core's wire type tolerates unknown members (every one
+                // is optional, none is denied), so the binding applies the
+                // module's rule itself: a mis-keyed `update` or `Updates`
+                // would otherwise parse as an empty sidecar and the anchored
+                // DID would fail on the chain, not on the typo.
+                if let Some(unknown) = value
+                    .as_object()
+                    .and_then(|o| o.keys().find(|k| !SIDECAR_MEMBERS.contains(&k.as_str())))
+                {
+                    return Err(invalid(format!("unknown sidecar member `{unknown}`")));
+                }
                 // The count is taken from the raw JSON: the core's `updates`
                 // is not public, and its deserialiser fails the whole parse
                 // on any bad element, so on success the raw length is the
@@ -636,6 +656,11 @@ mod tests {
                 "sidecar",
             ),
             ("{\"sidecar\": {\"updates\": 3}}", "sidecar"),
+            // A mis-keyed sidecar member is rejected by name, not parsed as
+            // an empty sidecar.
+            ("{\"sidecar\": {\"update\": []}}", "update"),
+            ("{\"sidecar\": {\"Updates\": []}}", "Updates"),
+            ("{\"sidecar\": {\"updates\": [], \"extra\": 1}}", "extra"),
             (
                 "{\"versionId\": 1, \"versionTime\": \"2026-01-02T03:04:05Z\"}",
                 "versionId",
@@ -643,6 +668,14 @@ mod tests {
         ] {
             assert_body_rejected(body, INVALID_OPTIONS, names);
         }
+
+        // Every wire member the core reads is accepted by name — the reject
+        // list above is the complement of exactly this set.
+        let parsed = body(
+            r#"{"sidecar": {"genesisDocument": null, "updates": [], "casUpdates": null, "smtProofs": null}}"#,
+        );
+        assert!(parsed.opts.sidecar_data.is_some());
+        assert_eq!(parsed.sidecar_updates, Some(0));
 
         // The pair's detail is the core's, byte for byte.
         let err = parse_body_options(br#"{"versionId": 1, "versionTime": "2026-01-02T03:04:05Z"}"#)
