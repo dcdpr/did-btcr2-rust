@@ -45,7 +45,14 @@ of free disk for the unpacked regtest chain.
    vectors. Leave the stack **running**.
 2. **Part 2** — capture the **three** vendor mutinynet vectors. Independent of
    Polar, but do it in the same sitting.
-3. **Part 3** — mint the **two** scenarios on the same running Polar chain.
+3. **Part 3** — mint the scenarios. As written it is the first rung, on the
+   same running Polar chain, and today only `poisoned` (Scenario B) is minted
+   there: `clean` has climbed to mutinynet, and the committed
+   `fixtures/chain/minted/clean-rotating-beacons.json` is that mutinynet
+   capture. Scenario A's regtest command is kept as the recipe for a fresh
+   first rung; run as written it writes over the mutinynet capture at the same
+   path. To re-mint `clean` after a mutinynet reset, use the command under
+   "Climbing to a public chain".
 4. **Part 4** — tear the stack down, delete the unpacked chain, check what
    landed.
 
@@ -356,6 +363,18 @@ sequences correctly if it scans the added beacon before it judges the next
 tuple: a replayed resolve issues a second round of requests naming that
 address, and the round carries a real announcement.
 
+> **The committed `clean` capture is the mutinynet mint, not a regtest one**
+> (see "The minted DIDs" and "Climbing to a public chain" at the end of this
+> part). The steps below are the first-rung recipe, kept for a fresh regtest
+> mint. The command in step 2 writes
+> `fixtures/chain/minted/clean-rotating-beacons.json`; run as written it
+> replaces the mutinynet capture at that path with a regtest one, and the
+> fixture guard in `crates/did-btcr2-resolver-http/tests/fixtures.rs` fails
+> until `crates/did-btcr2-resolver-http/FIXTURES.md` §7.2 and "The minted
+> DIDs" below describe the new file. To re-mint `clean` after a mutinynet
+> reset, use the mutinynet command under "Climbing to a public chain" instead;
+> a new capture there needs the same two records.
+
 #### 1. Generate a throwaway key, outside both repositories
 
 ```sh
@@ -573,7 +592,10 @@ change.
 
 `clean` has climbed this rung: the command above ran on mutinynet on 2026-09-21
 (the entry under "The minted DIDs"), asking 6 000 sats per announcing beacon
-(`--fee` plus a 5 000 sat margin) and finishing in about five minutes.
+(`--fee` plus a 5 000 sat margin) and finishing in about five minutes. It is
+the command to re-run after a mutinynet reset, under a fresh key and state
+file; the new capture needs a new "The minted DIDs" entry and a new
+`FIXTURES.md` §7.2 record, and the fixture guard fails until it has them.
 `poisoned` is still the regtest mint.
 
 ---
