@@ -22,6 +22,8 @@ Exactly this, and nothing more:
   (`x86_64-unknown-linux-musl`; see §3) and copied to the host. No toolchain, no git, no
   container runtime, no deploy key on the host.
 - **One systemd unit** (§5) running it as an unprivileged user with `Restart=on-failure`.
+  It is sandboxed — no capabilities, read-only filesystem, seccomp-filtered — and §5 records the
+  reasoning, including what the block deliberately leaves out.
 - **Loopback only:** `--bind 127.0.0.1:8080`. The binary speaks plain HTTP and is never exposed
   directly.
 - **A TLS-terminating reverse proxy in front** that forwards the request URI byte-for-byte —
@@ -197,6 +199,7 @@ Verification line: `sha256sum` on the droplet copy equals `sha256sum` on the lap
 Description=did:btcr2 DID Resolution HTTP GET/POST binding (loopback; TLS via Caddy)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 User=btcr2
@@ -204,6 +207,43 @@ Group=btcr2
 ExecStart=/usr/local/bin/did-btcr2-resolver-http --bind 127.0.0.1:8080
 Restart=on-failure
 RestartSec=2
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+# The musl binary of §3 needs no AF_UNIX. The gnu fallback may: glibc's resolver
+# can reach for nscd over a unix socket, and DNS then fails under this sandbox.
+RestrictAddressFamilies=AF_INET AF_INET6
+SocketBindAllow=tcp:8080
+SocketBindDeny=any
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+MemoryMax=256M
+TasksMax=32
 
 [Install]
 WantedBy=multi-user.target
@@ -215,6 +255,68 @@ curl -s http://127.0.0.1:8080/health     # {"status":"ok"}
 ```
 Verification line: `ss -ltn` lists `127.0.0.1:8080` and no `0.0.0.0:8080`; the journal shows
 `listening on 127.0.0.1:8080`.
+
+**Why the sandbox block can be this aggressive.** The binary's complete runtime requirement set
+is: listen on TCP `127.0.0.1:8080`; connect outbound on TCP 443 and resolve DNS; read
+`/etc/resolv.conf`; write stderr; run five threads (one main plus `--threads`, default 4); call
+`getrandom()` for TLS handshakes. That is the whole set — it reads no files at runtime, because
+`webpki-roots` compiles the CA set into the binary and leaves no `/etc/ssl` dependency to
+satisfy. A requirement set that small is why nothing in the block is a guess.
+`ProtectSystem=strict` makes the filesystem read-only, not inaccessible, so `/etc/resolv.conf`
+still reads; the process writes nothing but stderr, an fd systemd already hands it. **No
+`ReadWritePaths` entry is needed anywhere.**
+
+Directive by directive, where it is not self-evident:
+
+- `CapabilityBoundingSet=` and `AmbientCapabilities=` are empty because the process needs no
+  capability at all: 8080 is above 1024, so binding it takes none.
+- `SocketBindDeny=any` with `SocketBindAllow=tcp:8080` constrains `bind()` only. Outbound
+  `connect()` to Esplora on 443 is untouched by it; this is not an egress control.
+- `RestrictAddressFamilies=AF_INET AF_INET6` omits `AF_UNIX`, which is correct for the musl
+  build of §3: musl's resolver reads `/etc/resolv.conf` directly, with no NSS and no nscd. Ship
+  the gnu fallback binary instead and DNS may need `AF_UNIX` back — the unit carries that
+  warning inline, beside the directive.
+- `PrivateUsers` was considered and omitted: a thin gain over a process that already holds no
+  capabilities, and the directive most likely to produce a surprise. `systemd-analyze security`
+  will report its absence. That finding is expected, not a defect to repair.
+- `StartLimitIntervalSec=0` removes the restart limit deliberately. The binary has a known abort
+  path — §6, the drain of a declared `Content-Length` the client never sent — and systemd's
+  default of five starts in ten seconds would latch the unit `failed` permanently on it. A
+  silently dead endpoint is the worst outcome for a host the W3C suite polls (§9); a unit that
+  keeps restarting is not.
+- `MemoryMax=256M` and `TasksMax=32` are sized against a few MB idle and four workers each
+  bounded at 1 MiB of body.
+
+> **`MemoryMax` is not a mitigation for the abort in §6.** That allocation is sized by the
+> declared `Content-Length` and fails at `mmap` on address-space grounds whatever the cgroup
+> limit says. What keeps the abort unreachable is Caddy's `@declared_oversize` matcher in §6.
+> `MemoryMax` bounds aggregate growth across the four workers, nothing more.
+
+**Install the full unit file above** and `systemctl daemon-reload`. Do not add the sandbox as a
+`systemctl edit` drop-in: this file is the reproducible record of the host, and a drop-in leaves
+half the unit in a place only the host knows about.
+
+Verify it in two stages — the exposure score first, then the three functional checks — because
+neither answers the other's question: a score says nothing about whether the service still
+works, and a sandbox that breaks DNS looks healthy until a real request arrives.
+
+- `systemd-analyze security did-btcr2-resolver-http`, run once before the change and once after,
+  is the exposure evidence: compare the two exposure levels and the per-directive findings, and
+  keep the pair. `PrivateUsers` appears among the "after" findings, by the decision above.
+- `curl -sS http://127.0.0.1:8080/health` on the droplet → `{"status":"ok"}`: the process starts
+  and binds under the sandbox.
+- A full resolution through the public host, in §7's form
+  (`curl -sS -i -H 'Accept: application/did-resolution' "https://$HOST/1.0/identifiers/$DID"` →
+  `200`). This is the check that matters: it is the only one that exercises DNS, outbound TLS
+  and the thread pool together, and the sandbox could have broken any of the three.
+- `journalctl -u did-btcr2-resolver-http` for that request: the request line is present and
+  carries the expected `"status"`, and no `Operation not permitted` or seccomp denial precedes
+  it. `SystemCallErrorNumber=EPERM` means a filtered call fails rather than killing the process,
+  so a `SystemCallFilter` miss surfaces as a 500 with an `EPERM` in the chain, not as a crash.
+
+Verification line: `systemd-analyze security did-btcr2-resolver-http` reports no finding beyond
+the expected `PrivateUsers` one, and the §7 resolution answers `200` with a journal line free of
+permission denials.
 
 ## 6. Caddy
 
