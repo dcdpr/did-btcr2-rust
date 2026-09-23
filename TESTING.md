@@ -543,7 +543,7 @@ To check the submodule out, see the one-time setup in
 ## 9. The W3C resolution suite (`w3c-resolution-suite/`)
 
 `w3c/did-resolution-test-suite` is vendored as a git submodule pinned at
-`2649fdf719beadbd3c684d358eea23c3c2e514fe`. It is excluded from the crates.io
+`c3fb2a88585da1dd6167dccd59a84700fa2383ed`. It is excluded from the crates.io
 package by the root `Cargo.toml` `include` allowlist; `cargo package --list`
 does not mention it.
 
@@ -565,8 +565,9 @@ does not read the submodule):
 - **`tests/fixtures.rs`** — the fixture guard. It parses the two mainnet DIDs
   out of `crates/did-btcr2-resolver-http/w3c/localConfig.cjs` (compiled in with
   `include_str!`) and asserts mainnet / version 1 / `k1` for `valid` and
-  mainnet / version 1 / `x1` for `notFound`, that `notFound` is a bare string
-  (the pinned suite reads it as a scalar), that the endpoint is the resolver
+  mainnet / version 1 / `x1` for `notFound`, that `notFound` is the README's
+  one-entry array carrying the `x1` under a `did` key (the shape the pinned
+  suite iterates), that the endpoint is the resolver
   path, and that both DIDs appear verbatim in `FIXTURES.md`, whose mainnet part
   must hold no 64-hex token. Its `FIXTURES.md` §7 rows cover the funded
   mutinynet demo DIDs: exactly two, mutinynet / version 1 / `k1`, every 64-hex

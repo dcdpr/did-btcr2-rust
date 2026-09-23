@@ -9,8 +9,9 @@
 //! - the `valid` one is key-based (`k1`) and the `notFound` one external (`x1`);
 //! - both are mainnet, version 1 (the layout byte is `0x00` under either nibble
 //!   ordering, so no identifier-layout change can reach them);
-//! - `notFound` is a bare string, because the pinned suite reads it as a scalar
-//!   and would request `/1.0/identifiers/[object Object]` for the README's array;
+//! - `notFound` is the README's array of `{did, resolutionOptions}` objects, the
+//!   shape the pinned suite iterates; the guard holds it to one entry, carrying
+//!   the x1 under a `did` key, so a dropped key or a swapped identifier fails here;
 //! - the `endpoint` has the resolver-path shape (`https://…/1.0/identifiers`, no
 //!   trailing slash) — the shape, not a literal host, so a host move is a config
 //!   edit with nothing to change here. The config is compiled in (`include_str!`),
@@ -181,26 +182,41 @@ fn valid_is_the_k1_and_not_found_is_the_x1() {
     assert!(not_found_at < x1_at, "the x1 lies after `notFound`");
 }
 
+/// A drift guard on the `notFound` entry's identifier and shape, not a JSON-syntax
+/// check: the suite iterates the entry and destructures `{did, resolutionOptions}`,
+/// so dropping the `did` key, adding a second entry or swapping in the k1 would each
+/// change which DID the 404 row requests while leaving the file valid JavaScript.
 #[test]
-fn not_found_is_a_bare_string_not_an_array() {
+fn not_found_is_the_readme_array_of_did_objects() {
     let (_, (x1_token, _)) = fixtures();
     let rest = after(CONFIG, "\"notFound\":").trim_start();
     assert!(
-        rest.starts_with('"'),
-        "`notFound` is a string, not an array or object: {:?}",
+        rest.starts_with('['),
+        "`notFound` is the README's array, not a bare string: {:?}",
         &rest[..rest.len().min(20)]
     );
-    let next = btcr2_dids(rest)
-        .first()
-        .copied()
-        .expect("a DID after `notFound`");
-    assert_eq!(next, x1_token, "the token right after `notFound` is the x1");
-    // Between `"notFound"` and the closing brace of `supportedDids` there is no `[`.
-    let supported = after(CONFIG, "\"notFound\"");
-    let close = supported.find('}').expect("`supportedDids` closes");
+    let entries = &rest[1..rest.find(']').expect("the `notFound` array closes")];
+
+    let dids = btcr2_dids(entries);
+    assert_eq!(
+        dids,
+        vec![x1_token],
+        "the `notFound` array holds exactly one DID, the x1"
+    );
+    assert_eq!(
+        entries.matches("\"did\":").count(),
+        1,
+        "the `notFound` array holds exactly one entry"
+    );
+
+    let value = after(entries, "\"did\":").trim_start();
+    let value = value
+        .strip_prefix('"')
+        .expect("the entry's `did` value is a string");
     assert!(
-        !supported[..close].contains('['),
-        "no array between `notFound` and the end of `supportedDids`"
+        value.starts_with(x1_token) && value[x1_token.len()..].starts_with('"'),
+        "the x1 is the entry's `did` value, not some other field: {:?}",
+        &value[..value.len().min(80)]
     );
 }
 

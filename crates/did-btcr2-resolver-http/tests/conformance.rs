@@ -1,7 +1,7 @@
 //! In-process conformance suite for the GET binding, plus the binding's own rules.
 //!
 //! Mirrors `w3c/did-resolution-test-suite` at
-//! `2649fdf719beadbd3c684d358eea23c3c2e514fe`: one `#[test]` per `it()` in
+//! `c3fb2a88585da1dd6167dccd59a84700fa2383ed`: one `#[test]` per `it()` in
 //! `tests/4-did-resolution.js` and `tests/10-bindings.js` that has in-process
 //! behaviour, the two result-shape helpers of `tests/assertions.js`, and one
 //! test per rule the binding itself adds (bodiless 404/405, the method set
@@ -527,7 +527,7 @@ fn options_reach_the_resolver_typed() {
     assert_eq!(seen[0].2, NonZeroU32::new(1));
 }
 
-/// 10-bindings.js:243 "REPRESENTATION_NOT_SUPPORTED error MUST map to HTTP
+/// 10-bindings.js:246 "REPRESENTATION_NOT_SUPPORTED error MUST map to HTTP
 /// status 406" — the resolver is never consulted, and the detail lists the
 /// four media types on offer.
 #[test]
@@ -667,7 +667,7 @@ fn method_not_supported_maps_to_501() {
     assert_error_result(&resp, METHOD_NOT_SUPPORTED);
 }
 
-/// 10-bindings.js:228 "NOT_FOUND error MUST map to HTTP status 404" —
+/// 10-bindings.js:232 "NOT_FOUND error MUST map to HTTP status 404" —
 /// through every wrapping the facade emits for a `NotFound`:
 /// - `Error::Core(document::Error::Btcr2Error(NotFound))`: genesis-document
 ///   retrieval inside `InitialDocument::from_did` (`document.rs`, the
@@ -713,7 +713,7 @@ fn not_found_maps_to_404() {
     }
 }
 
-/// 10-bindings.js:269 "If deactivated metadata property is true, HTTP
+/// 10-bindings.js:276 "If deactivated metadata property is true, HTTP
 /// response status MUST be 410".
 #[test]
 fn deactivated_document_maps_to_410() {

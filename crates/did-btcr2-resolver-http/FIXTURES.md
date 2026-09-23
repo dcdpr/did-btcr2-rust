@@ -115,17 +115,19 @@ and the `NOT_FOUND` type URI present verbatim.
 
 ## 5. How the suite sees them
 
-`w3c/localConfig.cjs` lists `valid` as the README's array of `{did, resolutionOptions}` objects
-and `notFound` as a **bare string**. At pin `2649fdf7`, `tests/10-bindings.js:38` reads
-`supportedDids.notFound` as a scalar and line `231` builds `${endpoint}/${notFoundDid}`; the
-README's array form would request `/1.0/identifiers/[object Object]` and fail the row for a
-reason that is not the resolver's. Upstream PR #18 (open, unmerged) changes the read to the
-array form; the entry flips when the pin moves, together with a `CONFORMANCE.md` re-curation.
+`w3c/localConfig.cjs` lists `valid` and `notFound` alike, each as the README's array of
+`{did, resolutionOptions}` objects. That is the shape the suite reads at pin `c3fb2a88`:
+upstream PR #18 is merged there, and `tests/10-bindings.js:38` now defaults the entry to `[]`
+and iterates it, destructuring `{did, resolutionOptions}` and routing each through
+`addQueryParametersToUrl`. A bare DID string is truthy but has no `.forEach`, so leaving one
+in place would throw and take out the whole binding column rather than one row — which is why
+the pin bump and this entry's shape have to move together, with a `CONFORMANCE.md` re-curation.
 
 `tests/fixtures.rs` parses both DIDs out of the config and asserts mainnet / version 1 / `k1`
 and mainnet / version 1 / `x1`, that both appear verbatim in this file, that `notFound` is a
-scalar, and that the endpoint has the resolver-path shape (`https://…/1.0/identifiers`, no
-trailing slash). A typo in either file fails the build, not the weekly report.
+one-entry array carrying the `x1` under a `did` key, and that the endpoint has the
+resolver-path shape (`https://…/1.0/identifiers`, no trailing slash). A typo in either file
+fails the build, not the weekly report.
 
 ## 6. What must never happen
 

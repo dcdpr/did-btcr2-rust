@@ -445,7 +445,7 @@ gh run watch --repo danpape/btcr2-shakedown && gh run view --repo danpape/btcr2-
 
 ## 9. Validate a deployment with the W3C suite
 
-The real `w3c/did-resolution-test-suite` (vendored at `w3c-resolution-suite/`, pin `2649fdf7`) runs
+The real `w3c/did-resolution-test-suite` (vendored at `w3c-resolution-suite/`, pin `c3fb2a88`) runs
 against a host from a `localConfig.cjs` at the suite root. The committed config points at the
 shakedown host and names the two mainnet fixtures in `FIXTURES.md`; with it present only that
 implementation runs. The suite is a submodule — the copy below is never committed inside it.

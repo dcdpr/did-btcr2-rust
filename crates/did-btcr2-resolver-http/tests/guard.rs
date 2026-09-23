@@ -23,7 +23,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// The vendored `w3c/did-resolution-test-suite` commit.
-const PIN: &str = "2649fdf719beadbd3c684d358eea23c3c2e514fe";
+const PIN: &str = "c3fb2a88585da1dd6167dccd59a84700fa2383ed";
 const SUITE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../w3c-resolution-suite");
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/CONFORMANCE.md");
 
@@ -208,67 +208,67 @@ const CURATED: &[Row] = &[
     },
     Row {
         file: BINDINGS_JS,
-        line: 228,
+        line: 232,
         title: "NOT_FOUND error MUST map to HTTP status 404",
         status: Status::Covered("not_found_maps_to_404"),
     },
     Row {
         file: BINDINGS_JS,
-        line: 243,
+        line: 246,
         title: "REPRESENTATION_NOT_SUPPORTED error MUST map to HTTP status 406",
         status: Status::Covered("unsupported_representation_maps_to_406"),
     },
     Row {
         file: BINDINGS_JS,
-        line: 269,
+        line: 276,
         title: "If deactivated metadata property is true, HTTP response status MUST be 410",
         status: Status::Covered("deactivated_document_maps_to_410"),
     },
     Row {
         file: BINDINGS_JS,
-        line: 300,
+        line: 306,
         title: "If Accept is application/did-url-dereferencing, HTTP body MUST contain a DID URL dereferencing result (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 320,
+        line: 326,
         title: "If DID URL dereferencing returns a non-uri-list contentStream, HTTP status MUST be 200 (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 337,
+        line: 343,
         title: "If DID URL dereferencing succeeds, Content-Type MUST equal contentType in dereferencingMetadata (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 362,
+        line: 368,
         title: "HTTP response body MUST contain the contentStream from DID URL dereferencing (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 379,
+        line: 385,
         title: "If Accept is set to a content media type, response body MUST contain only the contentStream (not the full dereferencing result) (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 413,
+        line: 419,
         title: "If contentType is text/uri-list, HTTP response status MUST be 303 (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 427,
+        line: 433,
         title: "If 303 response, HTTP response MUST contain a Location header with the selected DID service endpoint URL (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },
     Row {
         file: BINDINGS_JS,
-        line: 443,
+        line: 449,
         title: "If 303 response, HTTP response body MUST be empty (${didUrl})",
         status: Status::NotApplicable(DEREFERENCING),
     },

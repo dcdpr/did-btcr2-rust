@@ -1,6 +1,6 @@
 # did-btcr2-resolver-http conformance to the W3C DID Resolution test suite
 
-This document is rendered from the curated table in `tests/guard.rs` against `w3c/did-resolution-test-suite @ 2649fdf719beadbd3c684d358eea23c3c2e514fe`, vendored as the `w3c-resolution-suite` submodule. Regenerate with `BLESS=1 cargo test -p did-btcr2-resolver-http --test guard`.
+This document is rendered from the curated table in `tests/guard.rs` against `w3c/did-resolution-test-suite @ c3fb2a88585da1dd6167dccd59a84700fa2383ed`, vendored as the `w3c-resolution-suite` submodule. Regenerate with `BLESS=1 cargo test -p did-btcr2-resolver-http --test guard`.
 
 Every `it()` in `tests/4-did-resolution.js` and `tests/10-bindings.js`, and each exported helper of `tests/assertions.js`, is a row. The guard fails when a Covered row names a test that does not exist, when an upstream `it()` has no row, when the per-file counts drift, when the submodule is not at the pin, or when the submodule is not checked out.
 
@@ -50,17 +50,17 @@ Every `it()` in `tests/4-did-resolution.js` and `tests/10-bindings.js`, and each
 | 178 | GET binding: resolver MUST accept URL-encoded DIDs (required because clients MUST URL-encode when resolution options other than accept are provided) | Covered | `percent_encoded_did_resolves_like_the_raw_form` |
 | 200 | INVALID_DID error MUST map to HTTP status 400 (input: "${badDid}") | Covered | `invalid_did_maps_to_400` |
 | 213 | METHOD_NOT_SUPPORTED error MUST map to HTTP status 501 | Covered | `method_not_supported_maps_to_501` |
-| 228 | NOT_FOUND error MUST map to HTTP status 404 | Covered | `not_found_maps_to_404` |
-| 243 | REPRESENTATION_NOT_SUPPORTED error MUST map to HTTP status 406 | Covered | `unsupported_representation_maps_to_406` |
-| 269 | If deactivated metadata property is true, HTTP response status MUST be 410 | Covered | `deactivated_document_maps_to_410` |
-| 300 | If Accept is application/did-url-dereferencing, HTTP body MUST contain a DID URL dereferencing result (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 320 | If DID URL dereferencing returns a non-uri-list contentStream, HTTP status MUST be 200 (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 337 | If DID URL dereferencing succeeds, Content-Type MUST equal contentType in dereferencingMetadata (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 362 | HTTP response body MUST contain the contentStream from DID URL dereferencing (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 379 | If Accept is set to a content media type, response body MUST contain only the contentStream (not the full dereferencing result) (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 413 | If contentType is text/uri-list, HTTP response status MUST be 303 (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 427 | If 303 response, HTTP response MUST contain a Location header with the selected DID service endpoint URL (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
-| 443 | If 303 response, HTTP response body MUST be empty (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 232 | NOT_FOUND error MUST map to HTTP status 404 | Covered | `not_found_maps_to_404` |
+| 246 | REPRESENTATION_NOT_SUPPORTED error MUST map to HTTP status 406 | Covered | `unsupported_representation_maps_to_406` |
+| 276 | If deactivated metadata property is true, HTTP response status MUST be 410 | Covered | `deactivated_document_maps_to_410` |
+| 306 | If Accept is application/did-url-dereferencing, HTTP body MUST contain a DID URL dereferencing result (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 326 | If DID URL dereferencing returns a non-uri-list contentStream, HTTP status MUST be 200 (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 343 | If DID URL dereferencing succeeds, Content-Type MUST equal contentType in dereferencingMetadata (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 368 | HTTP response body MUST contain the contentStream from DID URL dereferencing (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 385 | If Accept is set to a content media type, response body MUST contain only the contentStream (not the full dereferencing result) (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 419 | If contentType is text/uri-list, HTTP response status MUST be 303 (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 433 | If 303 response, HTTP response MUST contain a Location header with the selected DID service endpoint URL (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
+| 449 | If 303 response, HTTP response body MUST be empty (${didUrl}) | Not applicable | DID URL dereferencing is not implemented; a DID URL on the resolver path answers 501 FEATURE_NOT_SUPPORTED (test did_url_segment_is_501_feature_not_supported) |
 
 ### `tests/assertions.js`
 
