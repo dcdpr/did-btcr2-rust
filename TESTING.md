@@ -40,7 +40,7 @@ the minted `clean` fixture and the `chain-capture` RUNBOOK at compile time.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 362 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 371 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 64 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
 | `chain-capture` | 185 |

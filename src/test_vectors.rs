@@ -121,13 +121,16 @@ pub(crate) struct CapturedSignal {
 impl ChainFixture {
     /// The signal carrying the most-recently-applied update — the one
     /// `confirmations` is computed from (`resolver.rs`, the
-    /// `applied_block_height` overwrite).
+    /// `current_block_height` set when an update applies).
     ///
     /// Derived the way the RESOLVER derives it: the signal announcing the update
     /// with the highest `targetVersionId`, and — where that update was announced
-    /// more than once — the lowest block among them, because the resolver folds a
-    /// duplicate announcement to the earliest height. The capture-time gate picks
-    /// the same signal the same way.
+    /// more than once — the lowest block among them, because the ascending
+    /// (targetVersionId, block height) sort applies the lowest-height
+    /// announcement of an update first and the resolver's height does not move
+    /// on a duplicate. This assumes no lower announcement of the last update
+    /// sits on a beacon scanned after it applied (Find Beacon Signals would not
+    /// find it). The capture-time gate picks the same signal the same way.
     ///
     /// A fixture that carries no sidecar of its own (every vendor row: the
     /// sidecar lives in the test-suite tree) falls back to the highest block.

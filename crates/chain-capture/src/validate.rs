@@ -371,7 +371,11 @@ pub fn validate(
 /// The announcement whose height the resolver's `confirmations` is measured
 /// from: the one carrying the update with the highest `targetVersionId` and,
 /// where that update was announced more than once, the LOWEST block height —
-/// because the resolver folds a duplicate announcement to the minimum height.
+/// because the ascending (targetVersionId, block height) sort applies the
+/// lowest-height announcement of an update first and the resolver's height does
+/// not move on a duplicate. This assumes no lower announcement of the last
+/// update sits on a beacon scanned after it applied (Find Beacon Signals would
+/// not find it).
 fn applied_signal<'a>(
     updates: &[SidecarUpdate],
     scanned: &'a [ScannedSignal],
@@ -738,9 +742,9 @@ mod tests {
     fn validate_measures_confirmations_from_the_lowest_height_of_a_repeated_announcement() {
         let target = target(sidecar(vec![update(2, "a")]), Some(93));
         let hashes = update_hashes("v", &target.sidecar).expect("hashes");
-        // The same announcement mined twice: the resolver folds a duplicate to
-        // the lower height, so the confirmations must be measured from 120, not
-        // from 150.
+        // The same announcement mined twice: the resolver applies the
+        // lower-height one first and a duplicate does not move its height, so
+        // the confirmations must be measured from 120, not from 150.
         let addresses = bodies(&[(
             "bcrt1qbeacon",
             vec![

@@ -135,13 +135,14 @@ pub struct Resolver<T = ()> {
     /// (data-structures.md "DID Resolution Metadata"):
     /// `resolutionOptions.accept`, or `application/did` when unset.
     content_type: String,
-    /// Block height of the MOST-RECENTLY-APPLIED unique update, the basis for
-    /// `confirmations` (resolve.md:38,57). Overwritten on each unique apply; under
-    /// the ascending (target_version_id, block_height) sort this ends as the
-    /// highest-version applied update's height. The lower-height dedup fold-in
-    /// (resolve.md:57 footnote 2) survives only as a defensive guard in the
-    /// duplicate branch. `None` until the first update is applied.
-    applied_block_height: Option<u32>,
+    /// The spec's `current_block_height` (resolve.md:39): the block height of
+    /// the most recently applied update, set in "Apply `update`"
+    /// (resolve.md:228). It is the basis for both `confirmations` and the
+    /// Find Beacon Signals height condition (resolve.md:134). `None` until an
+    /// update applies, which the filter reads as the spec's initial `0` and
+    /// `terminal_state` reports as `confirmations = 0` — height 0 is a real
+    /// block height, hence the `Option`.
+    current_block_height: Option<u32>,
     rpc_host: String,
     request_cache: HashSet<esploda::http::Uri>,
     /// `mediantime` of confirming blocks, fetched for updates whose proof
@@ -205,7 +206,7 @@ impl Resolver {
             chain_tip_height,
             min_conf,
             content_type,
-            applied_block_height: None,
+            current_block_height: None,
             rpc_host,
             request_cache: HashSet::new(),
             block_mediantimes: HashMap::new(),
@@ -388,8 +389,7 @@ impl Resolver {
             // Address must still be a beacon of the document AT THIS MOMENT —
             // an update applied earlier in this pool may have removed it.
             // Ignored outright: no versionTime gate (step 5), no
-            // confirmations (step 6), no targetVersionId check (step 7), so
-            // neither a duplicate nor a LATE_PUBLISHING outcome can come from
+            // targetVersionId check (step 6), so neither a duplicate nor a LATE_PUBLISHING outcome can come from
             // it. A key that once controlled a removed beacon cannot advance
             // the document past the version that removed it.
             if !self
@@ -411,24 +411,12 @@ impl Resolver {
                 // would grow the history out from under confirm_duplicate
                 // and displace a later version's entry, turning a benign
                 // duplicate signal into a false LATE_PUBLISHING.
+                // A duplicate of the applied update can never lower
+                // `current_block_height`: within a pool the ascending sort
+                // applies the lowest announcement first, and one from a
+                // beacon scanned later is at or above that height by the
+                // Find Beacon Signals height condition.
                 update.confirm_duplicate(&self.update_hash_history)?;
-
-                // Dedup of the SAME announcement (resolve.md:57 footnote 2):
-                // `confirmations` derives from the LOWEST block among the
-                // announcements of the applied update. Within one round the
-                // ascending (target_version_id, block_height) sort makes the
-                // lowest height the one applied, so this min() is a no-op —
-                // but a duplicate can arrive in a LATER round, from a beacon
-                // the applied update itself introduced, at a lower height
-                // than the announcement that was applied. Keyed on
-                // `current_version_id`, which is the most recently applied
-                // version and survives the parked round; a loop-local would
-                // reset between rounds and skip the fold-in.
-                if update.target_version_id == self.current_version_id
-                    && let Some(existing) = self.applied_block_height
-                {
-                    self.applied_block_height = Some(existing.min(block_height));
-                }
             }
 
             // Process Next Update step 5 (resolve.md:170-179): the
@@ -441,7 +429,7 @@ impl Resolver {
             // so a DUPLICATE whose block is after versionTime must never abort
             // the loop and suppress a later unique update announced within
             // versionTime. The gate deliberately runs BEFORE the version-gap
-            // check (step 10.3): step 5 precedes step 7 in the spec, so a
+            // check (step 10.3): step 5 precedes step 6 in the spec, so a
             // skipped version announced after versionTime resolves the
             // document in effect so far rather than raising LATE_PUBLISHING.
             // A tuple within versionTime falls through to the apply branch
@@ -496,11 +484,11 @@ impl Resolver {
                 // Step 10.2.4.
                 self.current_version_id = next_update_version_id;
 
-                // confirmations = block of the most-recently-applied UNIQUE
-                // update (resolve.md:38,57): overwrite here, so after the
-                // ascending-version loop this holds the highest-version (most
-                // recent) applied update's height.
-                self.applied_block_height = Some(block_height);
+                // resolve.md "Apply `update`": set `current_block_height` to
+                // the tuple's block height. It is both the basis for
+                // `confirmations` and the height below which the next Find
+                // Beacon Signals finds nothing.
+                self.current_block_height = Some(block_height);
 
                 // resolve.md "Process Next Update" step 1: the spec re-checks
                 // the requested versionId at the top of every iteration, so
@@ -673,6 +661,15 @@ impl Resolver {
                     } => (block_time, block_height, block_hash),
                 };
 
+                // resolve.md "Find Beacon Signals": only transactions whose block
+                // height is equal to or more than `current_block_height` are found.
+                // `None` (no update applied yet) is the spec's initial height 0.
+                // A transaction that is not found raises nothing, so this runs
+                // before the chain-tip check.
+                if block_height < self.current_block_height.unwrap_or(0) {
+                    continue;
+                }
+
                 // resolve.md "Find Beacon Signals": the transaction must have
                 // at least `minConf` confirmations (6 when not provided).
                 // Confirmations are `tip - height + 1` against the caller's
@@ -811,7 +808,7 @@ impl<T> Resolver<T> {
             chain_tip_height: self.chain_tip_height,
             min_conf: self.min_conf,
             content_type: self.content_type,
-            applied_block_height: self.applied_block_height,
+            current_block_height: self.current_block_height,
             rpc_host: self.rpc_host,
             request_cache: self.request_cache,
             block_mediantimes: self.block_mediantimes,
@@ -826,7 +823,7 @@ impl<T> Resolver<T> {
     /// every terminal arm of [`Resolver::resolve`] returns the spec triple
     /// identically (PATTERNS.md §"ResolverState::Resolved" guidance).
     ///
-    /// `confirmations` is `tip.saturating_sub(applied_block_height)
+    /// `confirmations` is `tip.saturating_sub(current_block_height)
     /// .saturating_add(1)` for the most recently applied unique update, and
     /// `0` when the tip is known but no update was applied — the spec starts
     /// `block_confirmations` at `0` and lists `confirmations` as REQUIRED
@@ -835,7 +832,7 @@ impl<T> Resolver<T> {
     /// `0` would read as "the update is unconfirmed".
     fn terminal_state(&self) -> ResolutionResult {
         let confirmations = self.chain_tip_height.map(|tip| {
-            self.applied_block_height
+            self.current_block_height
                 .map_or(0, |height| tip.saturating_sub(height).saturating_add(1))
         });
         let document_metadata = crate::document::DocumentMetadata {
@@ -3019,10 +3016,10 @@ mod tests {
         );
     }
 
-    /// `confirmations == tip - applied_block_height + 1` with
+    /// `confirmations == tip - current_block_height + 1` with
     /// saturating arithmetic (tip > h, tip == h, tip < h), `0` when the tip is
     /// known but nothing applied, and `None` without a tip. This exercises only `terminal_state`'s formatting
-    /// of `applied_block_height`, which is unchanged; the *accounting* of that
+    /// of `current_block_height`, which is unchanged; the *accounting* of that
     /// height (most-recently-applied unique update, not a running min across
     /// distinct updates) is driven end-to-end by
     /// `confirmations_use_the_most_recently_applied_update` and
@@ -3032,28 +3029,28 @@ mod tests {
     #[test]
     fn metadata_confirmations_saturate_against_chain_tip() {
         // terminal_state computes confirmations from chain_tip_height +
-        // applied_block_height. Drive the field directly to cover the three
+        // current_block_height. Drive the field directly to cover the three
         // arithmetic regimes plus the no-tip case.
         let Some(mut resolver) = resolver_with(SidecarData::default(), Some(100)) else {
             return;
         };
 
         // tip > h: 100 - 90 + 1 = 11.
-        resolver.applied_block_height = Some(90);
+        resolver.current_block_height = Some(90);
         assert_eq!(
             resolver.terminal_state().document_metadata.confirmations,
             Some(11)
         );
 
         // tip == h: 100 - 100 + 1 = 1.
-        resolver.applied_block_height = Some(100);
+        resolver.current_block_height = Some(100);
         assert_eq!(
             resolver.terminal_state().document_metadata.confirmations,
             Some(1)
         );
 
         // tip < h (clock skew / indexer lag): saturating → 0 + 1 = 1.
-        resolver.applied_block_height = Some(150);
+        resolver.current_block_height = Some(150);
         assert_eq!(
             resolver.terminal_state().document_metadata.confirmations,
             Some(1)
@@ -3062,7 +3059,7 @@ mod tests {
         // Tip known, no applied update → confirmations 0: the spec's starting
         // value, and REQUIRED in the metadata, so it is emitted rather than
         // omitted.
-        resolver.applied_block_height = None;
+        resolver.current_block_height = None;
         assert_eq!(
             resolver.terminal_state().document_metadata.confirmations,
             Some(0)
@@ -3072,7 +3069,7 @@ mod tests {
         let Some(mut no_tip) = resolver_with(SidecarData::default(), None) else {
             return;
         };
-        no_tip.applied_block_height = Some(90);
+        no_tip.current_block_height = Some(90);
         assert_eq!(
             no_tip.terminal_state().document_metadata.confirmations,
             None
@@ -4139,7 +4136,7 @@ mod tests {
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 5
     /// (first bullet: `targetVersionId` more than `current_version_id`),
-    /// evaluated before step 7.
+    /// evaluated before step 6.
     #[test]
     fn version_time_bound_gates_a_tuple_beyond_the_next_version() {
         let (initial, _update1, update2) = chained_two_updates();
@@ -4182,7 +4179,7 @@ mod tests {
     /// v2 was never announced.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 5
-    /// (no condition holds) then step 7, "Check update.targetVersionId".
+    /// (no condition holds) then step 6, "Check update.targetVersionId".
     #[test]
     fn version_time_after_a_skipped_version_is_late_publishing() {
         let (initial, _update1, update2) = chained_two_updates();
@@ -4516,8 +4513,9 @@ mod tests {
     /// Sort-guaranteed dedup: the SAME update (v2) announced twice at
     /// heights 100 then 200 (h_low < h_high). Under the ascending
     /// (target_version_id, block_height) sort the h_low announcement is applied
-    /// FIRST and becomes the confirmations height; the later h_high duplicate's
-    /// defensive min is a no-op and does NOT raise it. With chain tip 300,
+    /// FIRST and becomes the confirmations height; a duplicate never
+    /// overwrites the height, so the later h_high one does NOT raise it. With
+    /// chain tip 300,
     /// confirmations = 300 - 100 + 1 = 201 (from h_low), never
     /// 300 - 200 + 1 = 101.
     ///
@@ -5281,6 +5279,12 @@ mod tests {
     /// address of the right network rather than a hand-assembled string.
     const ROTATED_BEACON_ADDRESS: &str = "tb1q7mss0haz2pjzh6kry4ythrat3mpk4rj5hhgy4l";
 
+    /// A second testnet-family address, distinct from the genesis beacons and
+    /// from [`ROTATED_BEACON_ADDRESS`], for a beacon introduced by a later
+    /// update than the one that introduced the rotated beacon (the BIP 173
+    /// P2WPKH test vector).
+    const SECOND_ROTATED_BEACON_ADDRESS: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+
     fn test_uri(uri: &str) -> esploda::http::Uri {
         uri.parse().expect("a valid test URI")
     }
@@ -5324,14 +5328,24 @@ mod tests {
     /// round (every address is queried once, so an unchanged beacon set
     /// resolves after the first round).
     fn chain_beacon_rotation_patch(did: &crate::identifier::Did) -> json_patch::Patch {
+        chain_beacon_addition_patch(did, "rotatedBeacon", ROTATED_BEACON_ADDRESS)
+    }
+
+    /// A patch that APPENDS a Singleton beacon with service id
+    /// `{did}#{fragment}` at `address`.
+    fn chain_beacon_addition_patch(
+        did: &crate::identifier::Did,
+        fragment: &str,
+        address: &str,
+    ) -> json_patch::Patch {
         serde_json::from_value(serde_json::json!([
             {"op": "add", "path": "/service/-", "value": {
-                "id": format!("{}#rotatedBeacon", did.encode()),
+                "id": format!("{}#{fragment}", did.encode()),
                 "type": "SingletonBeacon",
-                "serviceEndpoint": format!("bitcoin:{ROTATED_BEACON_ADDRESS}"),
+                "serviceEndpoint": format!("bitcoin:{address}"),
             }}
         ]))
-        .expect("the rotation patch is a valid RFC 6902 op array")
+        .expect("the beacon addition patch is a valid RFC 6902 op array")
     }
 
     /// The initial document plus a signed v2 update that APPENDS a Singleton
@@ -5583,12 +5597,15 @@ mod tests {
 
     /// v2 is announced twice: at height 200 on a genesis beacon, and again at
     /// height 150 on the beacon v2 itself adds. The genesis round applies the
-    /// height-200 announcement; the added beacon's round then delivers the
-    /// height-150 duplicate. resolve.md:57 footnote 2: when deduplicating,
-    /// `confirmations` derives from the LOWEST block — so the fold-in has to
-    /// work across rounds, not only within the batch that applied the update.
+    /// height-200 announcement, which sets `current_block_height` to 200. The
+    /// added beacon is scanned after that, and its height-150 announcement sits
+    /// below the current block height, so Find Beacon Signals never finds it:
+    /// `confirmations` derive from the applied v2's block.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134) and "Apply `update`" (resolve.md:228).
     #[test]
-    fn a_lower_duplicate_on_the_added_beacon_lowers_confirmations() {
+    fn a_lower_duplicate_on_the_added_beacon_is_not_found() {
         let (initial, update_v2, _update_v3, _update_v4) = chained_rotation_then_two_more();
         let addresses = chain_beacon_addresses(&initial);
         let tx_v2_high = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0xb2);
@@ -5608,7 +5625,7 @@ mod tests {
         let resolver = Resolver::new(initial, options).expect("the options are valid");
         let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/lower-duplicate");
 
-        let result = result.expect("a duplicate announcement of the applied update is benign");
+        let result = result.expect("an announcement below the current block height is not found");
         assert_eq!(u64::from(result.document_metadata.version_id), 2);
         assert_eq!(
             rounds,
@@ -5617,10 +5634,553 @@ mod tests {
         );
         assert_eq!(
             result.document_metadata.confirmations,
-            Some(TEST_CHAIN_TIP - 150 + 1),
-            "confirmations derive from the LOWER announcement, which arrived in the \
-             second round"
+            Some(TEST_CHAIN_TIP - 200 + 1),
+            "confirmations derive from the applied v2's block; the lower announcement \
+             on the added beacon is never found"
         );
+    }
+
+    /// Resolve a history where v2 (announced on genesis beacon A at height
+    /// 200) adds beacon D at [`ROTATED_BEACON_ADDRESS`], D's history is
+    /// `added_beacon_txs`, genesis beacons B and C are empty, and the sidecar
+    /// holds `sidecar`. Returns the result, the request rounds and the genesis
+    /// beacon addresses.
+    fn resolve_with_added_beacon_history(
+        initial: InitialDocument,
+        update_v2: &Update,
+        added_beacon_txs: Vec<Transaction>,
+        sidecar: Vec<Update>,
+        id: &str,
+        a_txid_seed: u8,
+    ) -> (
+        Result<ResolutionResult, Error>,
+        Vec<Vec<String>>,
+        Vec<String>,
+    ) {
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2 = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, a_txid_seed);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, added_beacon_txs),
+        ]);
+        let options = ResolutionOptions {
+            sidecar_data: Some(SidecarData::new(None, sidecar, None, None)),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, id);
+        (result, rounds, addresses)
+    }
+
+    /// v2 (announced at height 200) adds beacon D; D's history announces a
+    /// DIFFERENT update that also targets version 2, at height 150. D is
+    /// scanned once v2 has applied, with `current_block_height` at 200, so the
+    /// conflicting announcement is never found: no tuple, no Confirm Duplicate
+    /// Update, no LATE_PUBLISHING. A key that controls a beacon from height H
+    /// cannot rewrite the history before H.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134).
+    #[test]
+    fn a_conflicting_announcement_below_the_current_height_is_not_found() {
+        let (initial, update_v2, _update_v3, _update_v4) = chained_rotation_then_two_more();
+        let (_initial, conflicting_v2, _update3) = chained_two_updates();
+        assert_eq!(
+            conflicting_v2.target_version_id, update_v2.target_version_id,
+            "both updates target version 2"
+        );
+        assert_ne!(
+            conflicting_v2.hash(),
+            update_v2.hash(),
+            "the two version-2 updates are different updates"
+        );
+        let tx_conflict = confirmed_signal_tx(conflicting_v2.hash(), 150, 1_699_999_900, 0x71);
+        let (result, rounds, addresses) = resolve_with_added_beacon_history(
+            initial,
+            &update_v2,
+            vec![tx_conflict],
+            vec![update_v2.clone(), conflicting_v2],
+            "test/conflict-below-height",
+            0x70,
+        );
+
+        let result = result.expect("a conflicting announcement below the height is not found");
+        assert_eq!(u64::from(result.document_metadata.version_id), 2);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 200 + 1),
+            "confirmations derive from the applied v2's block"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon is scanned after v2 applies"
+        );
+    }
+
+    /// v2 (announced at height 200) adds beacon D; D's history announces v4 at
+    /// height 150 while v3 is never announced. The v4 announcement sits below
+    /// the current block height when D is scanned, so it is never found and
+    /// the version gap raises no LATE_PUBLISHING.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134).
+    #[test]
+    fn a_version_gap_below_the_current_height_is_not_found() {
+        let (initial, update_v2, _update_v3, update_v4) = chained_rotation_then_two_more();
+        let tx_v4 = confirmed_signal_tx(update_v4.hash(), 150, 1_699_999_900, 0x73);
+        let (result, rounds, addresses) = resolve_with_added_beacon_history(
+            initial,
+            &update_v2,
+            vec![tx_v4],
+            vec![update_v2.clone(), update_v4],
+            "test/gap-below-height",
+            0x72,
+        );
+
+        let result = result.expect("a version gap below the height is not found");
+        assert_eq!(u64::from(result.document_metadata.version_id), 2);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 200 + 1),
+            "confirmations derive from the applied v2's block"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon is scanned after v2 applies"
+        );
+    }
+
+    /// v2 (announced at height 200) adds beacon D; D's history announces v3 at
+    /// height 150 and the sidecar does not hold v3. The announcement is below
+    /// the current block height when D is scanned, so it is never found and
+    /// the absent update raises no MISSING_UPDATE_DATA.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134, :155).
+    #[test]
+    fn an_unknown_hash_below_the_current_height_is_not_missing_update_data() {
+        let (initial, update_v2, update_v3, _update_v4) = chained_rotation_then_two_more();
+        let tx_v3 = confirmed_signal_tx(update_v3.hash(), 150, 1_699_999_900, 0x75);
+        let (result, rounds, addresses) = resolve_with_added_beacon_history(
+            initial,
+            &update_v2,
+            vec![tx_v3],
+            vec![update_v2.clone()],
+            "test/unknown-below-height",
+            0x74,
+        );
+
+        let result = result.expect("an announcement below the height is not found");
+        assert_eq!(u64::from(result.document_metadata.version_id), 2);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 200 + 1),
+            "confirmations derive from the applied v2's block"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon is scanned after v2 applies"
+        );
+    }
+
+    /// v2 (announced at height 200) adds beacon D; D's history announces v3 in
+    /// the same block, height 200. "Equal to or more than"
+    /// `current_block_height` keeps it, so v3 applies.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134).
+    #[test]
+    fn a_later_update_at_the_introducing_height_is_found_and_applied() {
+        let (initial, update_v2, update_v3, _update_v4) = chained_rotation_then_two_more();
+        let tx_v3 = confirmed_signal_tx(update_v3.hash(), 200, 1_700_000_000, 0x77);
+        let (result, rounds, addresses) = resolve_with_added_beacon_history(
+            initial,
+            &update_v2,
+            vec![tx_v3],
+            vec![update_v2.clone(), update_v3],
+            "test/later-at-height",
+            0x76,
+        );
+
+        let result = result.expect("an announcement at the current block height is found");
+        assert_eq!(u64::from(result.document_metadata.version_id), 3);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 200 + 1),
+            "confirmations derive from v3's block"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon is scanned after v2 applies"
+        );
+    }
+
+    /// v2 (announced at height 200) adds beacon D; D's history announces a
+    /// DIFFERENT update that also targets version 2, in the same block. The
+    /// announcement is at the current block height, so it is found, reaches
+    /// Confirm Duplicate Update, and raises LATE_PUBLISHING.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134) and Confirm Duplicate Update (resolve.md:211).
+    #[test]
+    fn a_conflicting_announcement_at_the_introducing_height_is_late_publishing() {
+        let (initial, update_v2, _update_v3, _update_v4) = chained_rotation_then_two_more();
+        let (_initial, conflicting_v2, _update3) = chained_two_updates();
+        assert_eq!(
+            conflicting_v2.target_version_id, update_v2.target_version_id,
+            "both updates target version 2"
+        );
+        assert_ne!(
+            conflicting_v2.hash(),
+            update_v2.hash(),
+            "the two version-2 updates are different updates"
+        );
+        let tx_conflict = confirmed_signal_tx(conflicting_v2.hash(), 200, 1_700_000_000, 0x79);
+        let (result, rounds, addresses) = resolve_with_added_beacon_history(
+            initial,
+            &update_v2,
+            vec![tx_conflict],
+            vec![update_v2.clone(), conflicting_v2],
+            "test/conflict-at-height",
+            0x78,
+        );
+
+        let err = result.expect_err("a conflicting announcement at the height is found");
+        assert!(
+            matches!(err, Error::Btcr2Error(Btcr2Error::LatePublishingError(_))),
+            "expected LATE_PUBLISHING from Confirm Duplicate Update, got {err:?}"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "the added beacon is scanned after v2 applies"
+        );
+    }
+
+    /// The initial document plus two chained signed updates that each ADD a
+    /// beacon: v2 appends a Singleton beacon at [`ROTATED_BEACON_ADDRESS`] (it
+    /// equals the v2 of [`chained_rotation_then_two_more`]), v3 appends one at
+    /// [`SECOND_ROTATED_BEACON_ADDRESS`].
+    fn chained_rotation_then_second_rotation() -> (InitialDocument, Update, Update) {
+        use crate::document::Document;
+
+        let (did, initial) = chain_initial_document();
+        let vm_id = format!("{}#initialKey", did.encode());
+
+        let v2 = NonZeroU64::new(2).expect("2 is non-zero");
+        let update_v2 = Document::from(initial.clone())
+            .construct_signed_update(
+                chain_beacon_rotation_patch(&did),
+                v2,
+                &vm_id,
+                chain_secret_key(),
+            )
+            .expect("the rotation update constructs against the initial document");
+
+        let mut after_v2 = initial.clone();
+        after_v2
+            .apply_update(&update_v2, &AnnouncingBlock::fixed())
+            .expect("the rotation update applies to the initial document");
+
+        let v3 = NonZeroU64::new(3).expect("3 is non-zero");
+        let update_v3 = Document::from(after_v2)
+            .construct_signed_update(
+                chain_beacon_addition_patch(
+                    &did,
+                    "secondRotatedBeacon",
+                    SECOND_ROTATED_BEACON_ADDRESS,
+                ),
+                v3,
+                &vm_id,
+                chain_secret_key(),
+            )
+            .expect("the second rotation constructs against the post-rotation document");
+
+        (initial, update_v2, update_v3)
+    }
+
+    /// Chained introduction: v2 at height 200 (on genesis beacon A) adds beacon
+    /// D; v3 at height 300 (on D) adds beacon E; E's history announces a
+    /// DIFFERENT version-3 update at height 250. D is scanned with
+    /// `current_block_height` at 200 and E with it at 300, so the conflicting
+    /// v3 at 250 — above the first introducing height, below the second — is
+    /// never found: no LATE_PUBLISHING, and `confirmations` derive from v3's
+    /// block, not v2's.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134) and "Apply `update`" (resolve.md:228).
+    #[test]
+    fn a_signal_below_a_later_introducing_height_is_not_found() {
+        let (initial, update_v2, v3_adds_e) = chained_rotation_then_second_rotation();
+        let (_initial, rotation_v2, conflicting_v3, _update_v4) = chained_rotation_then_two_more();
+        assert_eq!(
+            rotation_v2.hash(),
+            update_v2.hash(),
+            "both builders share v2"
+        );
+        assert_eq!(
+            conflicting_v3.target_version_id, v3_adds_e.target_version_id,
+            "both updates target version 3"
+        );
+        assert_eq!(
+            conflicting_v3.source_hash, v3_adds_e.source_hash,
+            "both version-3 updates are built on the same post-v2 document"
+        );
+        assert_ne!(
+            conflicting_v3.hash(),
+            v3_adds_e.hash(),
+            "the two version-3 updates are different updates"
+        );
+        let addresses = chain_beacon_addresses(&initial);
+        assert!(
+            !addresses.contains(&SECOND_ROTATED_BEACON_ADDRESS.to_string()),
+            "beacon E is not a genesis beacon"
+        );
+
+        let tx_v2 = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0x7a);
+        let tx_v3 = confirmed_signal_tx(v3_adds_e.hash(), 300, 1_700_000_100, 0x7b);
+        let tx_conflict = confirmed_signal_tx(conflicting_v3.hash(), 250, 1_700_000_050, 0x7c);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2]),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, vec![tx_v3]),
+            (SECOND_ROTATED_BEACON_ADDRESS, vec![tx_conflict]),
+        ]);
+
+        let sidecar =
+            SidecarData::new(None, vec![update_v2, v3_adds_e, conflicting_v3], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) =
+            drive_capture_rounds(resolver, &fixture, "test/chained-introduction");
+
+        let result =
+            result.expect("the conflicting v3 on E sits below the height E was scanned at");
+        assert_eq!(u64::from(result.document_metadata.version_id), 3);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 300 + 1),
+            "confirmations derive from v3's block"
+        );
+        assert_eq!(
+            rounds,
+            vec![
+                addresses,
+                vec![ROTATED_BEACON_ADDRESS.to_string()],
+                vec![SECOND_ROTATED_BEACON_ADDRESS.to_string()],
+            ],
+            "D is scanned after v2 applies and E after v3 applies"
+        );
+    }
+
+    /// Genesis beacons A, B, C; v2 at height 200 on A adds D; v3 at height 100
+    /// on B; v4 at height 150 on D. The first scan (height 0) finds v2 and v3;
+    /// v2 applies, `current_block_height` becomes 200 and v3 is parked while D
+    /// is scanned. D is scanned once, at 200, so v4 at 150 is never found. The
+    /// parked v3 came from the earlier scan and is not re-filtered: it applies
+    /// and lowers `current_block_height` to 100. D is in `scanned_beacons`, so
+    /// it is not scanned again at the lower height.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md state (resolve.md:34), "Find
+    /// Beacon Signals" (resolve.md:129, :134) and "Apply `update`"
+    /// (resolve.md:228).
+    #[test]
+    fn a_parked_update_below_the_introducing_height_still_applies() {
+        let (initial, update_v2, update_v3, update_v4) = chained_rotation_then_two_more();
+        let addresses = chain_beacon_addresses(&initial);
+        let tx_v2 = confirmed_signal_tx(update_v2.hash(), 200, 1_700_000_000, 0x7d);
+        let tx_v3 = confirmed_signal_tx(update_v3.hash(), 100, 1_700_000_100, 0x7e);
+        let tx_v4 = confirmed_signal_tx(update_v4.hash(), 150, 1_700_000_200, 0x7f);
+        let fixture = capture_fixture(vec![
+            (addresses[0].as_str(), vec![tx_v2]),
+            (addresses[1].as_str(), vec![tx_v3]),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, vec![tx_v4]),
+        ]);
+
+        let sidecar = SidecarData::new(None, vec![update_v2, update_v3, update_v4], None, None);
+        let options = ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            ..test_options()
+        };
+        let resolver = Resolver::new(initial, options).expect("the options are valid");
+        let (result, rounds) = drive_capture_rounds(resolver, &fixture, "test/parked-below-height");
+
+        let result = result.expect("the parked v3 applies; v4 on D is never found");
+        assert_eq!(u64::from(result.document_metadata.version_id), 3);
+        assert_eq!(
+            result.document_metadata.confirmations,
+            Some(TEST_CHAIN_TIP - 100 + 1),
+            "confirmations derive from v3's block"
+        );
+        assert_eq!(
+            rounds,
+            vec![addresses, vec![ROTATED_BEACON_ADDRESS.to_string()]],
+            "D is scanned once, after v2 applies"
+        );
+    }
+
+    /// Find Beacon Signals drops a transaction whose block height is below
+    /// `current_block_height`, keeps one at that height, and reads whatever
+    /// the height currently is. A transaction that is not found raises
+    /// nothing: the height condition is checked before the chain tip, so a
+    /// missing tip is reported only for a transaction that is found.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:134, :139).
+    #[test]
+    fn find_next_signals_skips_transactions_below_the_current_block_height() {
+        let (_initial, update_v2, update_v3, _update_v4) = chained_rotation_then_two_more();
+        let (_did, initial) = chain_initial_document();
+        let addresses = chain_beacon_addresses(&initial);
+        let mut resolver = Resolver::new(initial, test_options()).expect("the options are valid");
+        let histories = || {
+            HashMap::from([(
+                addresses[0].clone(),
+                vec![
+                    confirmed_signal_tx(update_v2.hash(), 199, 1_700_000_000, 0x60),
+                    confirmed_signal_tx(update_v3.hash(), 200, 1_700_000_100, 0x61),
+                ],
+            )])
+        };
+
+        resolver.current_block_height = None;
+        let signals = resolver
+            .find_next_signals(histories())
+            .expect("no height: every confirmed transaction is found");
+        assert_eq!(signals.len(), 2, "height 0 finds both transactions");
+
+        resolver.current_block_height = Some(200);
+        let signals = resolver
+            .find_next_signals(histories())
+            .expect("height 200: the transaction at 200 is found");
+        assert_eq!(signals.len(), 1, "only the transaction at 200 is found");
+        assert_eq!(signals[0].block_height, 200);
+        assert_eq!(signals[0].signal_bytes, update_v3.hash());
+
+        resolver.current_block_height = Some(300);
+        let signals = resolver
+            .find_next_signals(histories())
+            .expect("height 300: nothing is found, nothing is raised");
+        assert!(signals.is_empty(), "both transactions are below 300");
+
+        resolver.chain_tip_height = None;
+        resolver.current_block_height = Some(200);
+        let below = HashMap::from([(
+            addresses[0].clone(),
+            vec![confirmed_signal_tx(
+                update_v2.hash(),
+                199,
+                1_700_000_000,
+                0x62,
+            )],
+        )]);
+        let signals = resolver
+            .find_next_signals(below)
+            .expect("a transaction below the height is not found, so no tip is needed");
+        assert!(signals.is_empty());
+
+        let at = HashMap::from([(
+            addresses[0].clone(),
+            vec![confirmed_signal_tx(
+                update_v3.hash(),
+                200,
+                1_700_000_100,
+                0x63,
+            )],
+        )]);
+        let err = resolver
+            .find_next_signals(at)
+            .expect_err("a found transaction still needs the chain tip");
+        assert!(
+            matches!(err, Error::MissingChainTip { .. }),
+            "expected MissingChainTip, got {err:?}"
+        );
+    }
+
+    /// The sidecar lookup table is keyed by each sidecar update's recomputed
+    /// JSON Document Hash, so an update that does not hash to the signal bytes
+    /// is never matched to the signal. Here the sidecar holds a version-2
+    /// update with the same sourceHash and targetVersionId as the announced
+    /// one — only its hash differs — and the announcement resolves to
+    /// MISSING_UPDATE_DATA naming the signal bytes, rather than applying the
+    /// wrong update. The matching update resolves as usual.
+    ///
+    /// Spec: did-btcr2/src/operations/resolve.md "Find Beacon Signals"
+    /// (resolve.md:153-156), sidecar arm.
+    #[test]
+    fn a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data() {
+        let (initial, update1, _update2) = chained_two_updates();
+        let (_initial, other_v2, _update_v3, _update_v4) = chained_rotation_then_two_more();
+        assert_ne!(other_v2.hash(), update1.hash(), "different updates");
+        assert_eq!(
+            other_v2.source_hash, update1.source_hash,
+            "both updates are built on the initial document"
+        );
+        assert_eq!(
+            other_v2.target_version_id, update1.target_version_id,
+            "both updates target version 2"
+        );
+        let addresses = chain_beacon_addresses(&initial);
+        let options = || ResolutionOptions {
+            sidecar_data: Some(SidecarData::new(None, vec![update1.clone()], None, None)),
+            ..test_options()
+        };
+
+        let fixture = capture_fixture(vec![
+            (
+                addresses[0].as_str(),
+                vec![confirmed_signal_tx(
+                    other_v2.hash(),
+                    200,
+                    1_700_000_000,
+                    0x64,
+                )],
+            ),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+            (ROTATED_BEACON_ADDRESS, Vec::new()),
+        ]);
+        let resolver = Resolver::new(initial.clone(), options()).expect("the options are valid");
+        let (result, _rounds) = drive_capture_rounds(resolver, &fixture, "test/foreign-hash");
+        match result.expect_err("no sidecar update hashes to the signal bytes") {
+            Error::Btcr2Error(Btcr2Error::MissingUpdateData { update_hash }) => {
+                assert_eq!(
+                    update_hash,
+                    other_v2.hash(),
+                    "the error names the signal bytes"
+                );
+            }
+            other => panic!("expected MissingUpdateData, got {other:?}"),
+        }
+
+        let fixture = capture_fixture(vec![
+            (
+                addresses[0].as_str(),
+                vec![confirmed_signal_tx(
+                    update1.hash(),
+                    200,
+                    1_700_000_000,
+                    0x65,
+                )],
+            ),
+            (addresses[1].as_str(), Vec::new()),
+            (addresses[2].as_str(), Vec::new()),
+        ]);
+        let resolver = Resolver::new(initial, options()).expect("the options are valid");
+        let (result, _rounds) = drive_capture_rounds(resolver, &fixture, "test/matching-hash");
+        let result = result.expect("the matching update is found and applied");
+        assert_eq!(u64::from(result.document_metadata.version_id), 2);
     }
 
     /// The beacon v2 adds has no history. Its round is empty, but the tuples
@@ -5985,7 +6545,7 @@ mod tests {
     /// A version gap on a REMOVED beacon is not a gap at all: v2 removes A
     /// and adds D; A's history announces v4 and nothing anywhere announces
     /// v3. Because A's tuple is ignored before its `targetVersionId` is
-    /// checked (step 4 precedes step 7), no LATE_PUBLISHING is raised and the
+    /// checked (step 4 precedes step 6), no LATE_PUBLISHING is raised and the
     /// document resolves at version 2. Contrast
     /// `a_genuine_version_gap_still_raises_late_publishing_after_a_rotation`,
     /// where the same gap on a beacon still declared IS late publishing.
@@ -5994,7 +6554,7 @@ mod tests {
     /// `pending_signals`.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
-    /// (resolve.md:169) before step 7 (resolve.md:175).
+    /// (resolve.md:169) before step 6 (resolve.md:175).
     #[test]
     fn a_removed_beacons_version_gap_is_ignored_not_late_publishing() {
         let (initial, update_v2, _update_v3, update_v4) = chained_replacement_then_two_more();
@@ -6045,7 +6605,7 @@ mod tests {
     /// Parked path: v2' is parked behind D's empty round.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
-    /// (resolve.md:169) before step 7 and Confirm Duplicate Update
+    /// (resolve.md:169) before step 6 and Confirm Duplicate Update
     /// (resolve.md:194).
     #[test]
     fn a_removed_beacons_conflicting_announcement_never_reaches_confirm_duplicate() {
