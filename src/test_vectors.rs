@@ -159,6 +159,271 @@ pub(crate) struct CapturedSignal {
     pub(crate) update_hash: String,
 }
 
+/// A group of sets whose announcements share one aggregated Beacon Signal.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct Cohort {
+    /// The cohort's own name, e.g. `"cas-09"`.
+    pub(crate) id: String,
+    /// The scenario ids (`other.json.scenarioId`) of every member set,
+    /// including the set this entry belongs to.
+    pub(crate) members: Vec<String>,
+}
+
+/// One entry of a set's `signals.json`: a Beacon Signal on chain that belongs
+/// to this set.
+///
+/// Members upstream adds later are ignored rather than rejected: the file is
+/// extended additively.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SignalEntry {
+    /// The 1-based update step this signal announces, `update/{NN}`. Absent on
+    /// an entry that announces no update of this set — a cohort member whose
+    /// share of the aggregated signal carries no update of its own — which
+    /// must then name its `cohort`.
+    #[serde(default)]
+    pub(crate) update: Option<u64>,
+    /// A later announcement of an update an earlier entry already announced.
+    #[serde(default)]
+    pub(crate) duplicate: bool,
+    /// The beacon service, as `{did}#{service id}`.
+    pub(crate) beacon_id: String,
+    /// The beacon address the signal was spent to.
+    pub(crate) address: String,
+    /// The signalling transaction, 64 lowercase hex.
+    pub(crate) txid: String,
+    /// The height of the block confirming it.
+    pub(crate) block_height: u32,
+    /// The hash of the block confirming it, 64 lowercase hex.
+    pub(crate) block_hash: String,
+    /// That block's header time.
+    pub(crate) block_time: i64,
+    /// That block's median time past.
+    pub(crate) mediantime: i64,
+    /// The 32 signal bytes the transaction's last output pushes, 64 lowercase
+    /// hex.
+    pub(crate) signal_bytes: String,
+    /// The chain tip the set's expected outputs were recorded against.
+    pub(crate) recorded_tip: u32,
+    /// The cohort this signal is shared with, when it is aggregated.
+    #[serde(default)]
+    pub(crate) cohort: Option<Cohort>,
+}
+
+/// A set's `signals.json`: the upstream record of every Beacon Signal of the
+/// set, and the tip its expected outputs were recorded against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Signals {
+    /// The `recordedTip` every entry agrees on: the chain tip the set's
+    /// expected outputs (their `confirmations` in particular) were recorded
+    /// against.
+    pub(crate) recorded_tip: u32,
+    /// The entries, in file order.
+    pub(crate) entries: Vec<SignalEntry>,
+}
+
+/// True for 64 lowercase hex characters: a txid, a block hash, 32 signal bytes.
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Parse and validate a set's `signals.json` against the update steps the set
+/// ships. `ctx` names the file in every message.
+///
+/// The file is a bare array of entries, at least one, all agreeing on
+/// `recordedTip`. An entry's `update` N, when present, must name an update step
+/// the set has — `update/{NN}` in a numbered layout, or N = 1 for a flat
+/// `update/` — and an entry without `update` must name its `cohort`. The
+/// `txid`, `blockHash` and `signalBytes` are 64 lowercase hex.
+///
+/// Duplicates are keyed on `update` alone: an entry repeating an earlier
+/// entry's `update` must set `duplicate: true`, push the same `signalBytes`,
+/// and sit in a strictly higher block. `duplicate: true` on a first
+/// announcement, or on an entry without `update`, is an error. Entries without
+/// `update` are never duplicates of one another. The capture tool reads the
+/// same file with the same keying.
+pub(crate) fn parse_signals(
+    raw: &str,
+    ctx: &str,
+    layout: &UpdateLayout,
+) -> Result<Signals, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("{ctx}: not valid JSON: {e}"))?;
+    let Some(array) = value.as_array() else {
+        return Err(format!(
+            "{ctx}: signals.json must be a bare array of signal entries, got {}",
+            match value {
+                serde_json::Value::Object(_) => "an object",
+                _ => "a scalar",
+            }
+        ));
+    };
+    if array.is_empty() {
+        return Err(format!(
+            "{ctx}: signals.json holds no entry, so it records no recordedTip — a set with no \
+             Beacon Signal ships no signals.json"
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(array.len());
+    for (index, raw_entry) in array.iter().enumerate() {
+        let entry: SignalEntry = serde_json::from_value(raw_entry.clone())
+            .map_err(|e| format!("{ctx}: entry {index} is not a signal entry: {e}"))?;
+        entries.push(entry);
+    }
+
+    let recorded_tip = entries[0].recorded_tip;
+    if let Some((index, entry)) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.recorded_tip != recorded_tip)
+    {
+        return Err(format!(
+            "{ctx}: entry {index} records recordedTip {} but entry 0 records {recorded_tip} — \
+             every entry of one file is recorded against the same tip",
+            entry.recorded_tip
+        ));
+    }
+
+    let mut first_announcement: BTreeMap<u64, usize> = BTreeMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        for (member, value) in [
+            ("txid", &entry.txid),
+            ("blockHash", &entry.block_hash),
+            ("signalBytes", &entry.signal_bytes),
+        ] {
+            if !is_hex64(value) {
+                return Err(format!(
+                    "{ctx}: entry {index} {member} must be 64 lowercase hex characters, got \
+                     {value:?}"
+                ));
+            }
+        }
+
+        let Some(update) = entry.update else {
+            if entry.cohort.is_none() {
+                return Err(format!(
+                    "{ctx}: entry {index} carries neither `update` nor `cohort` — an entry \
+                     announcing no update step of this set must name the cohort it shares a \
+                     signal with"
+                ));
+            }
+            if entry.duplicate {
+                return Err(format!(
+                    "{ctx}: entry {index} sets `duplicate` but carries no `update` — only a \
+                     repeated announcement of an update step can be a duplicate"
+                ));
+            }
+            continue;
+        };
+
+        let has_step = match layout {
+            UpdateLayout::None => false,
+            UpdateLayout::Flat => update == 1,
+            UpdateLayout::Numbered(steps) => steps.iter().any(|s| s.parse::<u64>() == Ok(update)),
+        };
+        if !has_step {
+            return Err(format!(
+                "{ctx}: entry {index} announces update {update}, but the set has no \
+                 `update/{update:02}` step"
+            ));
+        }
+
+        match first_announcement.get(&update) {
+            None => {
+                if entry.duplicate {
+                    return Err(format!(
+                        "{ctx}: entry {index} sets `duplicate` on the first announcement of \
+                         update {update}"
+                    ));
+                }
+                first_announcement.insert(update, index);
+            }
+            Some(&first) => {
+                let original = &entries[first];
+                if !entry.duplicate {
+                    return Err(format!(
+                        "{ctx}: entry {index} announces update {update} again (entry {first} \
+                         announced it first) without `duplicate: true`"
+                    ));
+                }
+                if entry.signal_bytes != original.signal_bytes {
+                    return Err(format!(
+                        "{ctx}: entry {index} is a duplicate of entry {first} but pushes \
+                         signalBytes {} instead of {}",
+                        entry.signal_bytes, original.signal_bytes
+                    ));
+                }
+                if entry.block_height <= original.block_height {
+                    return Err(format!(
+                        "{ctx}: entry {index} is a duplicate of entry {first} at blockHeight {}, \
+                         not above the first announcement's {}",
+                        entry.block_height, original.block_height
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(Signals {
+        recorded_tip,
+        entries,
+    })
+}
+
+/// Check every cohort the discovered sets record.
+///
+/// Each member scenario id of a cohort must be the `other.json.scenarioId` of
+/// exactly one set on the same network, and that set's own `signals.json` must
+/// record the same cohort id in the same transaction. Structure only: the
+/// aggregated signal is not replayed.
+pub(crate) fn check_cohorts(vectors: &[Vector]) -> Result<(), String> {
+    for vector in vectors {
+        let Some(signals) = &vector.signals else {
+            continue;
+        };
+        for entry in &signals.entries {
+            let Some(cohort) = &entry.cohort else {
+                continue;
+            };
+            for member in &cohort.members {
+                let matches: Vec<&Vector> = vectors
+                    .iter()
+                    .filter(|other| {
+                        other.network_dir == vector.network_dir
+                            && other.scenario_id.as_deref() == Some(member.as_str())
+                    })
+                    .collect();
+                let [partner] = matches[..] else {
+                    let ids: Vec<&str> = matches.iter().map(|v| v.id.as_str()).collect();
+                    return Err(format!(
+                        "{}: cohort `{}` names member `{member}`, which matches {} set(s) on \
+                         {} by other.json.scenarioId (exactly one is required): {ids:?}",
+                        vector.id,
+                        cohort.id,
+                        matches.len(),
+                        vector.network_dir
+                    ));
+                };
+                let recorded = partner.signals.iter().flat_map(|s| &s.entries).any(|e| {
+                    e.txid == entry.txid && e.cohort.as_ref().is_some_and(|c| c.id == cohort.id)
+                });
+                if !recorded {
+                    return Err(format!(
+                        "{}: cohort `{}` member `{member}` ({}) records no signals.json entry for \
+                         that cohort in transaction {}",
+                        vector.id, cohort.id, partner.id, entry.txid
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ChainFixture {
     /// The signal carrying the most-recently-applied update — the one
     /// `confirmations` is computed from (`resolver.rs`, the
@@ -877,17 +1142,159 @@ pub(crate) struct Vector {
     /// Resolve row is skipped under `StaleContext` until the regenerated vector
     /// lands, at which point this flag clears itself.
     pub(crate) stale_update_context: bool,
-    /// `pending.json` exists.
-    pub(crate) has_pending: bool,
-    /// `scenario.json.delivery.genesis` as a string, when present.
-    pub(crate) delivery_genesis: Option<String>,
-    /// `scenario.json.delivery.announcement` as a string, when present.
-    pub(crate) delivery_announcement: Option<String>,
+    /// How the genesis document and the announcements reach a resolver,
+    /// derived from the files present ([`derive_delivery`]) and cross-checked
+    /// against `scenario.json.delivery` where that declares one.
+    pub(crate) delivery: Delivery,
     /// Every `type` string in `other.json.genesisDocument.service[]`.
     pub(crate) genesis_service_types: Vec<String>,
     /// `resolve/input.json.resolutionOptions.sidecar.genesisDocument` is a
     /// non-null JSON value.
     pub(crate) has_sidecar_genesis_document: bool,
+    /// `signals.json`, parsed and validated against the update steps; `None`
+    /// when the set ships no such file.
+    pub(crate) signals: Option<Signals>,
+    /// `other.json.scenarioId`: the name a cohort's `members` use for this set.
+    pub(crate) scenario_id: Option<String>,
+}
+
+/// Where a resolver gets the genesis document from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GenesisDelivery {
+    /// Generated from the identifier's key (`k1`).
+    Deterministic,
+    /// Supplied in `resolve/input.json` as the sidecar `genesisDocument`.
+    Sidecar,
+    /// Neither: an external set whose genesis document the sidecar does not
+    /// carry must be fetched from content-addressed storage.
+    Cas,
+}
+
+/// Where a resolver gets the announced updates from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnnouncementDelivery {
+    /// Supplied in `resolve/input.json` as the sidecar `updates`.
+    Sidecar,
+    /// Not in the sidecar: fetched from content-addressed storage.
+    Cas,
+}
+
+/// A set's delivery mechanisms, derived from its files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Delivery {
+    /// How the genesis document is delivered.
+    pub(crate) genesis: GenesisDelivery,
+    /// How the updates are delivered; `None` when the set has no update step.
+    pub(crate) announcement: Option<AnnouncementDelivery>,
+    /// The main resolve pair expects an error.
+    pub(crate) negative: bool,
+    /// `pending.json` is present: the set's updates were never anchored.
+    pub(crate) pending: bool,
+}
+
+/// Derive a set's delivery mechanisms from the files it ships.
+///
+/// Precedence: a negative set (the main `resolve/output.json` carries
+/// `didResolutionMetadata.error`) is read by id type alone — a key-based
+/// genesis is deterministic, an external one comes from the sidecar, and update
+/// steps are sidecar-delivered — because a set that withholds data on purpose
+/// has the same files as one that delivers it through CAS, and only the
+/// expected error tells them apart. For a positive set the file shape decides:
+/// an external set without a sidecar `genesisDocument` has a CAS genesis, and
+/// update steps without a sidecar `updates` array are CAS announcements.
+pub(crate) fn derive_delivery(
+    id_type: VectorIdType,
+    negative: bool,
+    has_sidecar_genesis_document: bool,
+    has_update_steps: bool,
+    sidecar_has_updates: bool,
+    pending: bool,
+) -> Delivery {
+    let genesis = match id_type {
+        VectorIdType::Key => GenesisDelivery::Deterministic,
+        VectorIdType::External if negative || has_sidecar_genesis_document => {
+            GenesisDelivery::Sidecar
+        }
+        VectorIdType::External => GenesisDelivery::Cas,
+    };
+    let announcement = has_update_steps.then_some(if negative || sidecar_has_updates {
+        AnnouncementDelivery::Sidecar
+    } else {
+        AnnouncementDelivery::Cas
+    });
+    Delivery {
+        genesis,
+        announcement,
+        negative,
+        pending,
+    }
+}
+
+/// Cross-check a derived delivery against the `delivery` object a
+/// `scenario.json` declares. `declared_genesis` / `declared_announcement` are
+/// the object's members as strings; an absent member declares "not CAS".
+///
+/// A declared `"cas"` must match a derived CAS delivery and vice versa, for
+/// the genesis document always and for the announcements only when the set is
+/// not pending: a pending set never ran its anchoring step, so its files cannot
+/// show which announcement mechanism was intended. A declared `"smt"` requires
+/// an `SMTBeacon` in the genesis document.
+pub(crate) fn cross_check_scenario(
+    derived: &Delivery,
+    declared_genesis: Option<&str>,
+    declared_announcement: Option<&str>,
+    genesis_service_types: &[String],
+) -> Result<(), String> {
+    let genesis_cas = derived.genesis == GenesisDelivery::Cas;
+    if (declared_genesis == Some("cas")) != genesis_cas {
+        return Err(format!(
+            "scenario.json declares genesis delivery {declared_genesis:?} but the files show \
+             {:?} — the files and scenario.json disagree",
+            derived.genesis
+        ));
+    }
+    if !derived.pending {
+        let announcement_cas = derived.announcement == Some(AnnouncementDelivery::Cas);
+        if (declared_announcement == Some("cas")) != announcement_cas {
+            return Err(format!(
+                "scenario.json declares announcement delivery {declared_announcement:?} but the \
+                 files show {:?} — the files and scenario.json disagree",
+                derived.announcement
+            ));
+        }
+    }
+    for declared in [declared_genesis, declared_announcement]
+        .into_iter()
+        .flatten()
+    {
+        if declared == "smt" && !genesis_service_types.iter().any(|t| t == "SMTBeacon") {
+            return Err(format!(
+                "scenario.json declares SMT delivery but the genesis document declares no \
+                 SMTBeacon (services: {genesis_service_types:?}) — the files and scenario.json \
+                 disagree"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Cross-check a derived delivery against a whole `scenario.json`: a null or
+/// absent `delivery` declares nothing and is not checked.
+pub(crate) fn check_scenario_delivery(
+    derived: &Delivery,
+    scenario: &serde_json::Value,
+    genesis_service_types: &[String],
+) -> Result<(), String> {
+    let declared = &scenario["delivery"];
+    if declared.is_null() {
+        return Ok(());
+    }
+    cross_check_scenario(
+        derived,
+        declared["genesis"].as_str(),
+        declared["announcement"].as_str(),
+        genesis_service_types,
+    )
 }
 
 /// The outcome a resolve `output.json` expects.
@@ -1317,26 +1724,8 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                     }
                 }
 
-                let has_pending = vector_path.join("pending.json").is_file();
-
-                // The regtest vectors ship no `scenario.json`, and `delivery`
-                // is `null` on 9 mutinynet vectors — indexing `Value::Null`
-                // yields `Null`, so `.as_str()` gives `None` unaided.
-                let (delivery_genesis, delivery_announcement) = match read_json_opt(
-                    &vector_path.join("scenario.json"),
-                    &format!("{id}/scenario.json"),
-                ) {
-                    Some(scenario) => (
-                        scenario["delivery"]["genesis"].as_str().map(str::to_string),
-                        scenario["delivery"]["announcement"]
-                            .as_str()
-                            .map(str::to_string),
-                    ),
-                    None => (None, None),
-                };
-
                 let other = read_json_at(&vector_path.join("other.json"), &id);
-                let genesis_service_types = other["genesisDocument"]["service"]
+                let genesis_service_types: Vec<String> = other["genesisDocument"]["service"]
                     .as_array()
                     .map(|services| {
                         services
@@ -1345,6 +1734,38 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                             .collect()
                     })
                     .unwrap_or_default();
+                let scenario_id = (!other["scenarioId"].is_null())
+                    .then(|| field_str(&other, "scenarioId", &format!("{id}/other.json")))
+                    .map(str::to_string);
+
+                // Delivery comes from the files. Where a `scenario.json`
+                // declares one (the regtest sets ship none, and `delivery` is
+                // `null` on 9 mutinynet sets) the two must agree, so a silent
+                // reclassification cannot shrink the ledger.
+                let delivery = derive_delivery(
+                    id_type,
+                    matches!(outcome, Outcome::Error { .. }),
+                    has_sidecar_genesis_document,
+                    update_layout != UpdateLayout::None,
+                    resolve_input["resolutionOptions"]["sidecar"]["updates"].is_array(),
+                    vector_path.join("pending.json").is_file(),
+                );
+                if let Some(scenario) = read_json_opt(
+                    &vector_path.join("scenario.json"),
+                    &format!("{id}/scenario.json"),
+                ) {
+                    check_scenario_delivery(&delivery, &scenario, &genesis_service_types)
+                        .unwrap_or_else(|msg| panic!("{id}: {msg}"));
+                }
+
+                let signals_path = vector_path.join("signals.json");
+                let signals = signals_path.is_file().then(|| {
+                    let raw = std::fs::read_to_string(&signals_path).unwrap_or_else(|e| {
+                        panic!("{id}: {} is unreadable: {e}", signals_path.display())
+                    });
+                    parse_signals(&raw, &format!("{id}/signals.json"), &update_layout)
+                        .unwrap_or_else(|msg| panic!("{id}: {msg}"))
+                });
 
                 vectors.push(Vector {
                     id,
@@ -1359,17 +1780,18 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                     outcome,
                     resolve_cases,
                     stale_update_context,
-                    has_pending,
-                    delivery_genesis,
-                    delivery_announcement,
+                    delivery,
                     genesis_service_types,
                     has_sidecar_genesis_document,
+                    signals,
+                    scenario_id,
                 });
             }
         }
     }
 
     vectors.sort_by(|a, b| a.id.cmp(&b.id));
+    check_cohorts(&vectors).unwrap_or_else(|msg| panic!("{msg}"));
     vectors
 }
 
@@ -1628,19 +2050,22 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
 /// 1. `pending.json` present            -> `Unanchored`
 /// 2. a `CASBeacon` / `SMTBeacon` service in the genesis document
 ///    -> `CasDelivery` / `SmtDelivery`, AND `UnsupportedBeaconType`
-/// 3. `scenario.json.delivery.genesis` or `.announcement` is `"cas"` / `"smt"`
-///    -> `CasDelivery` / `SmtDelivery`
+/// 3. the derived genesis or announcement delivery is CAS -> `CasDelivery`
 ///
-/// Rule 3 is what accounts for the one genesis-era vector whose genesis
-/// document is declared CAS-delivered while carrying no beacon-type signal at
-/// all (empty `service`, no `pending.json`, expected `versionId` 1).
+/// Rule 3 reads the delivery [`derive_delivery`] reads off the files (an
+/// external set with no sidecar genesis document; update steps with no sidecar
+/// updates), which discovery has already cross-checked against any
+/// `scenario.json` declaration. It is what accounts for the genesis-era vector
+/// whose genesis document is CAS-delivered while it carries no beacon-type
+/// signal at all (empty `service`, no `pending.json`, expected `versionId` 1).
 ///
-/// Rule 2 is what makes the aggregation milestone's target set mechanically
-/// derivable: a CAS or SMT beacon in the genesis document blocks resolve twice
-/// over — the delivery mechanism is unimplemented, and the resolver refuses to
-/// issue a request for that beacon type at all — and those are fixed in
-/// different code. Rows carrying `UnsupportedBeaconType` are the ones that stay
-/// skipped now that every anchored update can be replayed off a captured chain.
+/// Rule 2 applies to every set, negative sets included, and is what makes the
+/// aggregation milestone's target set mechanically derivable: a CAS or SMT
+/// beacon in the genesis document blocks resolve twice over — the delivery
+/// mechanism is unimplemented, and the resolver refuses to issue a request for
+/// that beacon type at all — and those are fixed in different code. Rows
+/// carrying `UnsupportedBeaconType` are the ones that stay skipped now that
+/// every anchored update can be replayed off a captured chain.
 ///
 /// The expected `versionId` is deliberately NOT read. A past-genesis vector is
 /// driven from its captured chain snapshot, so "past genesis" is no longer a
@@ -1654,15 +2079,13 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
 ///    -> `StaleContext` (Resolve only) — from the vector's own update files
 ///    (`update/**/output.json`, `resolve/input.json` sidecar `updates`).
 pub(crate) fn derived_resolve_skip_reasons(
-    has_pending: bool,
-    delivery_genesis: Option<&str>,
-    delivery_announcement: Option<&str>,
+    delivery: &Delivery,
     genesis_service_types: &[String],
 ) -> BTreeSet<SkipReason> {
     let mut reasons = BTreeSet::new();
 
     // Rule 1: the vector's own generator recorded undelivered update steps.
-    if has_pending {
+    if delivery.pending {
         reasons.insert(SkipReason::Unanchored);
     }
 
@@ -1687,17 +2110,11 @@ pub(crate) fn derived_resolve_skip_reasons(
         }
     }
 
-    // Rule 3: the scenario's declared delivery mechanism. Any other value is
-    // generator metadata, not a delivery mechanism, and is ignored.
-    for declared in [delivery_genesis, delivery_announcement]
-        .into_iter()
-        .flatten()
+    // Rule 3: a CAS delivery the files show.
+    if delivery.genesis == GenesisDelivery::Cas
+        || delivery.announcement == Some(AnnouncementDelivery::Cas)
     {
-        match declared {
-            "cas" => reasons.insert(SkipReason::CasDelivery),
-            "smt" => reasons.insert(SkipReason::SmtDelivery),
-            _ => false,
-        };
+        reasons.insert(SkipReason::CasDelivery);
     }
 
     reasons
@@ -1781,12 +2198,7 @@ impl Vector {
         overrides: &[SkipOverride],
     ) -> BTreeSet<SkipReason> {
         let mut reasons = if kind == AssertionKind::Resolve {
-            derived_resolve_skip_reasons(
-                self.has_pending,
-                self.delivery_genesis.as_deref(),
-                self.delivery_announcement.as_deref(),
-                &self.genesis_service_types,
-            )
+            derived_resolve_skip_reasons(&self.delivery, &self.genesis_service_types)
         } else {
             BTreeSet::new()
         };
@@ -2852,8 +3264,9 @@ fn discovery_finds_every_vector_directory() {
     // and no sidecar genesis document to resolve from.
     let qh66uy2s = by_id("mutinynet/x1/qh66uy2s");
     assert_eq!(qh66uy2s.expected_version_id(), Some(1));
-    assert!(!qh66uy2s.has_pending);
-    assert_eq!(qh66uy2s.delivery_genesis.as_deref(), Some("cas"));
+    assert!(!qh66uy2s.delivery.pending);
+    assert_eq!(qh66uy2s.delivery.genesis, GenesisDelivery::Cas);
+    assert_eq!(qh66uy2s.delivery.announcement, None);
     assert!(!qh66uy2s.has_sidecar_genesis_document);
 
     // versionId is coerced from BOTH encodings: regtest ships a string, the
@@ -2872,13 +3285,25 @@ fn discovery_finds_every_vector_directory() {
             .any(|t| t == "SMTBeacon"),
         "q425c5wf declares an SMT beacon in its genesis document"
     );
-    // Both scenario.json delivery fields are collected, not just `genesis`.
+    // Update steps with no sidecar updates are CAS-announced; with them, the
+    // sidecar delivers them, and a key-based genesis is deterministic.
     assert_eq!(
-        by_id("mutinynet/x1/q4x4pxl2")
-            .delivery_announcement
-            .as_deref(),
-        Some("cas")
+        by_id("mutinynet/x1/q4x4pxl2").delivery.announcement,
+        Some(AnnouncementDelivery::Cas)
     );
+    let qgppexmy = by_id("regtest/k1/qgppexmy");
+    assert_eq!(qgppexmy.delivery.genesis, GenesisDelivery::Deterministic);
+    assert_eq!(
+        qgppexmy.delivery.announcement,
+        Some(AnnouncementDelivery::Sidecar)
+    );
+    // The mutinynet sets name their scenario; the checked-out suite ships no
+    // signals.json.
+    assert!(
+        by_id("mutinynet/x1/qh66uy2s").scenario_id.is_some(),
+        "mutinynet sets carry other.json.scenarioId"
+    );
+    assert!(vectors.iter().all(|v| v.signals.is_none()));
     // The directory name maps to a Network, and the id-type segment is kept.
     assert_eq!(by_id("mutinynet/x1/q5ugrf3w").network, Network::Mutinynet);
     assert_eq!(by_id("mutinynet/x1/q5ugrf3w").kind, "x1");
@@ -2913,9 +3338,17 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
         outcome: positive_outcome(1, true),
         resolve_cases: Vec::new(),
         stale_update_context: false,
-        has_pending: false,
-        delivery_genesis: None,
-        delivery_announcement: None,
+        delivery: Delivery {
+            genesis: match id_type_from_kind(kind) {
+                VectorIdType::Key => GenesisDelivery::Deterministic,
+                VectorIdType::External => GenesisDelivery::Sidecar,
+            },
+            announcement: None,
+            negative: false,
+            pending: false,
+        },
+        signals: None,
+        scenario_id: None,
         genesis_service_types: Vec::new(),
         has_sidecar_genesis_document: true,
     }
@@ -2933,31 +3366,51 @@ fn positive_outcome(version: u64, as_string: bool) -> Outcome {
     }
 }
 
+/// A positive set's delivery, for the classification tests.
+fn delivery_of(
+    genesis: GenesisDelivery,
+    announcement: Option<AnnouncementDelivery>,
+    pending: bool,
+) -> Delivery {
+    Delivery {
+        genesis,
+        announcement,
+        negative: false,
+        pending,
+    }
+}
+
 /// Each of the three derived rules fires on its own input, and they accumulate
 /// rather than electing a first-match winner.
 #[test]
 fn derived_reasons_cover_the_three_rules() {
-    // Nothing applies: an anchored, singleton-delivered vector.
+    use AnnouncementDelivery as A;
+    use GenesisDelivery as G;
+
+    // Nothing applies: an anchored, sidecar-delivered vector.
     assert_eq!(
-        derived_resolve_skip_reasons(false, None, None, &[]),
+        derived_resolve_skip_reasons(&delivery_of(G::Sidecar, Some(A::Sidecar), false), &[]),
         BTreeSet::new()
     );
     // Rule 1 alone.
     assert_eq!(
-        derived_resolve_skip_reasons(true, None, None, &[]),
+        derived_resolve_skip_reasons(&delivery_of(G::Deterministic, None, true), &[]),
         BTreeSet::from([SkipReason::Unanchored])
     );
     // Rule 3 alone — the `qh66uy2s` shape: genesis-era, but CAS-delivered.
     assert_eq!(
-        derived_resolve_skip_reasons(false, Some("cas"), None, &[]),
+        derived_resolve_skip_reasons(&delivery_of(G::Cas, None, false), &[]),
+        BTreeSet::from([SkipReason::CasDelivery])
+    );
+    // Rule 3 on the announcements alone.
+    assert_eq!(
+        derived_resolve_skip_reasons(&delivery_of(G::Deterministic, Some(A::Cas), false), &[]),
         BTreeSet::from([SkipReason::CasDelivery])
     );
     // Rules 1, 2 and 3 together, with the duplicate CAS signal collapsing.
     assert_eq!(
         derived_resolve_skip_reasons(
-            true,
-            Some("cas"),
-            Some("cas"),
+            &delivery_of(G::Cas, Some(A::Cas), true),
             &["SingletonBeacon".into(), "CASBeacon".into()]
         ),
         BTreeSet::from([
@@ -2972,17 +3425,19 @@ fn derived_reasons_cover_the_three_rules() {
     // request for that beacon type at all.
     assert_eq!(
         derived_resolve_skip_reasons(
-            false,
-            None,
-            None,
+            &delivery_of(G::Sidecar, None, false),
             &["SingletonBeacon".into(), "SMTBeacon".into()]
         ),
         BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType,])
     );
-    // Rule 3 reads `"smt"` as well as `"cas"`.
+    // Rule 2 applies to a negative set too: its beacons are what they are.
+    let negative = Delivery {
+        negative: true,
+        ..delivery_of(G::Sidecar, Some(A::Sidecar), false)
+    };
     assert_eq!(
-        derived_resolve_skip_reasons(false, Some("smt"), None, &[]),
-        BTreeSet::from([SkipReason::SmtDelivery])
+        derived_resolve_skip_reasons(&negative, &["SMTBeacon".into()]),
+        BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType])
     );
 }
 
@@ -2992,8 +3447,8 @@ fn derived_reasons_cover_the_three_rules() {
 #[test]
 fn delivery_reasons_scope_to_resolve_only() {
     let mut v = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
-    v.has_pending = true;
-    v.delivery_genesis = Some("cas".to_string());
+    v.delivery.pending = true;
+    v.delivery.genesis = GenesisDelivery::Cas;
     v.outcome = positive_outcome(3, true);
     v.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
 
@@ -3264,8 +3719,8 @@ fn synthetic_ledger() -> Vec<Vector> {
 
     let mut multi_update = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
     multi_update.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
-    multi_update.has_pending = true;
-    multi_update.delivery_genesis = Some("cas".to_string());
+    multi_update.delivery.pending = true;
+    multi_update.delivery.genesis = GenesisDelivery::Cas;
     // Both mutinynet members carry the number-encoded versionId the live
     // mutinynet fixtures carry, so the summary's defect line has a non-empty
     // case to report.
@@ -3273,7 +3728,7 @@ fn synthetic_ledger() -> Vec<Vector> {
 
     let mut cas_genesis = synthetic_vector("mutinynet/x1/qh66uy2s", "x1");
     cas_genesis.has_sidecar_genesis_document = false;
-    cas_genesis.delivery_genesis = Some("cas".to_string());
+    cas_genesis.delivery.genesis = GenesisDelivery::Cas;
     cas_genesis.outcome = positive_outcome(1, false);
 
     vec![genesis_era, multi_update, cas_genesis]
@@ -3379,7 +3834,7 @@ fn unclassified_row_is_reported_with_a_classify_message() {
         rows[0]
     );
 
-    orphan.delivery_genesis = Some("cas".to_string());
+    orphan.delivery.genesis = GenesisDelivery::Cas;
     assert!(
         unclassified_rows_with(std::slice::from_ref(&orphan), &[]).is_empty(),
         "a delivery declaration classifies the row"
@@ -3592,7 +4047,7 @@ fn redundant_override_on_a_derived_skip_row_is_reported() {
     }];
 
     let mut cas_genesis = synthetic_vector("mutinynet/x1/qh66uy2s", "x1");
-    cas_genesis.delivery_genesis = Some("cas".to_string());
+    cas_genesis.delivery.genesis = GenesisDelivery::Cas;
     // Precondition: a derived rule already skips this row.
     assert!(
         !cas_genesis
@@ -4158,15 +4613,16 @@ fn chain_fixture_signal_blocks_and_earliest_mediantime() {
 fn unsupported_beacon_type_is_recorded_alongside_the_delivery_reason() {
     assert_eq!(
         derived_resolve_skip_reasons(
-            false,
-            None,
-            None,
+            &delivery_of(GenesisDelivery::Sidecar, None, false),
             &["SingletonBeacon".into(), "SMTBeacon".into()]
         ),
         BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType])
     );
     assert_eq!(
-        derived_resolve_skip_reasons(false, None, None, &["CASBeacon".into()]),
+        derived_resolve_skip_reasons(
+            &delivery_of(GenesisDelivery::Sidecar, None, false),
+            &["CASBeacon".into()]
+        ),
         BTreeSet::from([SkipReason::CasDelivery, SkipReason::UnsupportedBeaconType])
     );
 }
@@ -4178,9 +4634,7 @@ fn unsupported_beacon_type_is_recorded_alongside_the_delivery_reason() {
 fn unsupported_beacon_type_ignores_singleton_and_non_beacon_services() {
     assert_eq!(
         derived_resolve_skip_reasons(
-            false,
-            None,
-            None,
+            &delivery_of(GenesisDelivery::Sidecar, None, false),
             &[
                 "SingletonBeacon".into(),
                 "DIDCommMessaging".into(),
@@ -4197,8 +4651,11 @@ fn unsupported_beacon_type_ignores_singleton_and_non_beacon_services() {
 #[test]
 fn unsupported_beacon_type_does_not_follow_from_a_delivery_declaration() {
     assert_eq!(
-        derived_resolve_skip_reasons(false, Some("cas"), Some("smt"), &[]),
-        BTreeSet::from([SkipReason::CasDelivery, SkipReason::SmtDelivery])
+        derived_resolve_skip_reasons(
+            &delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas), false),
+            &[]
+        ),
+        BTreeSet::from([SkipReason::CasDelivery])
     );
 }
 
@@ -4342,5 +4799,621 @@ fn override_still_sorts_after_every_derived_reason() {
             SkipReason::StaleContext,
             SkipReason::Override("a one-off"),
         ]
+    );
+}
+
+// --- signals.json -------------------------------------------------------------
+
+/// One well-formed `signals.json` entry. `update` and `cohort` are the members
+/// the rules key on; each test perturbs the rest by hand.
+fn signal_entry(
+    update: Option<u64>,
+    block_height: u32,
+    cohort: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "beaconId": "did:btcr2:k1qsynthetic#initialP2WPKH",
+        "address": "bcrt1qsyntheticbeacon",
+        "txid": "a1".repeat(32),
+        "blockHeight": block_height,
+        "blockHash": "b2".repeat(32),
+        "blockTime": 1_789_000_000i64,
+        "mediantime": 1_788_999_900i64,
+        "signalBytes": "c3".repeat(32),
+        "recordedTip": 601,
+    });
+    if let Some(update) = update {
+        entry["update"] = serde_json::json!(update);
+    }
+    if let Some(cohort) = cohort {
+        entry["cohort"] = cohort;
+    }
+    entry
+}
+
+/// A two-member cohort object.
+fn cohort_json() -> serde_json::Value {
+    serde_json::json!({ "id": "cas-09", "members": ["09a-first", "09b-second"] })
+}
+
+/// `parse_signals` over `entries`, with the context the tests look for.
+fn signals_from(entries: serde_json::Value, layout: &UpdateLayout) -> Result<Signals, String> {
+    parse_signals(
+        &entries.to_string(),
+        "regtest/k1/synthetic/signals.json",
+        layout,
+    )
+}
+
+/// Two numbered update steps.
+fn two_steps() -> UpdateLayout {
+    UpdateLayout::Numbered(vec!["01".into(), "02".into()])
+}
+
+/// A single well-formed entry parses, every member lands in its field, and the
+/// file's tip is the entry's `recordedTip`.
+#[test]
+fn signals_parse_a_single_entry() {
+    let signals = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None)]),
+        &two_steps(),
+    )
+    .expect("a well-formed entry parses");
+    assert_eq!(signals.recorded_tip, 601);
+    assert_eq!(signals.entries.len(), 1);
+    let entry = &signals.entries[0];
+    assert_eq!(entry.update, Some(1));
+    assert!(!entry.duplicate);
+    assert_eq!(entry.beacon_id, "did:btcr2:k1qsynthetic#initialP2WPKH");
+    assert_eq!(entry.address, "bcrt1qsyntheticbeacon");
+    assert_eq!(entry.txid, "a1".repeat(32));
+    assert_eq!(entry.block_height, 300);
+    assert_eq!(entry.block_hash, "b2".repeat(32));
+    assert_eq!(entry.block_time, 1_789_000_000);
+    assert_eq!(entry.mediantime, 1_788_999_900);
+    assert_eq!(entry.signal_bytes, "c3".repeat(32));
+    assert_eq!(entry.recorded_tip, 601);
+    assert_eq!(entry.cohort, None);
+}
+
+/// The file is a bare array; the wrapper object an earlier proposal used is
+/// rejected by name.
+#[test]
+fn signals_reject_an_object() {
+    let err = signals_from(serde_json::json!({ "entries": [] }), &two_steps())
+        .expect_err("an object is not the file's shape");
+    assert!(
+        err.contains("bare array") && err.contains("regtest/k1/synthetic/signals.json"),
+        "{err}"
+    );
+}
+
+/// An empty array has no entry to carry `recordedTip`.
+#[test]
+fn signals_reject_an_empty_array() {
+    let err = signals_from(serde_json::json!([]), &two_steps())
+        .expect_err("an empty file records nothing");
+    assert!(err.contains("recordedTip"), "{err}");
+}
+
+/// Every entry of one file is recorded against one tip.
+#[test]
+fn signals_reject_disagreeing_recorded_tips() {
+    let mut second = signal_entry(Some(2), 326, None);
+    second["recordedTip"] = serde_json::json!(602);
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None), second]),
+        &two_steps(),
+    )
+    .expect_err("two tips in one file must be rejected");
+    assert!(err.contains("601") && err.contains("602"), "{err}");
+}
+
+/// `recordedTip` is required on every entry.
+#[test]
+fn signals_reject_an_entry_without_recorded_tip() {
+    let mut entry = signal_entry(Some(1), 300, None);
+    entry
+        .as_object_mut()
+        .expect("an entry is an object")
+        .remove("recordedTip");
+    let err = signals_from(serde_json::json!([entry]), &two_steps())
+        .expect_err("an entry without recordedTip must be rejected");
+    assert!(err.contains("recordedTip"), "{err}");
+}
+
+/// An `update` number the set ships no step for is named as the missing step.
+#[test]
+fn signals_reject_an_update_with_no_matching_step() {
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(3), 300, None)]),
+        &two_steps(),
+    )
+    .expect_err("update 3 names no step of a two-step set");
+    assert!(err.contains("update/03"), "{err}");
+}
+
+/// A flat `update/` is update 1.
+#[test]
+fn signals_accept_update_one_under_a_flat_layout() {
+    signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None)]),
+        &UpdateLayout::Flat,
+    )
+    .expect("update 1 is the flat step");
+}
+
+/// A flat `update/` has no second step.
+#[test]
+fn signals_reject_update_two_under_a_flat_layout() {
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(2), 300, None)]),
+        &UpdateLayout::Flat,
+    )
+    .expect_err("a flat layout has only update 1");
+    assert!(err.contains("update/02"), "{err}");
+}
+
+/// The cohort-only shape: a set with no `update/` whose entry names its cohort
+/// and no update.
+#[test]
+fn signals_accept_a_cohort_entry_without_update() {
+    let signals = signals_from(
+        serde_json::json!([signal_entry(None, 300, Some(cohort_json()))]),
+        &UpdateLayout::None,
+    )
+    .expect("a cohort member with no update of its own parses");
+    let cohort = signals.entries[0]
+        .cohort
+        .as_ref()
+        .expect("the cohort is carried");
+    assert_eq!(cohort.id, "cas-09");
+    assert_eq!(cohort.members, vec!["09a-first", "09b-second"]);
+}
+
+/// An entry that announces no update must say which cohort it belongs to.
+#[test]
+fn signals_reject_an_entry_with_neither_update_nor_cohort() {
+    let err = signals_from(
+        serde_json::json!([signal_entry(None, 300, None)]),
+        &UpdateLayout::None,
+    )
+    .expect_err("an entry with neither update nor cohort must be rejected");
+    assert!(err.contains("update") && err.contains("cohort"), "{err}");
+}
+
+/// A set with no `update/` directory has no step for any `update` to name.
+#[test]
+fn signals_reject_an_update_under_no_update_directory() {
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None)]),
+        &UpdateLayout::None,
+    )
+    .expect_err("update 1 names no step of an update-less set");
+    assert!(err.contains("update/01"), "{err}");
+}
+
+/// Only a repeated announcement of an update can be a duplicate.
+#[test]
+fn signals_reject_duplicate_without_update() {
+    let mut entry = signal_entry(None, 300, Some(cohort_json()));
+    entry["duplicate"] = serde_json::json!(true);
+    let err = signals_from(serde_json::json!([entry]), &UpdateLayout::None)
+        .expect_err("duplicate without update must be rejected");
+    assert!(err.contains("duplicate"), "{err}");
+}
+
+/// Entries without `update` are never duplicates of one another, even when they
+/// push the same bytes.
+#[test]
+fn signals_never_pair_entries_without_update() {
+    let signals = signals_from(
+        serde_json::json!([
+            signal_entry(None, 300, Some(cohort_json())),
+            signal_entry(None, 300, Some(cohort_json())),
+        ]),
+        &UpdateLayout::None,
+    )
+    .expect("two update-less cohort entries are independent");
+    assert_eq!(signals.entries.len(), 2);
+}
+
+/// `txid`, `blockHash` and `signalBytes` are 64 lowercase hex, each named when
+/// it is not.
+#[test]
+fn signals_reject_malformed_hex() {
+    for (member, bad) in [
+        ("signalBytes", "c3".repeat(31)),
+        ("signalBytes", "C3".repeat(32)),
+        ("txid", "zz".repeat(32)),
+        ("blockHash", "b2".repeat(33)),
+    ] {
+        let mut entry = signal_entry(Some(1), 300, None);
+        entry[member] = serde_json::json!(bad);
+        let err = signals_from(serde_json::json!([entry]), &two_steps())
+            .expect_err("malformed hex must be rejected");
+        assert!(err.contains(member), "{member}: {err}");
+    }
+}
+
+/// A later announcement of the same update, flagged, with the same bytes, in a
+/// higher block, is accepted.
+#[test]
+fn signals_accept_a_flagged_duplicate() {
+    let mut repeat = signal_entry(Some(1), 326, None);
+    repeat["duplicate"] = serde_json::json!(true);
+    let signals = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
+        &two_steps(),
+    )
+    .expect("a flagged later duplicate parses");
+    assert!(signals.entries[1].duplicate);
+}
+
+/// The same repeat without the flag is rejected.
+#[test]
+fn signals_reject_an_unflagged_repeat() {
+    let err = signals_from(
+        serde_json::json!([
+            signal_entry(Some(1), 300, None),
+            signal_entry(Some(1), 326, None)
+        ]),
+        &two_steps(),
+    )
+    .expect_err("a repeated update needs duplicate: true");
+    assert!(err.contains("duplicate"), "{err}");
+}
+
+/// `duplicate: true` on the only announcement of an update is rejected.
+#[test]
+fn signals_reject_duplicate_on_a_first_occurrence() {
+    let mut entry = signal_entry(Some(1), 300, None);
+    entry["duplicate"] = serde_json::json!(true);
+    let err = signals_from(serde_json::json!([entry]), &two_steps())
+        .expect_err("a first announcement cannot be a duplicate");
+    assert!(
+        err.contains("duplicate") && err.contains("first announcement"),
+        "{err}"
+    );
+}
+
+/// A duplicate pushes the same signal bytes as the first announcement.
+#[test]
+fn signals_reject_a_duplicate_with_different_signal_bytes() {
+    let mut repeat = signal_entry(Some(1), 326, None);
+    repeat["duplicate"] = serde_json::json!(true);
+    repeat["signalBytes"] = serde_json::json!("d4".repeat(32));
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
+        &two_steps(),
+    )
+    .expect_err("a duplicate with other bytes must be rejected");
+    assert!(err.contains("signalBytes"), "{err}");
+}
+
+/// A duplicate sits strictly above the first announcement.
+#[test]
+fn signals_reject_a_duplicate_not_above_the_first() {
+    for height in [300, 299] {
+        let mut repeat = signal_entry(Some(1), height, None);
+        repeat["duplicate"] = serde_json::json!(true);
+        let err = signals_from(
+            serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
+            &two_steps(),
+        )
+        .expect_err("a duplicate not above the first must be rejected");
+        assert!(err.contains("blockHeight"), "{height}: {err}");
+    }
+}
+
+/// Upstream extends entries additively; an unknown member is ignored.
+#[test]
+fn signals_tolerate_unknown_members() {
+    let mut entry = signal_entry(Some(1), 300, None);
+    entry["futureField"] = serde_json::json!({ "anything": true });
+    signals_from(serde_json::json!([entry]), &two_steps())
+        .expect("an unknown member is not an error");
+}
+
+// --- cohorts -----------------------------------------------------------------
+
+/// A set on `network` named `scenario` whose one signal belongs to `cohort` in
+/// `txid`.
+fn cohort_member(id: &str, scenario: &str, cohort: &serde_json::Value, txid: &str) -> Vector {
+    let mut v = synthetic_vector(id, "x1");
+    v.scenario_id = Some(scenario.to_string());
+    let mut entry = signal_entry(None, 1000, Some(cohort.clone()));
+    entry["txid"] = serde_json::json!(txid);
+    v.signals = Some(
+        signals_from(serde_json::json!([entry]), &UpdateLayout::None)
+            .expect("the cohort member's entry parses"),
+    );
+    v
+}
+
+/// The two members of `cohort_json()` on mutinynet, sharing one transaction.
+fn cohort_pair() -> Vec<Vector> {
+    let txid = "e5".repeat(32);
+    vec![
+        cohort_member("mutinynet/x1/qfirst00", "09a-first", &cohort_json(), &txid),
+        cohort_member("mutinynet/x1/qsecond0", "09b-second", &cohort_json(), &txid),
+    ]
+}
+
+/// Both members found, each recording the cohort in the shared transaction.
+#[test]
+fn cohorts_accept_a_matching_pair() {
+    check_cohorts(&cohort_pair()).expect("a consistent pair passes");
+}
+
+/// A member scenario id no set carries is named.
+#[test]
+fn cohorts_reject_an_unmatched_member() {
+    let pair = cohort_pair();
+    let err = check_cohorts(&pair[..1]).expect_err("a missing partner must be rejected");
+    assert!(err.contains("09b-second"), "{err}");
+}
+
+/// A member scenario id two sets carry is ambiguous.
+#[test]
+fn cohorts_reject_a_member_matching_two_sets() {
+    let mut vectors = cohort_pair();
+    let mut twin = vectors[1].clone();
+    twin.id = "mutinynet/x1/qtwin000".to_string();
+    vectors.push(twin);
+    let err = check_cohorts(&vectors).expect_err("an ambiguous member must be rejected");
+    assert!(
+        err.contains("09b-second") && err.contains("matches 2"),
+        "{err}"
+    );
+}
+
+/// A set on another network is not a sibling, even with the right scenario id.
+#[test]
+fn cohorts_ignore_a_sibling_on_another_network() {
+    let mut vectors = cohort_pair();
+    vectors[1].id = "regtest/x1/qsecond0".to_string();
+    vectors[1].network_dir = "regtest".to_string();
+    let err = check_cohorts(&vectors).expect_err("a cross-network partner does not count");
+    assert!(err.contains("09b-second"), "{err}");
+}
+
+/// The partner's own `signals.json` must record the cohort: here it has no
+/// signals at all.
+#[test]
+fn cohorts_reject_a_member_without_the_cohort_entry() {
+    let mut vectors = cohort_pair();
+    vectors[1].signals = None;
+    let err = check_cohorts(&vectors).expect_err("the partner must record the cohort");
+    assert!(
+        err.contains("09b-second") && err.contains("cas-09"),
+        "{err}"
+    );
+}
+
+/// The partner records the cohort, but in another transaction.
+#[test]
+fn cohorts_reject_a_member_recording_another_txid() {
+    let mut vectors = cohort_pair();
+    vectors[1] = cohort_member(
+        "mutinynet/x1/qsecond0",
+        "09b-second",
+        &cohort_json(),
+        &"f6".repeat(32),
+    );
+    let err = check_cohorts(&vectors).expect_err("the partner must share the transaction");
+    assert!(err.contains(&"e5".repeat(32)), "{err}");
+}
+
+// --- delivery ----------------------------------------------------------------
+
+/// A negative set is read by id type alone: the file-shape CAS inferences that
+/// would otherwise fire on an external set with no sidecar genesis document and
+/// updates with no sidecar copies do not.
+#[test]
+fn delivery_negative_skips_the_file_shape_cas_rules() {
+    let external = derive_delivery(VectorIdType::External, true, false, true, false, false);
+    assert!(external.negative);
+    assert_eq!(external.genesis, GenesisDelivery::Sidecar);
+    assert_eq!(external.announcement, Some(AnnouncementDelivery::Sidecar));
+
+    let key = derive_delivery(VectorIdType::Key, true, false, false, false, false);
+    assert_eq!(key.genesis, GenesisDelivery::Deterministic);
+    assert_eq!(key.announcement, None);
+}
+
+/// A positive external set with no sidecar genesis document has a CAS genesis;
+/// with one, the sidecar delivers it.
+#[test]
+fn delivery_external_genesis_follows_the_sidecar() {
+    let cas = derive_delivery(VectorIdType::External, false, false, false, false, false);
+    assert_eq!(cas.genesis, GenesisDelivery::Cas);
+    assert!(!cas.negative);
+
+    let sidecar = derive_delivery(VectorIdType::External, false, true, false, false, false);
+    assert_eq!(sidecar.genesis, GenesisDelivery::Sidecar);
+}
+
+/// Update steps with no sidecar `updates` are CAS-announced; with them, the
+/// sidecar delivers them; with no update steps there is no announcement.
+#[test]
+fn delivery_announcement_follows_the_sidecar_updates() {
+    let cas = derive_delivery(VectorIdType::Key, false, false, true, false, false);
+    assert_eq!(cas.announcement, Some(AnnouncementDelivery::Cas));
+
+    let sidecar = derive_delivery(VectorIdType::Key, false, false, true, true, false);
+    assert_eq!(sidecar.announcement, Some(AnnouncementDelivery::Sidecar));
+
+    let none = derive_delivery(VectorIdType::Key, false, false, false, true, false);
+    assert_eq!(none.announcement, None);
+}
+
+/// A key-based genesis is deterministic whatever the sidecar says, and
+/// `pending` is carried through.
+#[test]
+fn delivery_key_genesis_is_deterministic() {
+    for has_sidecar_genesis in [false, true] {
+        let d = derive_delivery(
+            VectorIdType::Key,
+            false,
+            has_sidecar_genesis,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(d.genesis, GenesisDelivery::Deterministic);
+        assert!(d.pending);
+    }
+}
+
+/// A declared CAS genesis the files do not show, and a CAS genesis the files
+/// show but the scenario does not declare, both disagree.
+#[test]
+fn delivery_cross_check_rejects_a_genesis_disagreement() {
+    use GenesisDelivery as G;
+    for derived in [G::Deterministic, G::Sidecar] {
+        let err = cross_check_scenario(&delivery_of(derived, None, false), Some("cas"), None, &[])
+            .expect_err("declared CAS genesis vs a non-CAS derivation");
+        assert!(err.contains("disagree") && err.contains("cas"), "{err}");
+    }
+    cross_check_scenario(&delivery_of(G::Cas, None, false), None, None, &[])
+        .expect_err("a derived CAS genesis the scenario does not declare");
+    cross_check_scenario(&delivery_of(G::Cas, None, false), Some("cas"), None, &[])
+        .expect("agreement passes");
+}
+
+/// On an anchored set a declared CAS announcement must be what the files show.
+#[test]
+fn delivery_cross_check_rejects_an_announcement_disagreement_when_anchored() {
+    let derived = delivery_of(GenesisDelivery::Cas, None, false);
+    let err = cross_check_scenario(&derived, Some("cas"), Some("cas"), &[])
+        .expect_err("declared CAS announcement vs no announcement");
+    assert!(
+        err.contains("announcement") && err.contains("disagree"),
+        "{err}"
+    );
+}
+
+/// A pending set never anchored its updates, so only its genesis delivery is
+/// cross-checked: the same disagreement passes, and a genesis disagreement
+/// still fails.
+#[test]
+fn delivery_cross_check_checks_genesis_only_when_pending() {
+    let derived = delivery_of(GenesisDelivery::Cas, None, true);
+    cross_check_scenario(&derived, Some("cas"), Some("cas"), &[])
+        .expect("the announcement of a pending set is not cross-checked");
+    let derived = delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas), true);
+    cross_check_scenario(&derived, Some("cas"), None, &[]).expect("nor is an undeclared one");
+    let derived = delivery_of(GenesisDelivery::Sidecar, None, true);
+    cross_check_scenario(&derived, Some("cas"), None, &[])
+        .expect_err("the genesis of a pending set still is");
+}
+
+/// A null or absent `delivery` declares nothing and is not checked, even where
+/// the files show CAS delivery.
+#[test]
+fn delivery_cross_check_skips_a_null_declaration() {
+    let derived = delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas), false);
+    for scenario in [
+        serde_json::json!({ "delivery": null }),
+        serde_json::json!({}),
+    ] {
+        check_scenario_delivery(&derived, &scenario, &[]).expect("nothing is declared");
+    }
+    check_scenario_delivery(
+        &derived,
+        &serde_json::json!({ "delivery": { "genesis": "cas", "announcement": "cas" } }),
+        &[],
+    )
+    .expect("a matching declaration passes through the whole-file entry point");
+    check_scenario_delivery(
+        &delivery_of(GenesisDelivery::Sidecar, None, false),
+        &serde_json::json!({ "delivery": { "genesis": "cas" } }),
+        &[],
+    )
+    .expect_err("a disagreeing one fails through it");
+}
+
+/// A declared SMT delivery needs an SMT beacon in the genesis document.
+#[test]
+fn delivery_cross_check_smt_requires_an_smt_beacon() {
+    let derived = delivery_of(
+        GenesisDelivery::Sidecar,
+        Some(AnnouncementDelivery::Sidecar),
+        false,
+    );
+    let err = cross_check_scenario(&derived, None, Some("smt"), &["SingletonBeacon".into()])
+        .expect_err("SMT declared with no SMT beacon");
+    assert!(err.contains("SMTBeacon"), "{err}");
+    cross_check_scenario(&derived, None, Some("smt"), &["SMTBeacon".into()])
+        .expect("SMT declared with an SMT beacon");
+}
+
+/// The derived CAS delivery set on the checked-out suite, pinned by id: the
+/// seven external sets whose files show a CAS genesis, plus the two whose
+/// genesis document declares a `CASBeacon`. Every declaring `scenario.json` was
+/// cross-checked against these at discovery, so this pin is the cross-check's
+/// observable result.
+#[test]
+fn live_vectors_derive_exactly_the_cas_delivery_set() {
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover_in(&Corpus::test_suite());
+    assert!(!vectors.is_empty());
+
+    let observed: BTreeSet<String> = vectors
+        .iter()
+        .filter(|v| {
+            v.skip_reasons_with(AssertionKind::Resolve, &[])
+                .contains(&SkipReason::CasDelivery)
+        })
+        .map(|v| v.id.clone())
+        .collect();
+    let expected: BTreeSet<String> = [
+        "mutinynet/x1/q4lqu6gr",
+        "mutinynet/x1/q4rnhfhv",
+        "mutinynet/x1/q4x4pxl2",
+        "mutinynet/x1/q550pp4e",
+        "mutinynet/x1/q59jnwfs",
+        "mutinynet/x1/q5m2fh36",
+        "mutinynet/x1/qh66uy2s",
+        "mutinynet/x1/qkrrp544",
+        "mutinynet/x1/qky9e7qz",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(
+        observed, expected,
+        "the sets whose files (or genesis beacons) show CAS delivery"
+    );
+}
+
+/// No set of the checked-out suite expects an error, so a negative set leaking
+/// in fails here by name rather than as a driver failure.
+#[test]
+fn no_live_vector_is_negative() {
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover_in(&Corpus::test_suite());
+    assert!(!vectors.is_empty());
+    let negative: Vec<&str> = vectors
+        .iter()
+        .filter(|v| v.is_negative())
+        .map(|v| v.id.as_str())
+        .collect();
+    assert!(
+        negative.is_empty(),
+        "the checked-out suite ships no negative set, but these expect an error: {negative:?}"
     );
 }
