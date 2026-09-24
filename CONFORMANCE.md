@@ -14,7 +14,7 @@ coverage status:
 - **Gap** — applies to the Singleton scope and is not implemented; the reason names what is
   missing.
 
-**Totals:** 81 requirements — 62 Covered, 13 DeferredAggregation, 5 NotApplicable, 1 Gap.
+**Totals:** 88 requirements — 65 Covered, 16 DeferredAggregation, 6 NotApplicable, 1 Gap.
 
 ## Requirement Matrix
 
@@ -30,6 +30,7 @@ coverage status:
 | `algorithms.md:identifier-processed-per-resolution` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
 | `algorithms.md:decode-method-specific-id-lowercase` | MUST | Covered | `identifier::tests::parse_did_identifier_rejects_uppercase_method_specific_id` |
 | `algorithms.md:btcr2-version-zero-version-number` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
+| `algorithms.md:network-name-integer-representable` | MUST | Covered | `identifier::tests::test_network_conversion` |
 | `algorithms.md:network-value-handled-per-table` | MUST | Covered | `identifier::tests::test_network_conversion` |
 | `algorithms.md:reserved-network-value-rejected-on-decode` | MUST | Covered | `identifier::tests::test_custom_network` |
 | `algorithms.md:hrp-k-or-x` | MUST | Covered | `identifier::tests::test_id_type_hrps` |
@@ -37,6 +38,7 @@ coverage status:
 | `algorithms.md:hrp-x-genesis-bytes` | MUST | Covered | `identifier::tests::test_encode_decode_external` |
 | `algorithms.md:decoding-inverts-encoding` | MUST | Covered | `identifier::tests::test_encode_decode_key_based` |
 | `algorithms.md:smt-proof-fields-decoded-before-hashing` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `algorithms.md:smt-proof-verification-false-conditions` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `optimized-smt.md:smt-proof-fields-decoded-before-hashing` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `privacy-considerations.md:test-suite-consensus-splits` | MUST | NotApplicable | non-normative test-suite design guidance, not an implementable method behavior |
 | `privacy-considerations.md:smt-aggregation-service-path` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
@@ -48,13 +50,15 @@ coverage status:
 | `aggregate-beacons.md:smt-service-constructs-tree` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `aggregate-beacons.md:cas-participant-checks-index` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `aggregate-beacons.md:smt-participant-validates-index` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
-| `beacons.md:all-signals-processed` | MUST | Covered | `resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash` |
+| `beacons.md:process-each-found-signal` | MUST | Covered | `resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied` |
 | `beacons.md:active-beacons-in-service` | MUST | Covered | `document::tests::beacons_accessor` |
 | `beacons.md:resolvers-support-beacon-types` | MUST | Covered | `beacon::tests::beacon_type_serde_round_trips_spec_strings` |
+| `conformance.md:bcp14-keyword-interpretation` | MUST NOT | NotApplicable | BCP 14 boilerplate: names the RFC 2119 keywords and how to read them; imposes no requirement on an implementation |
 | `conformance.md:conformant-to-did-core` | MUST | NotApplicable | umbrella conformance statement over DID-Core/Resolution; covered transitively by the specific rows below, not a single testable behavior |
 | `data-structures.md:json-ld-conformance` | MUST | NotApplicable | JSON-LD 1.1 layer is out of scope (see PROJECT.md Out of Scope); JCS hashing needs are met without a general JSON-LD conformance layer |
 | `data-structures.md:base64url-no-pad-encoding` | MUST | Covered | `update::tests::unsigned_update_hashes_are_base64url_no_pad` |
 | `data-structures.md:did-doc-required-properties` | MUST | Covered | `document::tests::test_document_validation_missing_elements` |
+| `data-structures.md:relative-did-url-resolved-against-id` | MUST | Covered | `document::tests::apply_update_resolves_relative_did_url` |
 | `data-structures.md:source-target-hash-json-document-hashing` | MUST | Covered | `document::tests::golden_signed_update_bytes` |
 | `data-structures.md:update-context-pinned-array` | MUST | Covered | `document::tests::apply_update_rejects_unpinned_context` |
 | `data-structures.md:patch-result-conformant-doc` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
@@ -66,7 +70,9 @@ coverage status:
 | `data-structures.md:capability-action-write` | MUST | Covered | `document::tests::data_integrity_config_shape` |
 | `data-structures.md:proof-purpose-capability-invocation` | MUST | Covered | `document::tests::construct_signed_update_round_trips` |
 | `data-structures.md:proof-value-detached-schnorr` | MUST | Covered | `document::tests::proof_value_is_base58btc_64_bytes` |
+| `data-structures.md:smt-proofs-one-per-smt-signal` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `data-structures.md:cas-announcement-hashes-base64url` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `data-structures.md:smt-proof-nonce-base64url` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `data-structures.md:smt-proof-collapsed-bitmap` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `data-structures.md:smt-proof-hashes-sibling-nodes` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `data-structures.md:resolver-media-types` | MUST | NotApplicable | media types are a property of the HTTP DID Resolution binding; this crate returns typed Rust values, not media-typed bytes, so there is no surface to test until the binding exists |
@@ -86,7 +92,8 @@ coverage status:
 | `resolve.md:process-genesis-document-placeholder` | MUST | Covered | `document::tests::test_from_external_intermediate` |
 | `resolve.md:render-initial-did-document-bitcoin-uri` | MUST | Covered | `document::tests::beacons_accessor` |
 | `resolve.md:parse-rendered-template-conformant-doc` | MUST | Covered | `document::tests::test_document_parse` |
-| `resolve.md:signal-confirmed-min-conf` | MUST | Covered | `resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies` |
+| `resolve.md:signal-confirmed-min-conf` | MUST NOT | Covered | `resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies` |
+| `resolve.md:update-hash-compared-to-signal` | MUST | Covered | `resolver::tests::a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data` |
 | `resolve.md:late-publishing-raised` | MUST | Covered | `update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing` |
 | `resolve.md:capability-invocation-entry-identifies-proof-vm` | MUST | Covered | `document::tests::apply_update_accepts_embedded_capability_invocation` |
 | `update.md:apply-patch-invalid-did-update-on-failure` | MUST | Covered | `document::tests::construct_signed_update_rejects_failing_patch` |
@@ -99,7 +106,7 @@ coverage status:
 | `terminology.md:must-not-complete-resolution-if-data-missing` | MUST NOT | Covered | `resolver::tests::unknown_signal_hash_raises_missing_update_data` |
 | `terminology.md:history-changes-detected` | MUST | Covered | `document::tests::wrong_target_version_id_fails_round_trip` |
 | `terminology.md:carry-did-document-history` | MUST | Covered | `resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash` |
-| `update-data-distribution.md:cas-retrieval-hash-verified` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
+| `update-data-distribution.md:cas-retrieval-hash-verified` | MUST NOT | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `update-data-distribution.md:ipfs-chunking` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 
 ## Gap List
@@ -112,6 +119,7 @@ this matrix does not overstate conformance:
 The justified non-gaps are:
 
 - `algorithms.md:smt-proof-fields-decoded-before-hashing` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `algorithms.md:smt-proof-verification-false-conditions` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `optimized-smt.md:smt-proof-fields-decoded-before-hashing` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `privacy-considerations.md:test-suite-consensus-splits` (MUST) — NotApplicable: non-normative test-suite design guidance, not an implementable method behavior
 - `privacy-considerations.md:smt-aggregation-service-path` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
@@ -120,14 +128,17 @@ The justified non-gaps are:
 - `aggregate-beacons.md:smt-service-constructs-tree` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `aggregate-beacons.md:cas-participant-checks-index` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `aggregate-beacons.md:smt-participant-validates-index` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `conformance.md:bcp14-keyword-interpretation` (MUST NOT) — NotApplicable: BCP 14 boilerplate: names the RFC 2119 keywords and how to read them; imposes no requirement on an implementation
 - `conformance.md:conformant-to-did-core` (MUST) — NotApplicable: umbrella conformance statement over DID-Core/Resolution; covered transitively by the specific rows below, not a single testable behavior
 - `data-structures.md:json-ld-conformance` (MUST) — NotApplicable: JSON-LD 1.1 layer is out of scope (see PROJECT.md Out of Scope); JCS hashing needs are met without a general JSON-LD conformance layer
+- `data-structures.md:smt-proofs-one-per-smt-signal` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `data-structures.md:cas-announcement-hashes-base64url` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `data-structures.md:smt-proof-nonce-base64url` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `data-structures.md:smt-proof-collapsed-bitmap` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `data-structures.md:smt-proof-hashes-sibling-nodes` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `data-structures.md:resolver-media-types` (MUST) — NotApplicable: media types are a property of the HTTP DID Resolution binding; this crate returns typed Rust values, not media-typed bytes, so there is no surface to test until the binding exists
 - `update.md:target-version-id-from-fresh-resolution` (MUST) — NotApplicable: a DID-controller operating rule: the library takes the current `versionId` as an explicit argument (`construct_signed_update`, the client's `update`/`deactivate`) and cannot observe whether the caller obtained it from a fresh resolution
-- `update-data-distribution.md:cas-retrieval-hash-verified` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
+- `update-data-distribution.md:cas-retrieval-hash-verified` (MUST NOT) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `update-data-distribution.md:ipfs-chunking` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 
 ## Self-Check Scope (residual)

@@ -150,9 +150,12 @@ fn parse_index_row(line: &str) -> (String, String) {
 /// Scan the method-spec section of the INDEX snapshot for every MUST-family row.
 ///
 /// Scope is MUST + MUST NOT + SHALL + SHALL NOT only. SHOULD / MAY /
-/// RECOMMENDED / OPTIONAL / REQUIRED are out of scope. Multi-word negatives are
-/// emitted by `.build-method-index.py` as a unit (`**MUST NOT**`), so they are
-/// matched distinctly. Only lines at/after the `## did:btcr2 method spec` marker
+/// RECOMMENDED / OPTIONAL / REQUIRED are out of scope. `.build-method-index.py`
+/// indexes each line under its strongest keyword, so a MUST on a line that
+/// opens with OPTIONAL or MAY is in scope, while a line whose strongest keyword
+/// is REQUIRED (e.g. the data-structures.md sidecar `updates` / `casUpdates`
+/// lines) stays out. Multi-word negatives are emitted as a unit
+/// (`**MUST NOT**`), so they are matched distinctly. Only lines at/after the `## did:btcr2 method spec` marker
 /// are scanned.
 ///
 /// The third tuple field is the **occurrence index** of `(file, prefix)` within
@@ -372,7 +375,7 @@ struct ConformanceRow {
 
 /// The curated Singleton conformance table.
 ///
-/// One row per method-spec MUST/SHALL line in the vendored snapshot (81 rows).
+/// One row per method-spec MUST/SHALL line in the vendored snapshot (88 rows).
 /// `prefix` values are the normalized 80-char join keys; they MUST match the
 /// INDEX guard's `normalize_prefix` output for the corresponding snippet (the
 /// `index_guard` + `curated_len_matches_parsed_must_rows` tests enforce this).
@@ -455,6 +458,13 @@ const CURATED: &[ConformanceRow] = &[
         status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
     },
     ConformanceRow {
+        id: "algorithms.md:network-name-integer-representable",
+        file: "did-btcr2/src/algorithms.md",
+        keyword: "MUST",
+        prefix: "the `network_name` value declares which bitcoin network anchors the identifier.",
+        status: Status::Covered("identifier::tests::test_network_conversion"),
+    },
+    ConformanceRow {
         id: "algorithms.md:network-value-handled-per-table",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
@@ -500,7 +510,14 @@ const CURATED: &[ConformanceRow] = &[
         id: "algorithms.md:smt-proof-fields-decoded-before-hashing",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
-        prefix: "throughout this section, `hash()` denotes sha-256 over a byte array, and `concat",
+        prefix: "`bitat(i)` of a 32-byte value counts from left to right. `bitat(0)` is the most",
+        status: Status::DeferredAggregation,
+    },
+    ConformanceRow {
+        id: "algorithms.md:smt-proof-verification-false-conditions",
+        file: "did-btcr2/src/algorithms.md",
+        keyword: "MUST",
+        prefix: "the result of the algorithm must be `false` if any of the following conditions a",
         status: Status::DeferredAggregation,
     },
     // ---- appendix/optimized-smt.md (SMT, deferred) --------------------------
@@ -508,7 +525,7 @@ const CURATED: &[ConformanceRow] = &[
         id: "optimized-smt.md:smt-proof-fields-decoded-before-hashing",
         file: "did-btcr2/src/appendix/optimized-smt.md",
         keyword: "MUST",
-        prefix: "throughout this appendix, `hash()` denotes sha-256 over a byte array, and the `+",
+        prefix: "throughout this appendix, `hash()` denotes sha-256 over a byte sequence. the byt",
         status: Status::DeferredAggregation,
     },
     // ---- appendix/privacy-considerations.md --------------------------------
@@ -588,11 +605,19 @@ const CURATED: &[ConformanceRow] = &[
     },
     // ---- beacons.md --------------------------------------------------------
     ConformanceRow {
-        id: "beacons.md:all-signals-processed",
+        id: "beacons.md:process-each-found-signal",
         file: "did-btcr2/src/beacons.md",
         keyword: "MUST",
-        prefix: "all [beacon signals][beacon signal] broadcast from a [btcr2 beacon] in the [curr",
-        status: Status::Covered("resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"),
+        prefix: "the resolver must process each [beacon signal] that find beacon signals fin",
+        // The positive half: a signal Find Beacon Signals finds is processed.
+        // The negative half (a signal it does not find is not processed) is
+        // `resolver::tests::a_conflicting_announcement_below_the_current_height_is_not_found`.
+        // The same line's "the Beacon Type defines how Beacon Signals MUST be
+        // processed" is exercised by the Singleton path only; the CAS and SMT
+        // arms are DeferredAggregation elsewhere in this table.
+        status: Status::Covered(
+            "resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied",
+        ),
     },
     ConformanceRow {
         id: "beacons.md:active-beacons-in-service",
@@ -609,6 +634,16 @@ const CURATED: &[ConformanceRow] = &[
         status: Status::Covered("beacon::tests::beacon_type_serde_round_trips_spec_strings"),
     },
     // ---- conformance.md ----------------------------------------------------
+    ConformanceRow {
+        id: "conformance.md:bcp14-keyword-interpretation",
+        file: "did-btcr2/src/conformance.md",
+        keyword: "MUST NOT",
+        prefix: "the key words may, must, must not, recommended, should, and should not in this d",
+        status: Status::NotApplicable(
+            "BCP 14 boilerplate: names the RFC 2119 keywords and how to read them; imposes no \
+             requirement on an implementation",
+        ),
+    },
     ConformanceRow {
         id: "conformance.md:conformant-to-did-core",
         file: "did-btcr2/src/conformance.md",
@@ -643,6 +678,13 @@ const CURATED: &[ConformanceRow] = &[
         keyword: "MUST",
         prefix: "the following properties must be included:",
         status: Status::Covered("document::tests::test_document_validation_missing_elements"),
+    },
+    ConformanceRow {
+        id: "data-structures.md:relative-did-url-resolved-against-id",
+        file: "did-btcr2/src/data-structures.md",
+        keyword: "MUST",
+        prefix: "verification method references in this document may be relative did urls. did co",
+        status: Status::Covered("document::tests::apply_update_resolves_relative_did_url"),
     },
     ConformanceRow {
         id: "data-structures.md:source-target-hash-json-document-hashing",
@@ -722,6 +764,13 @@ const CURATED: &[ConformanceRow] = &[
         status: Status::Covered("document::tests::proof_value_is_base58btc_64_bytes"),
     },
     ConformanceRow {
+        id: "data-structures.md:smt-proofs-one-per-smt-signal",
+        file: "did-btcr2/src/data-structures.md",
+        keyword: "MUST",
+        prefix: "- `smtproofs`: optional array of [smt proofs][smt proof (data structure)]. it mu",
+        status: Status::DeferredAggregation,
+    },
+    ConformanceRow {
         id: "data-structures.md:cas-announcement-hashes-base64url",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
@@ -729,17 +778,24 @@ const CURATED: &[ConformanceRow] = &[
         status: Status::DeferredAggregation,
     },
     ConformanceRow {
+        id: "data-structures.md:smt-proof-nonce-base64url",
+        file: "did-btcr2/src/data-structures.md",
+        keyword: "MUST",
+        prefix: "- `nonce`: optional 256-bit nonce, one for each index in each [beacon signal]. m",
+        status: Status::DeferredAggregation,
+    },
+    ConformanceRow {
         id: "data-structures.md:smt-proof-collapsed-bitmap",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
-        prefix: "- `collapsed`: bitmap of zero nodes within the path (see: [collapsed leaves](htt",
+        prefix: "- `collapsed`: 256-bit bitmap with one bit for each level of the path from the l",
         status: Status::DeferredAggregation,
     },
     ConformanceRow {
         id: "data-structures.md:smt-proof-hashes-sibling-nodes",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
-        prefix: "- `hashes`: array of sha-256 hashes representing the sibling [smt] nodes from th",
+        prefix: "- `hashes`: array of the sha-256 hashes of the non-empty sibling nodes on the pa",
         status: Status::DeferredAggregation,
     },
     ConformanceRow {
@@ -879,7 +935,7 @@ const CURATED: &[ConformanceRow] = &[
     ConformanceRow {
         id: "resolve.md:signal-confirmed-min-conf",
         file: "did-btcr2/src/operations/resolve.md",
-        keyword: "MUST",
+        keyword: "MUST NOT",
         prefix: "a transaction must be included in a bitcoin block and have at least `resolutiono",
         // The 5-vs-6 boundary under the default `minConf`; the `minConf: 1`
         // override (`min_conf_one_applies_a_one_confirmation_signal`) and the
@@ -888,6 +944,24 @@ const CURATED: &[ConformanceRow] = &[
         // exercised beside it.
         status: Status::Covered(
             "resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies",
+        ),
+    },
+    ConformanceRow {
+        id: "resolve.md:update-hash-compared-to-signal",
+        file: "did-btcr2/src/operations/resolve.md",
+        keyword: "MUST",
+        prefix: "* the resolver must hash the update with the [json document hashing] algorithm.",
+        // Sidecar arm, by construction: every `update_lookup_table` insertion
+        // keys by `Update::hash()`, the JSON Document Hash of the wire JSON
+        // (`SidecarData::new`, `rebuild_lookup_table`, `push_update`), so an
+        // update that does not hash to the signal bytes is absent from the
+        // table and the signal is MISSING_UPDATE_DATA; it is never applied.
+        // Test code that inserts under a foreign hash (e.g.
+        // `unconfirmed_needed_signal_is_skipped`) is test-only. The
+        // CAS-retrieval arm is DeferredAggregation (CAS retrieval returns
+        // Unsupported); INVALID_SIGNAL_DATA lands with it.
+        status: Status::Covered(
+            "resolver::tests::a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data",
         ),
     },
     ConformanceRow {
@@ -990,7 +1064,7 @@ const CURATED: &[ConformanceRow] = &[
     ConformanceRow {
         id: "update-data-distribution.md:cas-retrieval-hash-verified",
         file: "did-btcr2/src/update-data-distribution.md",
-        keyword: "MUST",
+        keyword: "MUST NOT",
         prefix: "for each retrieval from [cas], the resolver must compute the sha-256 hash of the",
         status: Status::DeferredAggregation,
     },
@@ -1074,6 +1148,8 @@ const KNOWN_TESTS: &[&str] = &[
     "identifier::sha256_hash_serde_tests::sha256_hash_deserializes_escaped_string",
     "key::tests::test_drop_runs_the_scrub",
     "key::tests::test_scrub_overwrites_the_secret_in_place",
+    "resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied",
+    "resolver::tests::a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data",
     "resolver::tests::cas_service_request_returns_unsupported",
     "resolver::tests::smt_service_request_returns_unsupported",
     "resolver::tests::cas_signal_returns_unsupported",
