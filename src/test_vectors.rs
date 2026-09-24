@@ -2031,6 +2031,110 @@ pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[
     "mutinynet/x1/qky9e7qz",
 ];
 
+/// An error code a test vector records where the specification names a different one.
+pub(crate) struct CodeDivergence {
+    /// The code in the vector's `didResolutionMetadata.error`.
+    pub(crate) vector_code: &'static str,
+    /// The code the specification defines, which the resolver emits.
+    pub(crate) spec_code: &'static str,
+    /// The upstream issue or pull request that tracks reconciling the two.
+    pub(crate) issue: &'static str,
+}
+
+/// The error codes where a vector and the specification disagree, each with
+/// the upstream thread tracking the reconciliation.
+///
+/// Pinned in BOTH directions, like [`NUMBER_ENCODED_VERSION_ID`]:
+/// - a negative row whose emitted code differs from its vector's code and is
+///   not listed here fails as a NEW divergence, instead of being absorbed;
+/// - a listed entry that no driven negative case uses fails too
+///   ([`unused_divergences`]), telling the reader to delete the entry.
+///
+/// A listed row stays DRIVEN and asserts that the resolver emits the
+/// specification's code ([`expected_emitted_code`]). This is not a skip:
+/// `SKIP_OVERRIDES` must never be used for code drift, because a skipped row
+/// asserts nothing and a later regression in the emitted code would pass.
+///
+/// Empty on the current test-suite pin, because no vector there records an
+/// error. It is expected to gain its first entry when the regenerated test
+/// suite, which ships negative sets, is absorbed.
+pub(crate) const ERROR_CODE_DIVERGENCES: &[CodeDivergence] = &[];
+
+/// The code the resolver must emit for a row whose vector records
+/// `vector_code`: the specification's code when the pair is listed in
+/// `divergences`, the vector's own code otherwise.
+pub(crate) fn expected_emitted_code<'a>(
+    vector_code: &'a str,
+    divergences: &'a [CodeDivergence],
+) -> &'a str {
+    divergences
+        .iter()
+        .find(|d| d.vector_code == vector_code)
+        .map_or(vector_code, |d| d.spec_code)
+}
+
+/// Divergence entries no driven negative row uses.
+///
+/// A use is a row the drive gate admits — a set's main resolve pair or one of
+/// its `resolve/NN` cases — whose expected outcome is an error with the
+/// entry's `vector_code`. A matching row that is skipped does not count: it
+/// asserts nothing, so it cannot justify keeping the entry.
+pub(crate) fn unused_divergences(
+    vectors: &[Vector],
+    overrides: &[SkipOverride],
+    divergences: &[CodeDivergence],
+) -> Vec<String> {
+    let records = |outcome: &Outcome, code: &str| matches!(outcome, Outcome::Error { code: recorded } if recorded == code);
+    divergences
+        .iter()
+        .filter(|d| {
+            !vectors.iter().any(|v| {
+                let main = v.should_drive_row_with(AssertionKind::Resolve, None, overrides)
+                    && records(&v.outcome, d.vector_code);
+                let case = v.resolve_cases.iter().any(|c| {
+                    v.should_drive_row_with(AssertionKind::ResolveOption, Some(&c.name), overrides)
+                        && records(&c.outcome, d.vector_code)
+                });
+                main || case
+            })
+        })
+        .map(|d| {
+            format!(
+                "  {} -> {} ({}) — no driven negative case records this code; delete the entry",
+                d.vector_code, d.spec_code, d.issue
+            )
+        })
+        .collect()
+}
+
+/// Divergence entries that cannot be right on their face: a vector code equal
+/// to its specification code (no divergence at all), and a vector code listed
+/// more than once (two answers for one code).
+pub(crate) fn malformed_divergences(divergences: &[CodeDivergence]) -> Vec<String> {
+    let mut rows = Vec::new();
+    for d in divergences {
+        if d.vector_code == d.spec_code {
+            rows.push(format!(
+                "  {} -> {} ({}) — the vector and specification codes are equal; this is not a \
+                 divergence, delete the entry",
+                d.vector_code, d.spec_code, d.issue
+            ));
+        }
+    }
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for d in divergences {
+        *counts.entry(d.vector_code).or_default() += 1;
+    }
+    for (code, count) in counts {
+        if count > 1 {
+            rows.push(format!(
+                "  {code} is listed {count} times — keep one entry per vector code"
+            ));
+        }
+    }
+    rows
+}
+
 /// The vectors whose update files carry an `@context` that predates the spec's
 /// pinned BTCR2 Unsigned Update array — every vector with an `update/`
 /// directory in the vendor suite as checked out today.
@@ -5301,6 +5405,199 @@ fn resolve_option_is_listed_after_end_state_in_the_summary() {
     assert!(
         summary.contains("  resolve-option       0        0\n"),
         "no case in the synthetic ledger:\n{summary}"
+    );
+}
+
+// --- Error-code divergences ---------------------------------------------------
+
+/// A one-entry divergence table for the guard tests.
+const LATE: &[CodeDivergence] = &[CodeDivergence {
+    vector_code: "LATE_PUBLISHING_ERROR",
+    spec_code: "LATE_PUBLISHING",
+    issue: "x",
+}];
+
+/// A driven set whose main resolve pair expects `code`.
+fn negative_main(id: &str, kind: &str, code: &str) -> Vector {
+    let mut v = synthetic_vector(id, kind);
+    v.outcome = Outcome::Error {
+        code: code.to_string(),
+    };
+    v.delivery.negative = true;
+    v
+}
+
+/// A listed vector code maps to the specification's code.
+#[test]
+fn divergence_maps_a_listed_code_to_the_spec_code() {
+    assert_eq!(
+        expected_emitted_code("LATE_PUBLISHING_ERROR", LATE),
+        "LATE_PUBLISHING"
+    );
+}
+
+/// An unlisted code is expected verbatim, and an empty table changes nothing.
+#[test]
+fn divergence_leaves_an_unlisted_code_alone() {
+    assert_eq!(expected_emitted_code("NOT_FOUND", LATE), "NOT_FOUND");
+    assert_eq!(
+        expected_emitted_code("LATE_PUBLISHING_ERROR", &[]),
+        "LATE_PUBLISHING_ERROR"
+    );
+}
+
+/// An entry no vector records is reported by name and told to go.
+#[test]
+fn divergence_unused_by_any_negative_case_is_reported() {
+    let vectors = vec![synthetic_vector("regtest/k1/qgpakaw4", "k1")];
+    let rows = unused_divergences(&vectors, &[], LATE);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].contains("LATE_PUBLISHING_ERROR")
+            && rows[0].contains("LATE_PUBLISHING (x)")
+            && rows[0].contains("delete the entry"),
+        "{}",
+        rows[0]
+    );
+
+    // A negative set with a different code does not use it either.
+    let other = vec![negative_main("regtest/k1/qgpakaw4", "k1", "NOT_FOUND")];
+    assert_eq!(unused_divergences(&other, &[], LATE).len(), 1);
+}
+
+/// A driven main pair recording the vector code is a use.
+#[test]
+fn divergence_used_by_a_driven_main_pair_is_not_reported() {
+    let vectors = vec![negative_main(
+        "regtest/k1/qgpakaw4",
+        "k1",
+        "LATE_PUBLISHING_ERROR",
+    )];
+    assert!(vectors[0].should_drive_with(AssertionKind::Resolve, &[]));
+    assert!(unused_divergences(&vectors, &[], LATE).is_empty());
+}
+
+/// A driven `resolve/NN` case recording the vector code is a use, even when
+/// the set's main pair is positive.
+#[test]
+fn divergence_used_by_a_driven_resolve_case_is_not_reported() {
+    let mut v = synthetic_vector("regtest/k1/qgpakaw4", "k1");
+    v.resolve_cases = vec![
+        ResolveCase {
+            name: "01".into(),
+            outcome: positive_outcome(1, true),
+        },
+        ResolveCase {
+            name: "02".into(),
+            outcome: Outcome::Error {
+                code: "LATE_PUBLISHING_ERROR".into(),
+            },
+        },
+    ];
+    let vectors = vec![v];
+    assert!(unused_divergences(&vectors, &[], LATE).is_empty());
+
+    // Skipping that case by hand removes the only use.
+    const SKIP_CASE: &[SkipOverride] = &[SkipOverride {
+        vector: "regtest/k1/qgpakaw4",
+        kind: AssertionKind::ResolveOption,
+        case: Some("02"),
+        reason: "stands in for a hand-written skip",
+    }];
+    assert_eq!(unused_divergences(&vectors, SKIP_CASE, LATE).len(), 1);
+}
+
+/// A matching outcome on a skipped row asserts nothing, so it does not keep
+/// the entry alive: a CAS-delivered set's main pair, and the same set's case.
+#[test]
+fn divergence_on_a_skipped_row_does_not_count_as_a_use() {
+    let mut v = negative_main("mutinynet/x1/q4lqu6gr", "x1", "LATE_PUBLISHING_ERROR");
+    v.genesis_service_types = vec!["CASBeacon".into()];
+    v.resolve_cases = vec![ResolveCase {
+        name: "01".into(),
+        outcome: Outcome::Error {
+            code: "LATE_PUBLISHING_ERROR".into(),
+        },
+    }];
+    assert!(
+        v.skip_reasons_with(AssertionKind::Resolve, &[])
+            .contains(&SkipReason::CasDelivery)
+    );
+    let rows = unused_divergences(std::slice::from_ref(&v), &[], LATE);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+
+    // The same set, driven, uses it.
+    v.genesis_service_types.clear();
+    assert!(unused_divergences(std::slice::from_ref(&v), &[], LATE).is_empty());
+}
+
+/// An entry whose two codes are equal is not a divergence, and two entries for
+/// one vector code give two answers; both are reported. A well-formed table
+/// reports nothing.
+#[test]
+fn divergence_table_malformations_are_reported() {
+    assert!(malformed_divergences(LATE).is_empty());
+    assert!(malformed_divergences(&[]).is_empty());
+
+    const EQUAL: &[CodeDivergence] = &[CodeDivergence {
+        vector_code: "NOT_FOUND",
+        spec_code: "NOT_FOUND",
+        issue: "y",
+    }];
+    let rows = malformed_divergences(EQUAL);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].contains("NOT_FOUND") && rows[0].contains("equal"),
+        "{}",
+        rows[0]
+    );
+
+    const DUPLICATE: &[CodeDivergence] = &[
+        CodeDivergence {
+            vector_code: "LATE_PUBLISHING_ERROR",
+            spec_code: "LATE_PUBLISHING",
+            issue: "x",
+        },
+        CodeDivergence {
+            vector_code: "LATE_PUBLISHING_ERROR",
+            spec_code: "INVALID_DID_UPDATE",
+            issue: "z",
+        },
+    ];
+    let rows = malformed_divergences(DUPLICATE);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].contains("LATE_PUBLISHING_ERROR is listed 2 times"),
+        "{}",
+        rows[0]
+    );
+}
+
+/// The live table is well formed and every entry in it is used by a driven
+/// negative case of the checked-out suite.
+#[test]
+fn live_error_code_divergences_are_used_and_well_formed() {
+    let malformed = malformed_divergences(ERROR_CODE_DIVERGENCES);
+    assert!(
+        malformed.is_empty(),
+        "malformed ERROR_CODE_DIVERGENCES entries:\n{}",
+        malformed.join("\n")
+    );
+
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover_in(&Corpus::test_suite());
+    assert!(!vectors.is_empty());
+    let unused = unused_divergences(&vectors, SKIP_OVERRIDES, ERROR_CODE_DIVERGENCES);
+    assert!(
+        unused.is_empty(),
+        "unused ERROR_CODE_DIVERGENCES entries:\n{}",
+        unused.join("\n")
     );
 }
 
