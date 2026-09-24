@@ -27,6 +27,7 @@ mod capture;
 mod chain;
 mod fixture;
 mod mint;
+mod pace;
 mod record;
 mod secret;
 mod targets;
