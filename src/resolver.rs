@@ -1120,13 +1120,12 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_vectors::{
-        AssertionKind, ChainFixture, DRIVEN_FLOOR, FIXTURES_WITHOUT_SIGNAL_BLOCKS,
-        NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES, SkipOverride, Vector, VectorIdType, discover,
+        AssertionKind, ChainFixture, Corpus, DRIVEN_FLOOR, FIXTURES_WITHOUT_SIGNAL_BLOCKS,
+        NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES, SkipOverride, Vector, VectorIdType, discover_in,
         expected_driven_with, field_bool, field_hex, field_nonzero_version_id, field_str,
         field_u64, field_version_id, network_dirs_with_vectors, read_chain_fixture,
-        read_fixture_or_skip, read_vector_fixture, reconcile_driven_with, redundant_overrides,
-        render_minted_summary, render_summary_with, stale_overrides, test_suite_checked_out,
-        unclassified_rows_with,
+        read_fixture_or_skip, reconcile_driven_with, redundant_overrides, render_minted_summary,
+        render_summary_with, stale_overrides, test_suite_checked_out, unclassified_rows_with,
     };
     use std::collections::BTreeMap;
 
@@ -1146,7 +1145,7 @@ mod tests {
             );
             return None;
         }
-        let vectors = discover();
+        let vectors = discover_in(&Corpus::test_suite());
         assert!(
             !vectors.is_empty(),
             "test-suite is checked out but no operation vectors were discovered — \
@@ -1192,8 +1191,8 @@ mod tests {
             }
             let id = &vector.id;
 
-            let input = read_vector_fixture(&format!("{id}/create/input.json"));
-            let output = read_vector_fixture(&format!("{id}/create/output.json"));
+            let input = vector.fixture("create/input.json");
+            let output = vector.fixture("create/output.json");
 
             assert_eq!(field_u64(&input, "version", id), 1, "{id}: version is 1");
             let genesis_bytes = field_hex(&input, "genesisBytes", id);
@@ -1287,8 +1286,8 @@ mod tests {
             }
             let id = &vector.id;
 
-            let input = read_vector_fixture(&format!("{id}/create/input.json"));
-            let other = read_vector_fixture(&format!("{id}/other.json"));
+            let input = vector.fixture("create/input.json");
+            let other = vector.fixture("other.json");
 
             let secret_hex = field_str(&other, "genesisKeys.secret", id);
             let secret = SecretKey::from_slice(&field_hex(&other, "genesisKeys.secret", id))
@@ -1331,7 +1330,7 @@ mod tests {
             }
 
             for step in vector.update_layout.step_prefixes() {
-                let update_input = read_vector_fixture(&format!("{id}/{step}/input.json"));
+                let update_input = vector.fixture(&format!("{step}/input.json"));
                 assert_eq!(
                     field_str(&update_input, "signingMaterial", id),
                     secret_hex,
@@ -1505,8 +1504,8 @@ mod tests {
         for vector in vectors {
             let id = &vector.id;
 
-            let input = read_vector_fixture(&format!("{id}/resolve/input.json"));
-            let output = read_vector_fixture(&format!("{id}/resolve/output.json"));
+            let input = vector.fixture("resolve/input.json");
+            let output = vector.fixture("resolve/output.json");
 
             // Well-formedness whitelist (asserted for every discovered vector,
             // driven or not: no maintainer decision makes a malformed fixture
@@ -1597,7 +1596,10 @@ mod tests {
             // row. An absent capture panics by name rather than degrading into a
             // no-signal resolve that would then fail the versionId assertion for
             // an unrelated-looking reason.
-            let on_chain = vector.expected_version_id > 1;
+            let expected_version_id = vector.expected_version_id().unwrap_or_else(|| {
+                panic!("{id}: a driven resolve row expects a resolved document")
+            });
+            let on_chain = expected_version_id > 1;
             let fixture = on_chain.then(|| read_chain_fixture(id));
 
             // ONE assembly for every vector shape, matching
@@ -1688,7 +1690,7 @@ mod tests {
 
             assert_eq!(
                 result.document_metadata.version_id.get(),
-                vector.expected_version_id,
+                expected_version_id,
                 "{id}: resolved versionId must equal \
                  resolve/output.json.didDocumentMetadata.versionId"
             );
@@ -1868,14 +1870,14 @@ mod tests {
     /// The source document is built straight from the vector's `sourceDocument`
     /// (spec `@context`, no top-level controller), so its JCS hash equals the
     /// vector's `sourceHash` without touching the create-path residuals.
-    fn signed_update_for_step(id: &str, step: &str) -> StepFixtures {
+    fn signed_update_for_step(vector: &Vector, step: &str) -> StepFixtures {
         use crate::key::SecretKey;
         use json_patch::Patch;
 
-        let input = read_vector_fixture(&format!("{id}/{step}/input.json"));
-        let output = read_vector_fixture(&format!("{id}/{step}/output.json"));
+        let input = vector.fixture(&format!("{step}/input.json"));
+        let output = vector.fixture(&format!("{step}/output.json"));
 
-        let ctx = format!("{id} {step}");
+        let ctx = format!("{} {step}", vector.id);
         let source_doc = Document::from_json_string(&input["sourceDocument"].to_string())
             .unwrap_or_else(|e| {
                 panic!("{ctx}: input.json.sourceDocument must parse as a Document: {e}")
@@ -1928,7 +1930,7 @@ mod tests {
                     input,
                     output,
                     update,
-                } = signed_update_for_step(id, step);
+                } = signed_update_for_step(vector, step);
 
                 // (a) Step-index linkage: step NN is update number NN.
                 assert_eq!(
@@ -2083,7 +2085,7 @@ mod tests {
             let mut carried: Option<InitialDocument> = None;
 
             for (step_index, step) in steps.iter().enumerate() {
-                let StepFixtures { input, update, .. } = signed_update_for_step(id, step);
+                let StepFixtures { input, update, .. } = signed_update_for_step(vector, step);
 
                 // Step-index linkage, mirrored from the update-crypto driver:
                 // step NN is update number NN. Without it a mis-ordered walk
@@ -2114,7 +2116,7 @@ mod tests {
             let doc = carried
                 .unwrap_or_else(|| panic!("{id}: an end-state row ships at least one update step"));
 
-            let output = read_vector_fixture(&format!("{id}/resolve/output.json"));
+            let output = vector.fixture("resolve/output.json");
             let got: serde_json::Value = doc.as_ref().clone();
             let want: serde_json::Value = output["didDocument"].clone();
             assert_eq!(

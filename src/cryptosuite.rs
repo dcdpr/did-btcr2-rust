@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn stale_vectors_foreign_proofs_verify_under_this_cryptosuite() {
         use crate::document::Document;
-        use crate::test_vectors::{STALE_UPDATE_CONTEXT, discover, read_vector_fixture};
+        use crate::test_vectors::{Corpus, STALE_UPDATE_CONTEXT, discover_in};
         use crate::update::Update;
         use crate::zcap::proof::ProofPurpose;
 
@@ -884,14 +884,14 @@ mod tests {
 
         let mut verified = 0usize;
         let mut first_proof: Option<(String, serde_json::Value, serde_json::Value)> = None;
-        for vector in discover()
+        for vector in discover_in(&Corpus::test_suite())
             .into_iter()
             .filter(|v| STALE_UPDATE_CONTEXT.contains(&v.id.as_str()))
         {
             for step in vector.update_layout.step_prefixes() {
                 let ctx = format!("{} {step}", vector.id);
-                let input = read_vector_fixture(&format!("{}/{step}/input.json", vector.id));
-                let output = read_vector_fixture(&format!("{}/{step}/output.json", vector.id));
+                let input = vector.fixture(&format!("{step}/input.json"));
+                let output = vector.fixture(&format!("{step}/output.json"));
                 let update = Update::from_json_value(output["signedUpdate"].clone())
                     .unwrap_or_else(|e| panic!("{ctx}: signedUpdate must parse: {e}"));
                 let key = invoking_key_for(&input["sourceDocument"], &update, &ctx);

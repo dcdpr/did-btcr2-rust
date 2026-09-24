@@ -35,6 +35,47 @@ pub(crate) fn chain_fixture_path(vector_id: &str) -> PathBuf {
     chain_fixture_root().join(format!("{vector_id}.json"))
 }
 
+/// One corpus of operation vectors in the test-suite layout, together with the
+/// captured chain snapshots that go with it.
+///
+/// Discovery takes the corpus explicitly, so every caller names the tree it
+/// walks. The production ledger walks [`Corpus::test_suite`] and nothing else;
+/// the synthetic corpora under `fixtures/layout/` exercise layout shapes the
+/// checked-out suite does not ship, and are walked only by their own tests, so
+/// none of their rows can reach the production counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Corpus {
+    /// The vector sets, as `{network}/{k1|x1}/{id}/`.
+    pub(crate) sets: PathBuf,
+    /// The captured chain snapshots, as `{network}/{k1|x1}/{id}.json`.
+    pub(crate) chain: PathBuf,
+}
+
+impl Corpus {
+    /// The vendor suite in the `test-suite/` submodule and this repository's
+    /// captures of it under `fixtures/chain/`.
+    pub(crate) fn test_suite() -> Self {
+        Self {
+            sets: test_suite_root(),
+            chain: chain_fixture_root(),
+        }
+    }
+
+    /// A hand-built corpus under `fixtures/layout/{name}/`: its sets in
+    /// `sets/` and its captures, if it has any, in `chain/`. These fixtures
+    /// live in this repository, so an absent one is a bug.
+    pub(crate) fn synthetic(name: &str) -> Self {
+        let root = PathBuf::from(format!(
+            "{}/fixtures/layout/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ));
+        Self {
+            sets: root.join("sets"),
+            chain: root.join("chain"),
+        }
+    }
+}
+
 /// Every captured chain fixture committed to this repository.
 ///
 /// Written down on purpose, unlike the `test-suite/` vectors, which are
@@ -509,16 +550,21 @@ fn holds_vector_dirs(network_dir: &Path) -> bool {
 }
 
 /// Direct children of `test-suite/` that actually hold vector directories,
-/// sorted. Content-based on purpose: `test-suite/signet/` ships only a
-/// `README.md` and a `TODO` today, and must contribute nothing without being
-/// named in a hardcoded exclusion list.
+/// sorted. See [`network_dirs_with_vectors_in`].
+pub(crate) fn network_dirs_with_vectors() -> Vec<String> {
+    network_dirs_with_vectors_in(&test_suite_root())
+}
+
+/// Direct children of `root` that actually hold vector directories, sorted.
+/// Content-based on purpose: `test-suite/signet/` ships only a `README.md` and
+/// a `TODO` today, and must contribute nothing without being named in a
+/// hardcoded exclusion list.
 ///
 /// `read_dir` order is OS-dependent, so the result is sorted — discovery must
 /// be deterministic. An absent root is the submodule-absent case and yields an
 /// empty list; a present-but-unreadable one panics.
-pub(crate) fn network_dirs_with_vectors() -> Vec<String> {
-    let root = test_suite_root();
-    let Some(entries) = read_dir_or_absent(&root) else {
+pub(crate) fn network_dirs_with_vectors_in(root: &Path) -> Vec<String> {
+    let Some(entries) = read_dir_or_absent(root) else {
         return Vec::new();
     };
     let mut names = Vec::new();
@@ -591,16 +637,24 @@ pub(crate) fn read_fixture_json(rel: &str) -> Option<serde_json::Value> {
     )
 }
 
-/// A fixture belonging to an already-discovered vector.
+/// Read and parse a JSON file that must exist. **Panics** naming `ctx` and the
+/// path when it is missing, unreadable, or not JSON.
 ///
-/// `read_fixture_json` returns `None` only when the whole submodule is absent,
-/// which cannot be true once discovery has yielded a vector — so the driver
-/// call sites want the path named rather than a generic "the fixture must
-/// exist".
-pub(crate) fn read_vector_fixture(rel: &str) -> serde_json::Value {
-    read_fixture_json(rel).unwrap_or_else(|| {
-        panic!("test-suite/{rel}: the vector was discovered, so this fixture must be readable")
-    })
+/// Used for every file of a set discovery has already walked into: the
+/// directory is there, so an absent file is a malformed set, never an absent
+/// corpus.
+fn read_json_at(path: &Path, ctx: &str) -> serde_json::Value {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{ctx}: {} is missing or unreadable: {e}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("{ctx}: {} is not valid JSON: {e}", path.display()))
+}
+
+/// Read and parse a JSON file that may legitimately be absent (`scenario.json`,
+/// `signals.json`). Absent yields `None`; present but unreadable or malformed
+/// panics, because a corrupt optional file is still a corrupt file.
+fn read_json_opt(path: &Path, ctx: &str) -> Option<serde_json::Value> {
+    path.is_file().then(|| read_json_at(path, ctx))
 }
 
 /// Map a network name onto a `Network`.
@@ -799,16 +853,22 @@ pub(crate) struct Vector {
     /// `network_from_dir(&network_dir, ..)`, cross-checked against the vector's
     /// own `create/input.json.network`.
     pub(crate) network: Network,
+    /// The corpus this set was discovered in.
+    pub(crate) corpus: Corpus,
+    /// The set's own directory, `{corpus.sets}/{network}/{k1|x1}/{id}/`. Every
+    /// fixture read for this set goes through here ([`Vector::fixture`]), so no
+    /// driver rebuilds a path from the id and a root of its own.
+    pub(crate) dir: PathBuf,
     /// How this vector ships its update steps.
     pub(crate) update_layout: UpdateLayout,
-    /// `resolve/output.json.didDocumentMetadata.versionId`, coerced.
-    pub(crate) expected_version_id: u64,
-    /// `resolve/output.json.didDocumentMetadata.versionId` is a JSON number
-    /// rather than the ASCII string the specification requires. Recorded so the
-    /// coverage summary can report it: the coercion reads either encoding, but a
-    /// silently-absorbed fixture defect is exactly the kind of gap this ledger
-    /// exists to surface. The flag clears itself when the fixtures are corrected.
-    pub(crate) version_id_is_number: bool,
+    /// The expected outcome of the main resolve pair, from
+    /// `resolve/output.json`: `didResolutionMetadata.error` when present,
+    /// otherwise `didDocumentMetadata`.
+    pub(crate) outcome: Outcome,
+    /// The numbered resolve cases, `resolve/01/`, `resolve/02/`, …, in the
+    /// order of the number each names, each with the outcome its own
+    /// `output.json` expects. Empty when `resolve/` holds only the main pair.
+    pub(crate) resolve_cases: Vec<ResolveCase>,
     /// At least one update step in this vector's own files —
     /// `update/**/output.json` `signedUpdate` and its `proof`, or
     /// `resolve/input.json` sidecar `updates[*]` and their proofs — carries an
@@ -828,6 +888,111 @@ pub(crate) struct Vector {
     /// `resolve/input.json.resolutionOptions.sidecar.genesisDocument` is a
     /// non-null JSON value.
     pub(crate) has_sidecar_genesis_document: bool,
+}
+
+/// The outcome a resolve `output.json` expects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// A resolved document, described by `didDocumentMetadata`.
+    Positive {
+        /// `didDocumentMetadata.versionId`, read from either encoding.
+        version_id: u64,
+        /// The same field verbatim when it is the ASCII string the
+        /// specification requires; `None` when the fixture encodes it as a
+        /// JSON number, a known upstream defect that the coverage summary
+        /// reports.
+        version_id_string: Option<String>,
+        /// `didDocumentMetadata.deactivated`.
+        deactivated: bool,
+        /// `didDocumentMetadata.confirmations`; `None` when absent or null.
+        confirmations: Option<u64>,
+    },
+    /// A failed resolution: `didResolutionMetadata.error`.
+    Error {
+        /// The error code, e.g. `NOT_FOUND`.
+        code: String,
+    },
+}
+
+/// One numbered resolve case, `resolve/{name}/`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolveCase {
+    /// The directory name verbatim, e.g. `"01"`.
+    pub(crate) name: String,
+    /// What `resolve/{name}/output.json` expects.
+    pub(crate) outcome: Outcome,
+}
+
+/// Read the outcome a resolve `output.json` expects, naming `ctx` on failure.
+///
+/// An output carrying `didResolutionMetadata.error` is an expected error, and
+/// its code must be a string. Anything else is a resolved document, whose
+/// `versionId` is read through [`version_id_u64`] (either encoding),
+/// `deactivated` must be a bool, and `confirmations`, when present and non-null,
+/// must be a non-negative integer.
+pub(crate) fn parse_outcome(output: &serde_json::Value, ctx: &str) -> Outcome {
+    if !json_at(output, "didResolutionMetadata.error").is_null() {
+        return Outcome::Error {
+            code: field_str(output, "didResolutionMetadata.error", ctx).to_string(),
+        };
+    }
+    let version_id_node = json_at(output, "didDocumentMetadata.versionId");
+    let confirmations = match json_at(output, "didDocumentMetadata.confirmations") {
+        serde_json::Value::Null => None,
+        node => Some(node.as_u64().unwrap_or_else(|| {
+            panic!(
+                "{ctx}: didDocumentMetadata.confirmations must be a non-negative integer, \
+                 got {node}"
+            )
+        })),
+    };
+    Outcome::Positive {
+        version_id: version_id_u64(
+            version_id_node,
+            &format!("{ctx} didDocumentMetadata.versionId"),
+        ),
+        version_id_string: version_id_node.as_str().map(str::to_string),
+        deactivated: field_bool(output, "didDocumentMetadata.deactivated", ctx),
+        confirmations,
+    }
+}
+
+impl Vector {
+    /// Read `rel` (e.g. `"create/input.json"`) from this set's own directory.
+    /// **Panics** naming `{id}/{rel}` when it is missing or not JSON: the set
+    /// was discovered, so its files are there.
+    pub(crate) fn fixture(&self, rel: &str) -> serde_json::Value {
+        read_json_at(&self.dir.join(rel), &format!("{}/{rel}", self.id))
+    }
+
+    /// The expected `versionId` of the main resolve pair, when it expects a
+    /// resolved document.
+    pub(crate) fn expected_version_id(&self) -> Option<u64> {
+        match &self.outcome {
+            Outcome::Positive { version_id, .. } => Some(*version_id),
+            Outcome::Error { .. } => None,
+        }
+    }
+
+    /// The main resolve pair's `versionId` is a JSON number rather than the
+    /// ASCII string the specification requires. Recorded so the coverage
+    /// summary can report it: the coercion reads either encoding, but a
+    /// silently-absorbed fixture defect is exactly the kind of gap this ledger
+    /// exists to surface. Clears itself when the fixtures are corrected.
+    pub(crate) fn version_id_is_number(&self) -> bool {
+        matches!(
+            self.outcome,
+            Outcome::Positive {
+                version_id_string: None,
+                ..
+            }
+        )
+    }
+
+    /// The main resolve pair expects an error rather than a document.
+    pub(crate) fn is_negative(&self) -> bool {
+        matches!(self.outcome, Outcome::Error { .. })
+    }
 }
 
 /// How a vector ships its update steps.
@@ -917,7 +1082,7 @@ pub(crate) fn classify_operation_dirs(
     }
 
     if !update_children.is_empty() && update_children.iter().all(|c| is_step_name(c)) {
-        return numbered_layout(update_children);
+        return numbered_names("`update/`", update_children).map(UpdateLayout::Numbered);
     }
 
     let offender = update_children
@@ -937,7 +1102,8 @@ fn is_step_name(name: &str) -> bool {
 }
 
 /// Order numbered step directories by the number they name, and reject a set
-/// whose names collide numerically.
+/// whose names collide numerically. `label` names the parent directory in the
+/// messages (`` `update/` `` or `` `resolve/` ``); the names come back verbatim.
 ///
 /// Lexicographic order is wrong the moment a vector reaches ten steps —
 /// `["1", "2", "10"]` sorts to `["1", "10", "2"]` — and the update-crypto
@@ -947,27 +1113,61 @@ fn is_step_name(name: &str) -> bool {
 /// once parsed; genuine numeric duplicates (`["1", "01"]`) name the same step
 /// twice and are rejected here, at classification time, where the message can
 /// say so.
-fn numbered_layout(update_children: &[String]) -> Result<UpdateLayout, String> {
-    let mut steps: Vec<(u64, String)> = Vec::with_capacity(update_children.len());
-    for name in update_children {
+fn numbered_names(label: &str, names: &[String]) -> Result<Vec<String>, String> {
+    let mut steps: Vec<(u64, String)> = Vec::with_capacity(names.len());
+    for name in names {
         let number = name
             .parse::<u64>()
-            .map_err(|e| format!("`update/` step directory `{name}` is not a step number: {e}"))?;
+            .map_err(|e| format!("{label} step directory `{name}` is not a step number: {e}"))?;
         steps.push((number, name.clone()));
     }
     steps.sort();
     for pair in steps.windows(2) {
         if pair[0].0 == pair[1].0 {
             return Err(format!(
-                "`update/` step directories `{}` and `{}` both name step {} — the walk order \
+                "{label} step directories `{}` and `{}` both name step {} — the walk order \
                  would be ambiguous",
                 pair[0].1, pair[1].1, pair[0].0
             ));
         }
     }
-    Ok(UpdateLayout::Numbered(
-        steps.into_iter().map(|(_, name)| name).collect(),
-    ))
+    Ok(steps.into_iter().map(|(_, name)| name).collect())
+}
+
+/// Validate the children of a set's `resolve/` directory and return its
+/// numbered case directories in the order of the number each names.
+///
+/// `resolve/` holds the main pair, `input.json` and `output.json`, both
+/// required, plus zero or more numbered case directories (`01`, …, `10`), each
+/// a resolution of the same DID under different options. Anything else fails
+/// loud, as an unknown `update/` child does: a case the harness never reads
+/// would otherwise pass as covered. `resolve/10` exists upstream, so the order
+/// is numeric, and `1` beside `01` names the same case twice and is rejected.
+///
+/// Pure over entry names, so every rejection path is unit-testable.
+pub(crate) fn classify_resolve_children(children: &[String]) -> Result<Vec<String>, String> {
+    let mut cases = Vec::new();
+    for child in children {
+        match child.as_str() {
+            "input.json" | "output.json" => {}
+            name if is_step_name(name) => cases.push(child.clone()),
+            offender => {
+                return Err(format!(
+                    "unrecognized `resolve/` child `{offender}`: expected `input.json` + \
+                     `output.json` plus numbered case directories"
+                ));
+            }
+        }
+    }
+    for required in ["input.json", "output.json"] {
+        if !children.iter().any(|c| c == required) {
+            return Err(format!(
+                "`resolve/` has no `{required}`: every set carries the main resolve pair \
+                 `input.json` + `output.json`"
+            ));
+        }
+    }
+    numbered_names("`resolve/`", &cases)
 }
 
 /// Sorted names of every direct child of `dir`, files and directories alike,
@@ -993,12 +1193,17 @@ fn sorted_children(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Discover every operation vector under `test-suite/`, in deterministic
-/// sorted order.
+/// Discover every operation vector in `corpus`, in deterministic sorted order.
 ///
-/// Returns an empty vector when the submodule is absent; callers pair this
-/// with `test_suite_checked_out()` so an absent submodule skips green while a
-/// present-but-empty one cannot pass vacuously.
+/// Returns an empty vector when the corpus root is absent (the test-suite
+/// submodule on a non-recursive clone); callers pair this with
+/// `test_suite_checked_out()` so an absent submodule skips green while a
+/// present-but-empty one cannot pass vacuously. There is deliberately no
+/// root-less convenience form: a caller names the corpus it walks, so the
+/// production ledger visibly walks [`Corpus::test_suite`] and nothing else.
+///
+/// Every file is read from the set's own directory, never from a path rebuilt
+/// out of the id.
 ///
 /// Deliberately uncached. Each caller walks the tree afresh (roughly a hundred
 /// small file reads per call, six callers). Caching it in a process-wide
@@ -1006,11 +1211,11 @@ fn sorted_children(dir: &Path) -> Vec<String> {
 /// observed-not-declared coverage design forbids between drivers: each driver
 /// must derive its own view of the vector set independently, so that a driver
 /// and the ledger cannot agree by construction. Do not "optimize" this.
-pub(crate) fn discover() -> Vec<Vector> {
-    let root = test_suite_root();
+pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
+    let root = &corpus.sets;
     let mut vectors = Vec::new();
 
-    for network_dir in network_dirs_with_vectors() {
+    for network_dir in network_dirs_with_vectors_in(root) {
         let network_path = root.join(&network_dir);
         let network = network_from_dir(&network_dir, "the test-suite network directory name");
 
@@ -1031,17 +1236,13 @@ pub(crate) fn discover() -> Vec<Vector> {
                 let update_layout = classify_operation_dirs(&sub_dirs, &update_children)
                     .unwrap_or_else(|msg| panic!("{id}: {msg}"));
 
-                // Discovery walked into this directory, so its fixtures exist;
-                // `read_fixture_json` returns `None` only when the whole
-                // submodule is absent, which cannot be true here. Discarding
-                // every vector found so far and returning an empty set would be
-                // read by all five drivers as "submodule absent" and pass green
-                // — the exact silent-coverage-loss failure this module exists
-                // to prevent — so this fails loud instead.
-                let create_input = read_fixture_json(&format!("{id}/create/input.json"))
-                    .unwrap_or_else(|| {
-                        panic!("{id}: discovery walked this directory, so its fixtures must be readable")
-                    });
+                // Discovery walked into this directory, so its fixtures exist.
+                // A missing one fails loud naming the file: discarding every
+                // vector found so far and returning an empty set would be read
+                // by all five drivers as "corpus absent" and pass green — the
+                // exact silent-coverage-loss failure this module exists to
+                // prevent.
+                let create_input = read_json_at(&vector_path.join("create/input.json"), &id);
                 let declared_network = field_str(&create_input, "network", &id);
                 assert_eq!(
                     network_from_dir(declared_network, &format!("{id}/create/input.json.network")),
@@ -1057,19 +1258,32 @@ pub(crate) fn discover() -> Vec<Vector> {
                      vector is filed under `{kind}` — a misfiled vector"
                 );
 
-                let resolve_output = read_fixture_json(&format!("{id}/resolve/output.json"))
-                    .unwrap_or_else(|| {
-                        panic!("{id}: discovery walked this directory, so its fixtures must be readable")
-                    });
-                let expected_version_id =
-                    field_version_id(&resolve_output, "didDocumentMetadata.versionId", &id);
-                let version_id_is_number =
-                    resolve_output["didDocumentMetadata"]["versionId"].is_number();
+                // `resolve/` is policed like `update/`: the main pair plus
+                // numbered case directories, nothing else.
+                let resolve_path = vector_path.join("resolve");
+                let case_names = classify_resolve_children(&sorted_children(&resolve_path))
+                    .unwrap_or_else(|msg| panic!("{id}: {msg}"));
+                let resolve_output = read_json_at(&resolve_path.join("output.json"), &id);
+                let outcome = parse_outcome(&resolve_output, &format!("{id}/resolve/output.json"));
+                let resolve_cases = case_names
+                    .into_iter()
+                    .map(|name| {
+                        let case_path = resolve_path.join(&name);
+                        assert!(
+                            case_path.join("input.json").is_file(),
+                            "{id}: resolve/{name}/input.json is missing — every resolve case \
+                             pairs an input with its expected output"
+                        );
+                        let ctx = format!("{id}/resolve/{name}/output.json");
+                        let output = read_json_at(&case_path.join("output.json"), &ctx);
+                        ResolveCase {
+                            outcome: parse_outcome(&output, &ctx),
+                            name,
+                        }
+                    })
+                    .collect();
 
-                let resolve_input = read_fixture_json(&format!("{id}/resolve/input.json"))
-                    .unwrap_or_else(|| {
-                        panic!("{id}: discovery walked this directory, so its fixtures must be readable")
-                    });
+                let resolve_input = read_json_at(&resolve_path.join("input.json"), &id);
                 let has_sidecar_genesis_document =
                     !resolve_input["resolutionOptions"]["sidecar"]["genesisDocument"].is_null();
 
@@ -1081,7 +1295,10 @@ pub(crate) fn discover() -> Vec<Vector> {
                 let pinned = serde_json::json!(crate::update::UPDATE_CONTEXT);
                 let mut stale_update_context = false;
                 for step in update_layout.step_prefixes() {
-                    if let Some(output) = read_fixture_json(&format!("{id}/{step}/output.json")) {
+                    let ctx = format!("{id}/{step}/output.json");
+                    if let Some(output) =
+                        read_json_opt(&vector_path.join(&step).join("output.json"), &ctx)
+                    {
                         let signed_update = &output["signedUpdate"];
                         if signed_update["@context"] != pinned
                             || signed_update["proof"]["@context"] != pinned
@@ -1105,29 +1322,20 @@ pub(crate) fn discover() -> Vec<Vector> {
                 // The regtest vectors ship no `scenario.json`, and `delivery`
                 // is `null` on 9 mutinynet vectors — indexing `Value::Null`
                 // yields `Null`, so `.as_str()` gives `None` unaided.
-                let (delivery_genesis, delivery_announcement) = if vector_path
-                    .join("scenario.json")
-                    .is_file()
-                {
-                    let scenario = read_fixture_json(&format!("{id}/scenario.json"))
-                            .unwrap_or_else(|| {
-                                panic!("{id}: discovery walked this directory, so its fixtures must be readable")
-                            });
-                    (
+                let (delivery_genesis, delivery_announcement) = match read_json_opt(
+                    &vector_path.join("scenario.json"),
+                    &format!("{id}/scenario.json"),
+                ) {
+                    Some(scenario) => (
                         scenario["delivery"]["genesis"].as_str().map(str::to_string),
                         scenario["delivery"]["announcement"]
                             .as_str()
                             .map(str::to_string),
-                    )
-                } else {
-                    (None, None)
+                    ),
+                    None => (None, None),
                 };
 
-                let other = read_fixture_json(&format!("{id}/other.json")).unwrap_or_else(|| {
-                    panic!(
-                        "{id}: discovery walked this directory, so its fixtures must be readable"
-                    )
-                });
+                let other = read_json_at(&vector_path.join("other.json"), &id);
                 let genesis_service_types = other["genesisDocument"]["service"]
                     .as_array()
                     .map(|services| {
@@ -1145,9 +1353,11 @@ pub(crate) fn discover() -> Vec<Vector> {
                     short_id,
                     id_type,
                     network,
+                    corpus: corpus.clone(),
+                    dir: vector_path,
                     update_layout,
-                    expected_version_id,
-                    version_id_is_number,
+                    outcome,
+                    resolve_cases,
                     stale_update_context,
                     has_pending,
                     delivery_genesis,
@@ -1850,7 +2060,10 @@ pub(crate) fn render_summary_with(vectors: &[Vector], overrides: &[SkipOverride]
     // didDocumentMetadata.versionId to be an ASCII string. Reported on every
     // green run so it cannot be absorbed silently, and self-clearing once the
     // fixtures are corrected.
-    let defective: Vec<&Vector> = vectors.iter().filter(|v| v.version_id_is_number).collect();
+    let defective: Vec<&Vector> = vectors
+        .iter()
+        .filter(|v| v.version_id_is_number())
+        .collect();
     if defective.is_empty() {
         out.push_str("  fixture defects: none\n");
     } else {
@@ -2366,6 +2579,200 @@ fn operation_dirs_reject_numerically_colliding_steps() {
     );
 }
 
+/// Names for the `resolve/` classification tests.
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// A `resolve/` holding only the main pair has no numbered cases.
+#[test]
+fn resolve_children_accept_the_main_pair_alone() {
+    assert_eq!(
+        classify_resolve_children(&names(&["input.json", "output.json"])),
+        Ok(Vec::new())
+    );
+}
+
+/// Numbered cases come back in the order of the number each names, verbatim:
+/// `resolve/10` walks after `resolve/9`, not between `01` and `02`.
+#[test]
+fn resolve_children_order_cases_numerically() {
+    assert_eq!(
+        classify_resolve_children(&names(&[
+            "input.json",
+            "output.json",
+            "01",
+            "02",
+            "10",
+            "9"
+        ])),
+        Ok(names(&["01", "02", "9", "10"]))
+    );
+}
+
+/// A `resolve/` child that is neither the main pair nor a numbered case is a
+/// layout the harness does not read, and fails naming the offender.
+#[test]
+fn resolve_children_reject_an_unknown_child() {
+    let err = classify_resolve_children(&names(&["input.json", "notes.md", "output.json"]))
+        .expect_err("an unrecognized resolve/ child must be rejected");
+    assert!(
+        err.contains("notes.md") && err.contains("resolve/"),
+        "message names the offender and the directory: {err}"
+    );
+}
+
+/// `1` and `01` name the same case twice.
+#[test]
+fn resolve_children_reject_numerically_colliding_cases() {
+    let err = classify_resolve_children(&names(&["input.json", "output.json", "1", "01"]))
+        .expect_err("numerically colliding case directories must be rejected");
+    assert!(
+        err.contains("`1`") && err.contains("`01`") && err.contains("resolve/"),
+        "message names both directories and the parent: {err}"
+    );
+}
+
+/// The main pair is required: numbered cases do not replace it.
+#[test]
+fn resolve_children_require_the_main_pair() {
+    let err = classify_resolve_children(&names(&["input.json", "01"]))
+        .expect_err("a resolve/ without output.json must be rejected");
+    assert!(err.contains("output.json"), "message names the file: {err}");
+
+    let err = classify_resolve_children(&names(&["output.json"]))
+        .expect_err("a resolve/ without input.json must be rejected");
+    assert!(err.contains("input.json"), "message names the file: {err}");
+}
+
+/// An output carrying `didResolutionMetadata.error` is an expected error and
+/// yields its code, with no `didDocumentMetadata` required.
+#[test]
+fn outcome_reads_an_expected_error_code() {
+    let output = serde_json::json!({
+        "didDocument": null,
+        "didResolutionMetadata": { "error": "NOT_FOUND", "errorMessage": "no such version" },
+        "didDocumentMetadata": {},
+    });
+    assert_eq!(
+        parse_outcome(&output, "ctx"),
+        Outcome::Error {
+            code: "NOT_FOUND".into()
+        }
+    );
+}
+
+/// A resolved-document output yields its string `versionId` verbatim alongside
+/// the coerced number, `deactivated`, and `confirmations`.
+#[test]
+fn outcome_reads_a_positive_document() {
+    let output = serde_json::json!({
+        "didDocument": { "id": "did:btcr2:k1q" },
+        "didResolutionMetadata": { "contentType": "application/did" },
+        "didDocumentMetadata": { "versionId": "3", "deactivated": false, "confirmations": 7 },
+    });
+    assert_eq!(
+        parse_outcome(&output, "ctx"),
+        Outcome::Positive {
+            version_id: 3,
+            version_id_string: Some("3".into()),
+            deactivated: false,
+            confirmations: Some(7),
+        }
+    );
+}
+
+/// A number-encoded `versionId` is still read, with no string recorded, and an
+/// absent `confirmations` is `None`.
+#[test]
+fn outcome_reads_a_number_encoded_version_id() {
+    let output = serde_json::json!({
+        "didDocumentMetadata": { "versionId": 2, "deactivated": true },
+    });
+    assert_eq!(
+        parse_outcome(&output, "ctx"),
+        Outcome::Positive {
+            version_id: 2,
+            version_id_string: None,
+            deactivated: true,
+            confirmations: None,
+        }
+    );
+}
+
+/// Malformed outcome fields panic naming the file and the JSON path: an error
+/// code that is not a string, a missing `deactivated`, and a non-integer
+/// `confirmations`.
+#[test]
+fn outcome_rejects_malformed_fields_by_name() {
+    let cases = [
+        (
+            serde_json::json!({ "didResolutionMetadata": { "error": 404 } }),
+            "didResolutionMetadata.error",
+        ),
+        (
+            serde_json::json!({ "didDocumentMetadata": { "versionId": "1" } }),
+            "didDocumentMetadata.deactivated",
+        ),
+        (
+            serde_json::json!({ "didDocumentMetadata": {
+                "versionId": "1", "deactivated": false, "confirmations": "7"
+            } }),
+            "didDocumentMetadata.confirmations",
+        ),
+    ];
+    for (output, path) in cases {
+        let payload = std::panic::catch_unwind(|| {
+            parse_outcome(&output, "regtest/k1/qgpakaw4/resolve/output.json")
+        })
+        .expect_err("a malformed outcome must panic, not be coerced");
+        let message = panic_message(payload);
+        assert!(
+            message.contains("regtest/k1/qgpakaw4/resolve/output.json") && message.contains(path),
+            "{path}: the message must name the file and the path: {message}"
+        );
+    }
+}
+
+/// The accessors over the main outcome: a positive set has a version and says
+/// whether it was number-encoded; a negative set has neither.
+#[test]
+fn outcome_accessors_track_the_main_pair() {
+    let mut v = synthetic_vector("regtest/k1/qgpakaw4", "k1");
+    assert_eq!(v.expected_version_id(), Some(1));
+    assert!(!v.version_id_is_number());
+    assert!(!v.is_negative());
+
+    v.outcome = positive_outcome(4, false);
+    assert_eq!(v.expected_version_id(), Some(4));
+    assert!(v.version_id_is_number());
+
+    v.outcome = Outcome::Error {
+        code: "INVALID_DID".into(),
+    };
+    assert_eq!(v.expected_version_id(), None);
+    assert!(!v.version_id_is_number());
+    assert!(v.is_negative());
+}
+
+/// The production corpus is the submodule plus this repository's captures, and
+/// a synthetic corpus sits under `fixtures/layout/`, apart from both.
+#[test]
+fn corpus_roots_name_their_sets_and_chain_trees() {
+    let live = Corpus::test_suite();
+    assert_eq!(live.sets, test_suite_root());
+    assert_eq!(live.chain, chain_fixture_root());
+
+    let shapes = Corpus::synthetic("shapes");
+    assert!(
+        shapes.sets.ends_with("fixtures/layout/shapes/sets")
+            && shapes.chain.ends_with("fixtures/layout/shapes/chain"),
+        "unexpected synthetic roots: {shapes:?}"
+    );
+    assert!(!shapes.sets.starts_with(test_suite_root()));
+    assert!(!shapes.chain.starts_with(chain_fixture_root()));
+}
+
 /// Discovery sees every vector directory on disk, in deterministic order, with
 /// every classification input populated from the vector's own files.
 #[test]
@@ -2377,7 +2784,7 @@ fn discovery_finds_every_vector_directory() {
         );
         return;
     }
-    let vectors = discover();
+    let vectors = discover_in(&Corpus::test_suite());
     // Vacuity guard: never assert over an empty discovered set.
     assert!(
         !vectors.is_empty(),
@@ -2400,6 +2807,20 @@ fn discovery_finds_every_vector_directory() {
             pair[0].id,
             pair[1].id
         );
+    }
+    // Each set owns its directory inside the corpus it was discovered in, and
+    // every numbered resolve case it lists is a directory there.
+    for v in &vectors {
+        assert_eq!(v.corpus, Corpus::test_suite(), "{}", v.id);
+        assert_eq!(v.dir, v.corpus.sets.join(&v.id), "{}", v.id);
+        for case in &v.resolve_cases {
+            assert!(
+                v.dir.join("resolve").join(&case.name).is_dir(),
+                "{}: resolve/{} is listed as a case",
+                v.id,
+                case.name
+            );
+        }
     }
 
     let by_id = |want: &str| {
@@ -2430,15 +2851,18 @@ fn discovery_finds_every_vector_directory() {
     // Genesis-only CAS-delivered vector: no update, no pending, CAS genesis,
     // and no sidecar genesis document to resolve from.
     let qh66uy2s = by_id("mutinynet/x1/qh66uy2s");
-    assert_eq!(qh66uy2s.expected_version_id, 1);
+    assert_eq!(qh66uy2s.expected_version_id(), Some(1));
     assert!(!qh66uy2s.has_pending);
     assert_eq!(qh66uy2s.delivery_genesis.as_deref(), Some("cas"));
     assert!(!qh66uy2s.has_sidecar_genesis_document);
 
     // versionId is coerced from BOTH encodings: regtest ships a string, the
     // mutinynet vectors a number.
-    assert_eq!(by_id("regtest/k1/qgpakaw4").expected_version_id, 1);
-    assert_eq!(by_id("mutinynet/x1/qky9e7qz").expected_version_id, 4);
+    assert_eq!(by_id("regtest/k1/qgpakaw4").expected_version_id(), Some(1));
+    assert_eq!(
+        by_id("mutinynet/x1/qky9e7qz").expected_version_id(),
+        Some(4)
+    );
 
     // Beacon service types are collected from other.json.genesisDocument.
     assert!(
@@ -2483,15 +2907,29 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
         kind: kind.to_string(),
         short_id,
         id_type: id_type_from_kind(kind),
+        corpus: Corpus::test_suite(),
+        dir: test_suite_root().join(id),
         update_layout: UpdateLayout::None,
-        expected_version_id: 1,
-        version_id_is_number: false,
+        outcome: positive_outcome(1, true),
+        resolve_cases: Vec::new(),
         stale_update_context: false,
         has_pending: false,
         delivery_genesis: None,
         delivery_announcement: None,
         genesis_service_types: Vec::new(),
         has_sidecar_genesis_document: true,
+    }
+}
+
+/// A resolved-document outcome at `version`, not deactivated, with no
+/// confirmations; `as_string` chooses the specification's ASCII-string
+/// `versionId` over the JSON-number encoding some fixtures carry.
+fn positive_outcome(version: u64, as_string: bool) -> Outcome {
+    Outcome::Positive {
+        version_id: version,
+        version_id_string: as_string.then(|| version.to_string()),
+        deactivated: false,
+        confirmations: None,
     }
 }
 
@@ -2556,7 +2994,7 @@ fn delivery_reasons_scope_to_resolve_only() {
     let mut v = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
     v.has_pending = true;
     v.delivery_genesis = Some("cas".to_string());
-    v.expected_version_id = 3;
+    v.outcome = positive_outcome(3, true);
     v.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
 
     assert_eq!(
@@ -2628,9 +3066,9 @@ fn resolve_drivability_requires_a_genesis_source_for_external_vectors() {
 
     // Past genesis is no longer a drivability condition on either id type: the
     // beacon signals come from a captured chain snapshot.
-    key_based.expected_version_id = 2;
+    key_based.outcome = positive_outcome(2, true);
     assert!(key_based.is_drivable(AssertionKind::Resolve));
-    external.expected_version_id = 2;
+    external.outcome = positive_outcome(2, true);
     assert!(external.is_drivable(AssertionKind::Resolve));
 }
 
@@ -2692,7 +3130,7 @@ fn live_vectors_classify_without_overrides() {
         );
         return;
     }
-    let vectors = discover();
+    let vectors = discover_in(&Corpus::test_suite());
     assert!(
         !vectors.is_empty(),
         "the submodule probe reports PRESENT, so discovery must yield vectors"
@@ -2737,7 +3175,7 @@ fn live_vectors_record_their_version_id_encoding() {
         );
         return;
     }
-    let vectors = discover();
+    let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
 
     // Vacuity guard: the list describes vectors that exist.
@@ -2752,10 +3190,10 @@ fn live_vectors_record_their_version_id_encoding() {
     for v in &vectors {
         let known_bad = NUMBER_ENCODED_VERSION_ID.contains(&v.id.as_str());
         assert!(
-            v.version_id_is_number == known_bad,
+            v.version_id_is_number() == known_bad,
             "{}: {}",
             v.id,
-            if v.version_id_is_number {
+            if v.version_id_is_number() {
                 "NEW versionId encoding defect — resolve/output.json encodes versionId as a \
                  JSON number, but the specification requires an ASCII string. Fix the fixture, \
                  or add this id to NUMBER_ENCODED_VERSION_ID to record it as known-bad."
@@ -2781,7 +3219,7 @@ fn live_vectors_record_their_update_context() {
         );
         return;
     }
-    let vectors = discover();
+    let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
 
     assert_eq!(
@@ -2826,18 +3264,17 @@ fn synthetic_ledger() -> Vec<Vector> {
 
     let mut multi_update = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
     multi_update.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
-    multi_update.expected_version_id = 3;
     multi_update.has_pending = true;
     multi_update.delivery_genesis = Some("cas".to_string());
     // Both mutinynet members carry the number-encoded versionId the live
     // mutinynet fixtures carry, so the summary's defect line has a non-empty
     // case to report.
-    multi_update.version_id_is_number = true;
+    multi_update.outcome = positive_outcome(3, false);
 
     let mut cas_genesis = synthetic_vector("mutinynet/x1/qh66uy2s", "x1");
     cas_genesis.has_sidecar_genesis_document = false;
     cas_genesis.delivery_genesis = Some("cas".to_string());
-    cas_genesis.version_id_is_number = true;
+    cas_genesis.outcome = positive_outcome(1, false);
 
     vec![genesis_era, multi_update, cas_genesis]
 }
@@ -3025,7 +3462,7 @@ fn summary_names_every_assertion_kind() {
 #[test]
 fn summary_reports_the_version_id_fixture_defect() {
     let ledger = synthetic_ledger();
-    let defective = ledger.iter().filter(|v| v.version_id_is_number).count();
+    let defective = ledger.iter().filter(|v| v.version_id_is_number()).count();
     assert_eq!(defective, 2, "the fixture must exercise the non-empty case");
 
     let summary = render_summary_with(&ledger, &[]);
@@ -3039,7 +3476,10 @@ fn summary_reports_the_version_id_fixture_defect() {
     let clean: Vec<Vector> = ledger
         .into_iter()
         .map(|mut v| {
-            v.version_id_is_number = false;
+            let version = v
+                .expected_version_id()
+                .expect("the synthetic ledger is positive");
+            v.outcome = positive_outcome(version, true);
             v
         })
         .collect();
@@ -3105,7 +3545,7 @@ fn summary_reports_stale_context() {
 fn stale_context_applies_to_the_resolve_kind_only() {
     let mut v = synthetic_vector("regtest/k1/qgppexmy", "k1");
     v.update_layout = UpdateLayout::Flat;
-    v.expected_version_id = 2;
+    v.outcome = positive_outcome(2, true);
     v.stale_update_context = true;
 
     assert!(
@@ -3775,7 +4215,7 @@ fn live_vectors_name_the_beacon_types_the_resolver_cannot_query() {
         );
         return;
     }
-    let vectors = discover();
+    let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
 
     let observed: BTreeSet<String> = vectors
@@ -3846,7 +4286,7 @@ fn resolve_driven_set_is_the_expected_four_ids() {
         );
         return;
     }
-    let vectors = discover();
+    let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
 
     let observed = expected_driven_with(AssertionKind::Resolve, &vectors, &[]);
