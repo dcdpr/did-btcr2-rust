@@ -10,12 +10,13 @@ use did_btcr2::identifier::Network;
 
 use crate::error::Error;
 
-/// Map a `--network` name to the core [`Network`]. The five names the CLI
-/// accepts (`testnet` is `TestnetV3`); anything else is
-/// [`Error::UnknownNetwork`].
+/// Map a `--network` name to the core [`Network`]. The six names the CLI
+/// accepts (`testnet` is `TestnetV3`, `testnet4` is `TestnetV4`); anything
+/// else is [`Error::UnknownNetwork`].
 pub fn network_from_name(name: &str) -> Result<Network, Error> {
     match name {
         "testnet" => Ok(Network::TestnetV3),
+        "testnet4" => Ok(Network::TestnetV4),
         "signet" => Ok(Network::Signet),
         "mainnet" => Ok(Network::Mainnet),
         "mutinynet" => Ok(Network::Mutinynet),
@@ -25,9 +26,9 @@ pub fn network_from_name(name: &str) -> Result<Network, Error> {
 }
 
 /// The name the `--network` flag and the Esplora table use for a core
-/// [`Network`]. Total: `TestnetV4` is "testnet4" and `Custom(_)` is "custom"
-/// (neither has a hosted endpoint nor a `--network` spelling, so
-/// [`network_from_name`] does not accept them back).
+/// [`Network`]. Total: every named network round-trips through
+/// [`network_from_name`]; only `Custom(_)` ("custom") has neither a
+/// `--network` spelling nor a hosted endpoint, so it is not accepted back.
 pub fn network_name(network: Network) -> &'static str {
     match network {
         Network::Mainnet => "mainnet",
@@ -42,12 +43,14 @@ pub fn network_name(network: Network) -> &'static str {
 
 /// Map a `network` value to its confirmed Esplora base URL (no trailing slash).
 ///
-/// All four URLs were live-checked (each `/blocks/tip/height` returned a bare
-/// integer over https).
+/// All five URLs were live-checked (each `/blocks/tip/height` returned a bare
+/// integer over https; the mempool.space signet and testnet4 endpoints on
+/// 2026-09-24). `regtest` and `custom` have no hosted endpoint.
 pub fn network_base_url(network: &str) -> Option<&'static str> {
     match network {
         "testnet" => Some("https://blockstream.info/testnet/api"),
-        "signet" => Some("https://blockstream.info/signet/api"),
+        "testnet4" => Some("https://mempool.space/testnet4/api"),
+        "signet" => Some("https://mempool.space/signet/api"),
         "mainnet" => Some("https://blockstream.info/api"),
         "mutinynet" => Some("https://mutinynet.com/api"),
         _ => None,
@@ -127,16 +130,17 @@ mod tests {
         }
     }
 
-    /// The five `--network` spellings and the core `Network` variants they
-    /// name round-trip through the one table; the two variants without a
-    /// `--network` spelling still have a name (for error text and the
-    /// endpoint lookup) but are not accepted as flag values.
+    /// The six `--network` spellings and the core `Network` variants they
+    /// name round-trip through the one table; `Custom` still has a name (for
+    /// error text and the endpoint lookup) but is not accepted as a flag
+    /// value.
     #[test]
     fn network_names_round_trip() {
         for (name, net) in [
             ("mainnet", Network::Mainnet),
             ("signet", Network::Signet),
             ("testnet", Network::TestnetV3),
+            ("testnet4", Network::TestnetV4),
             ("mutinynet", Network::Mutinynet),
             ("regtest", Network::Regtest),
         ] {
@@ -147,14 +151,31 @@ mod tests {
             );
             assert_eq!(network_name(net), name, "{net:?} is named {name}");
         }
-        assert_eq!(network_name(Network::TestnetV4), "testnet4");
         assert_eq!(network_name(Network::Custom(12)), "custom");
-        for name in ["testnet4", "bogus"] {
+        for name in ["custom", "bogus"] {
             match network_from_name(name) {
                 Err(Error::UnknownNetwork(n)) => assert_eq!(n, name),
                 other => panic!("expected UnknownNetwork for {name}, got {other:?}"),
             }
         }
+    }
+
+    /// Every hosted network has its endpoint in the one table; signet and
+    /// testnet4 are served by mempool.space, and regtest has none.
+    #[test]
+    fn hosted_endpoint_table() {
+        for (name, url) in [
+            ("mainnet", "https://blockstream.info/api"),
+            ("testnet", "https://blockstream.info/testnet/api"),
+            ("testnet4", "https://mempool.space/testnet4/api"),
+            ("signet", "https://mempool.space/signet/api"),
+            ("mutinynet", "https://mutinynet.com/api"),
+        ] {
+            assert_eq!(network_base_url(name), Some(url), "{name} endpoint");
+            assert_eq!(resolve_base_url(Some(name), None).unwrap(), url);
+        }
+        assert_eq!(network_base_url("regtest"), None);
+        assert_eq!(network_base_url("custom"), None);
     }
 
     #[test]

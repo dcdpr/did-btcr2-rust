@@ -582,8 +582,10 @@ What changes:
   (the tool allows about an hour) rather than five blocks mined on demand.
 - **Permanence.** The broadcast prompt says so: on any chain but regtest a
   broadcast cannot be recalled.
-- **Endpoints.** `mutinynet` has a default Esplora endpoint; `testnet4` does not,
-  so a `testnet4` run needs `--esplora-url <url>` as well.
+- **Endpoints.** `mutinynet`, `signet` and `testnet4` have default Esplora
+  endpoints (`https://mutinynet.com/api`, `https://mempool.space/signet/api`,
+  `https://mempool.space/testnet4/api`); `--esplora-url <url>` still overrides
+  them.
 
 What does not change: fresh keys, new DIDs, the fixtures regenerated wholesale,
 and **no test edit**. The replay reads the DID, the heights and the block times

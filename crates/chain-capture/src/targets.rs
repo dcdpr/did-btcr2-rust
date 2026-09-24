@@ -183,11 +183,10 @@ pub fn network_from_dir(name: &str) -> Result<Network, TargetError> {
 /// Resolve the Esplora base URL for a network, honouring an operator override.
 ///
 /// A thin wrapper over the client's own endpoint rule so every chain this tool
-/// runs against goes through ONE rule set: `mutinynet` and `signet` resolve their
-/// own endpoints, while `regtest` and `testnet4` have none and require
-/// `--esplora-url`. Neither has a hosted public Esplora this project has
-/// confirmed, so there is deliberately no fallback — a fallback would silently
-/// capture a different chain than the operator named.
+/// runs against goes through ONE rule set: `mutinynet`, `signet` and `testnet4`
+/// resolve their hosted endpoints, while `regtest` has none and requires
+/// `--esplora-url`. There is deliberately no fallback — a fallback would
+/// silently capture a different chain than the operator named.
 /// The resolved URL is then checked for anything that must not be recorded (see
 /// [`reject_credential_in_endpoint`]).
 pub fn endpoint(network: &str, override_url: Option<String>) -> Result<String, TargetError> {
@@ -853,7 +852,11 @@ mod tests {
         );
         assert_eq!(
             endpoint("signet", None).expect("signet has a hosted endpoint"),
-            "https://blockstream.info/signet/api"
+            "https://mempool.space/signet/api"
+        );
+        assert_eq!(
+            endpoint("testnet4", None).expect("testnet4 has a hosted endpoint"),
+            "https://mempool.space/testnet4/api"
         );
 
         // regtest is a recognized chain with no hosted endpoint: it must fail,
@@ -874,21 +877,6 @@ mod tests {
                 ..
             }
         ));
-
-        // testnet4 is modeled by the crate but absent from the endpoint table, so
-        // it is likewise override-only.
-        let error = endpoint("testnet4", None).expect_err("testnet4 has no default endpoint");
-        assert!(matches!(
-            error,
-            TargetError::Endpoint {
-                source: did_btcr2_client::Error::UnknownNetwork(_),
-                ..
-            }
-        ));
-        assert!(
-            error.to_string().contains("--esplora-url"),
-            "the message names the next action: {error}"
-        );
 
         // An explicit override wins for every chain, trailing slash trimmed.
         assert_eq!(

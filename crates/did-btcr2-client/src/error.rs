@@ -68,13 +68,15 @@ pub enum Error {
     Identifier(#[from] did_btcr2::identifier::Error),
 
     /// An unrecognized `--network` value.
-    #[error("unknown network '{0}'. Expected testnet, signet, mainnet, or mutinynet")]
+    #[error(
+        "unknown network '{0}'. Expected testnet, testnet4, signet, mainnet, mutinynet, or regtest"
+    )]
     UnknownNetwork(String),
 
     /// A recognized network that has no hosted Esplora endpoint (regtest), used
     /// without an `--esplora-url` override. Regtest is a known network, so this is
     /// deliberately distinct from `UnknownNetwork`. Also raised for a DID
-    /// anchored to testnet4 or a custom network when the endpoint is derived
+    /// anchored to regtest or a custom network when the endpoint is derived
     /// from the DID and no URL was given.
     #[error("{0} has no default Esplora endpoint; pass --esplora-url")]
     NoDefaultEndpoint(&'static str),

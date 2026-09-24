@@ -45,7 +45,8 @@ DID:
 | `--network` | Esplora base URL |
 |---|---|
 | `testnet` | `https://blockstream.info/testnet/api` |
-| `signet` | `https://blockstream.info/signet/api` |
+| `testnet4` | `https://mempool.space/testnet4/api` |
+| `signet` | `https://mempool.space/signet/api` |
 | `mainnet` | `https://blockstream.info/api` |
 | `mutinynet` | `https://mutinynet.com/api` |
 | `regtest` | *(none — requires `--esplora-url`)* |
@@ -55,8 +56,7 @@ DID:
 `--esplora-url http://<your-local-esplora>/api` pointing at your local esplora.
 Omitting it errors with
 `regtest has no default Esplora endpoint; pass --esplora-url`
-rather than falling back to testnet. A DID anchored to testnet4 likewise needs
-`--esplora-url`.
+rather than falling back to testnet.
 
 ## Supplying the secret key (`update` / `deactivate`)
 

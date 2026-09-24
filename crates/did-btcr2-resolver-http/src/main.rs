@@ -1,8 +1,7 @@
 //! `did-btcr2-resolver-http` — serve the W3C DID Resolution GET and POST bindings for
 //! `did:btcr2` over plain HTTP. One process serves every network: the Esplora
 //! endpoint is derived from each DID's own network, with `--esplora-url`
-//! overrides for networks that have no hosted default (regtest, testnet4,
-//! custom). Successful results are cached in memory for 60 s per DID and
+//! overrides for networks that have no hosted default (regtest, custom). Successful results are cached in memory for 60 s per DID and
 //! option set, and every request is logged as one JSON object on stderr; TLS
 //! belongs to a fronting proxy. `/health` (GET or HEAD) is a liveness route
 //! for the supervisor, the proxy and uptime pollers: it answers without
@@ -47,8 +46,8 @@ const HELP_TEXT: &str = concat!(
     "  --bind <addr>                  Listen address (default 127.0.0.1:8080)\n",
     "  --esplora-url <network>=<url>  Esplora base URL for a network; repeatable.\n",
     "                                 Networks: mainnet, signet, regtest, testnet, testnet4, mutinynet, custom.\n",
-    "                                 mainnet, signet, testnet and mutinynet have hosted defaults; regtest,\n",
-    "                                 testnet4 and custom need an override or answer 501. Every custom\n",
+    "                                 mainnet, signet, testnet, testnet4 and mutinynet have hosted defaults;\n",
+    "                                 regtest and custom need an override or answer 501. Every custom\n",
     "                                 network shares the one `custom` override.\n",
     "  --threads <n>                  Request-handler threads (default 4; must be > 0)\n",
     "  -h, --help                     Show this help\n",
@@ -316,6 +315,8 @@ mod tests {
         for network in NETWORK_NAMES {
             assert!(HELP_TEXT.contains(network), "help names {network}");
         }
+        assert!(HELP_TEXT.contains("testnet4 and mutinynet have hosted defaults"));
+        assert!(HELP_TEXT.contains("regtest and custom need an override or answer 501"));
         assert!(HELP_TEXT.contains("Every custom\n"));
         assert!(HELP_TEXT.contains("network shares the one `custom` override"));
         assert!(HELP_TEXT.contains("Cache:    successful results for 60 s"));

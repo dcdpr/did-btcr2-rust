@@ -331,8 +331,7 @@ impl Resolve for ClientResolver {
     fn resolve(&self, did: &Did, opts: ResolutionOptions) -> Result<ResolutionResult, Error> {
         let esplora_url = self.override_for(did).map(str::to_string);
         // `for_did` consults the hosted-endpoint table when no override is
-        // given and fails with `NoDefaultEndpoint` for regtest / testnet4 /
-        // custom. `resolve` fetches the chain tip on every call, so every
+        // given and fails with `NoDefaultEndpoint` for regtest / custom. `resolve` fetches the chain tip on every call, so every
         // response reports current confirmations; nothing is cached here —
         // the cache is [`CachingResolver`], which wraps this type in
         // production.
@@ -399,12 +398,13 @@ mod tests {
 
     /// With no override, `Client::for_did` fails before any request is made
     /// for a network with no hosted endpoint, so the test needs no socket.
+    /// testnet4 has a hosted endpoint, so only regtest and custom remain.
     #[test]
     fn unconfigured_network_is_no_default_endpoint_before_any_io() {
         let resolver = ClientResolver::new(HashMap::new());
         for (network, name) in [
             (Network::Regtest, "regtest"),
-            (Network::TestnetV4, "testnet4"),
+            (Network::Custom(12), "custom"),
         ] {
             let err = resolver
                 .resolve(&did_on(network), ResolutionOptions::default())

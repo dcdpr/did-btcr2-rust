@@ -225,12 +225,13 @@ impl OnlyArgs for Args {
             "    --sidecar-out <file>        (external mode) Write a {\"genesisDocument\":..}\n",
             "                                sidecar for a later `resolve --sidecar <file>`.\n",
             "                                An OUTPUT, distinct from resolve's --sidecar.\n",
-            "    --network <net>             Network: testnet (default), signet, mainnet,\n",
-            "                                or mutinynet.\n",
+            "    --network <net>             Network: testnet (default), testnet4, signet,\n",
+            "                                mainnet, or mutinynet.\n",
             "\n",
             "  resolve <did>                Resolve a did:btcr2 identifier and print the\n",
             "                               DID resolution result as JSON.\n",
-            "    --network <net>             Network: mainnet, signet, testnet, or mutinynet.\n",
+            "    --network <net>             Network: mainnet, signet, testnet, testnet4, or\n",
+            "                                mutinynet.\n",
             "                                Defaults to the network the DID is anchored\n",
             "                                to; a flag naming another chain is an error.\n",
             "    --esplora-url <url>         Esplora base URL override (no trailing slash).\n",
@@ -2370,6 +2371,10 @@ mod tests {
         assert!(matches!(
             network_from_str(Some("testnet")).unwrap(),
             Network::TestnetV3
+        ));
+        assert!(matches!(
+            network_from_str(Some("testnet4")).unwrap(),
+            Network::TestnetV4
         ));
         assert!(matches!(
             network_from_str(Some("signet")).unwrap(),

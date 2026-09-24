@@ -33,6 +33,8 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   the Esplora endpoint from the DID's network; `Error::NetworkMismatch` when
   `--network` names another chain. `network_from_name` / `network_name` expose
   the name table.
+- testnet4 has a default Esplora endpoint
+  (`https://mempool.space/testnet4/api`) and `--network testnet4` is accepted.
 
 ### Changed
 
@@ -75,6 +77,9 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   network (the two share address prefixes), so testnet4 DIDs build their
   beacons and parse testnet4 beacon addresses; it was an `InvalidNetwork(4)`
   error.
+- The default Esplora endpoint for signet is now
+  `https://mempool.space/signet/api` (was blockstream.info) for the CLI, the
+  HTTP resolver and chain-capture alike.
 
 ### Deprecated
 

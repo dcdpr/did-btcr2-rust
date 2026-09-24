@@ -67,7 +67,7 @@ impl<T: BtcTransport> Client<T> {
     /// [`Error::NetworkMismatch`], an unrecognized one [`Error::UnknownNetwork`].
     /// An explicit `esplora_url` is used verbatim (trailing slash trimmed) and
     /// is NOT checked against the DID: a URL does not name a chain. Without
-    /// one, a DID on testnet4, regtest, or a custom network is
+    /// one, a DID on regtest or a custom network is
     /// [`Error::NoDefaultEndpoint`].
     pub fn for_did(
         did: &Did,
@@ -1030,7 +1030,7 @@ mod tests {
         let did = did_on(Network::Signet);
         let client = Client::for_did(&did, Some("signet"), None, FakeTransport::new("[]"))
             .expect("signet confirms a signet DID");
-        assert_eq!(client.base_url, "https://blockstream.info/signet/api");
+        assert_eq!(client.base_url, "https://mempool.space/signet/api");
 
         let did = did_on(Network::TestnetV3);
         let client = Client::for_did(&did, Some("testnet"), None, FakeTransport::new("[]"))
@@ -1038,19 +1038,22 @@ mod tests {
         assert_eq!(client.base_url, "https://blockstream.info/testnet/api");
     }
 
-    /// A DID on a network with no hosted Esplora needs an explicit URL; the
-    /// URL is taken verbatim (trailing slash trimmed) and is not checked
-    /// against the DID, because a URL does not name a chain.
+    /// Without a URL, a signet or testnet4 DID uses its hosted mempool.space
+    /// endpoint and a regtest DID has none. An explicit URL is taken
+    /// verbatim (trailing slash trimmed) and is not checked against the DID,
+    /// because a URL does not name a chain.
     #[test]
-    fn for_did_without_a_url_has_no_default_endpoint_for_testnet4() {
+    fn for_did_without_a_url_uses_the_hosted_endpoint_or_none() {
+        let did = did_on(Network::Signet);
+        let client = Client::for_did(&did, None, None, FakeTransport::new("[]"))
+            .expect("signet has a hosted endpoint");
+        assert_eq!(client.base_url, "https://mempool.space/signet/api");
+
         let did = did_on(Network::TestnetV4);
-        let err = Client::for_did(&did, None, None, FakeTransport::new("[]"))
-            .err()
-            .expect("testnet4 has no hosted endpoint");
-        match err {
-            Error::NoDefaultEndpoint(net) => assert_eq!(net, "testnet4"),
-            other => panic!("expected NoDefaultEndpoint, got {other:?}"),
-        }
+        let client = Client::for_did(&did, None, None, FakeTransport::new("[]"))
+            .expect("testnet4 has a hosted endpoint");
+        assert_eq!(client.base_url, "https://mempool.space/testnet4/api");
+
         let client = Client::for_did(
             &did,
             None,
