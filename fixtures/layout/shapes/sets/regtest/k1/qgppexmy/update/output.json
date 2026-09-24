@@ -1,0 +1,35 @@
+{
+    "signedUpdate": {
+        "@context": [
+            "https://w3id.org/security/v2",
+            "https://w3id.org/zcap/v1",
+            "https://w3id.org/json-ld-patch/v1",
+            "https://btcr2.dev/context/v1"
+        ],
+        "patch": [
+            {
+                "op": "replace",
+                "path": "/service/0/serviceEndpoint",
+                "value": "bitcoin:mmBCLTLMZqUFhiG4vhhaM7EbLRN6h7sCfG"
+            }
+        ],
+        "targetHash": "hduKs2Pj2VpUueLkvWLSR5MeSjTYgKPO02H9zrqjUKw",
+        "targetVersionId": 2,
+        "sourceHash": "AHcGbJ3OGSIrjVTIHFbIc2OEA25EDtMOM1uXBlw2qDQ",
+        "proof": {
+            "@context": [
+                "https://w3id.org/security/v2",
+                "https://w3id.org/zcap/v1",
+                "https://w3id.org/json-ld-patch/v1",
+                "https://btcr2.dev/context/v1"
+            ],
+            "cryptosuite": "bip340-jcs-2025",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "did:btcr2:k1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s#initialKey",
+            "proofPurpose": "capabilityInvocation",
+            "capability": "urn:zcap:root:did%3Abtcr2%3Ak1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s",
+            "capabilityAction": "Write",
+            "proofValue": "z4uLUfMjfUufPGgeXa9ZgJ1DR7bnH7FAkHVf83ebT1C4iwFtiJPPNgStUrT9cpV2h8PKdN6RH4TFJgrRd7APPBqWA"
+        }
+    }
+}

@@ -1,0 +1,21 @@
+[
+  {
+    "update": 1,
+    "beaconId": "did:btcr2:x1q5cfewepdtyw92pylcgf68k87dz97epx3a2040gayx3jygj2g45fs4peu2c#cohortBeacon",
+    "address": "tb1qs2fzk3x6xtl9hxumrud94ytj6vystqskk2s597",
+    "txid": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "blockHeight": 1000,
+    "blockHash": "000000006b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+    "blockTime": 1789000000,
+    "mediantime": 1788999900,
+    "signalBytes": "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
+    "recordedTip": 1010,
+    "cohort": {
+      "id": "shape-cohort",
+      "members": [
+        "shape-cohort-a",
+        "shape-cohort-b"
+      ]
+    }
+  }
+]

@@ -5417,3 +5417,147 @@ fn no_live_vector_is_negative() {
         "the checked-out suite ships no negative set, but these expect an error: {negative:?}"
     );
 }
+
+// --- Synthetic shape corpora ---------------------------------------------------
+//
+// These corpora live in this repository under `fixtures/layout/`, so the tests
+// below never skip: an absent corpus is a bug.
+
+/// The panic message of a discovery walk over a synthetic corpus that must fail.
+fn discovery_panic(corpus: &str) -> String {
+    let payload = std::panic::catch_unwind(|| discover_in(&Corpus::synthetic(corpus)))
+        .expect_err("discovery over this corpus must fail");
+    panic_message(payload)
+}
+
+/// The passing shapes corpus classifies every set from its files alone: a CAS
+/// genesis, a CAS-announced update, and an SMT cohort whose second member ships
+/// no `update/` and names no update in its signal.
+#[test]
+fn shapes_corpus_classifies_from_files() {
+    let corpus = Corpus::synthetic("shapes");
+    let vectors = discover_in(&corpus);
+    let ids: Vec<&str> = vectors.iter().map(|v| v.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "mutinynet/x1/q425c5wf",
+            "mutinynet/x1/q5cfewep",
+            "mutinynet/x1/qh66uy2s",
+            "regtest/k1/qgppexmy",
+        ]
+    );
+    for v in &vectors {
+        assert_eq!(v.corpus, corpus, "{}", v.id);
+        assert!(v.dir.starts_with(&corpus.sets), "{}", v.id);
+        assert!(
+            !v.delivery.pending,
+            "{}: the layout ships no pending.json",
+            v.id
+        );
+        assert!(!v.is_negative(), "{}", v.id);
+    }
+    let by_id = |want: &str| {
+        vectors
+            .iter()
+            .find(|v| v.id == want)
+            .unwrap_or_else(|| panic!("{want} must be discovered"))
+    };
+
+    // The exact reasons each set's files derive. The copied update @context
+    // predates the pin, so the two sets with update steps also carry
+    // StaleContext.
+    let reasons = |id: &str| by_id(id).skip_reasons_with(AssertionKind::Resolve, &[]);
+    assert_eq!(
+        reasons("mutinynet/x1/qh66uy2s"),
+        BTreeSet::from([SkipReason::CasDelivery])
+    );
+    assert_eq!(
+        reasons("regtest/k1/qgppexmy"),
+        BTreeSet::from([SkipReason::CasDelivery, SkipReason::StaleContext])
+    );
+    assert_eq!(
+        reasons("mutinynet/x1/q5cfewep"),
+        BTreeSet::from([
+            SkipReason::SmtDelivery,
+            SkipReason::UnsupportedBeaconType,
+            SkipReason::StaleContext,
+        ])
+    );
+    assert_eq!(
+        reasons("mutinynet/x1/q425c5wf"),
+        BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType])
+    );
+
+    // Delivery as the files show it.
+    assert_eq!(
+        by_id("mutinynet/x1/qh66uy2s").delivery.genesis,
+        GenesisDelivery::Cas
+    );
+    let k1 = by_id("regtest/k1/qgppexmy");
+    assert_eq!(k1.delivery.genesis, GenesisDelivery::Deterministic);
+    assert_eq!(k1.delivery.announcement, Some(AnnouncementDelivery::Cas));
+    assert!(k1.signals.is_none());
+
+    // The cohort pair: one member with a flat update/ announcing update 1, one
+    // cohort-only member with no update/ and no `update` in its entry.
+    let a = by_id("mutinynet/x1/q5cfewep");
+    assert_eq!(a.scenario_id.as_deref(), Some("shape-cohort-a"));
+    assert_eq!(a.update_layout, UpdateLayout::Flat);
+    let a_signals = a
+        .signals
+        .as_ref()
+        .expect("shape-cohort-a ships signals.json");
+    assert_eq!(a_signals.recorded_tip, 1010);
+    assert_eq!(a_signals.entries[0].update, Some(1));
+
+    let b = by_id("mutinynet/x1/q425c5wf");
+    assert_eq!(b.scenario_id.as_deref(), Some("shape-cohort-b"));
+    assert_eq!(b.update_layout, UpdateLayout::None);
+    assert_eq!(b.delivery.announcement, None);
+    let b_signals = b
+        .signals
+        .as_ref()
+        .expect("shape-cohort-b ships signals.json");
+    assert_eq!(b_signals.entries.len(), 1);
+    assert_eq!(b_signals.entries[0].update, None);
+    assert_eq!(
+        b_signals.entries[0].cohort.as_ref().map(|c| c.id.as_str()),
+        Some("shape-cohort")
+    );
+    assert_eq!(a_signals.entries[0].txid, b_signals.entries[0].txid);
+    check_cohorts(&vectors).expect("the pair is a consistent cohort");
+}
+
+/// A `resolve/` child that is neither the main pair nor a numbered case fails
+/// discovery, naming the child.
+#[test]
+fn shapes_unknown_resolve_child_fails_discovery() {
+    let message = discovery_panic("shapes-unknown-resolve-child");
+    assert!(
+        message.contains("unrecognized `resolve/` child")
+            && message.contains("notes.md")
+            && message.contains("regtest/k1/qgpakaw4"),
+        "{message}"
+    );
+}
+
+/// A `signals.json` that is an object rather than a bare array fails discovery.
+#[test]
+fn shapes_malformed_signals_fail_discovery() {
+    let message = discovery_panic("shapes-malformed-signals");
+    assert!(
+        message.contains("bare array") && message.contains("regtest/k1/qgpakaw4/signals.json"),
+        "{message}"
+    );
+}
+
+/// A cohort whose member matches no set fails discovery, naming the member.
+#[test]
+fn shapes_bad_cohort_member_fails_discovery() {
+    let message = discovery_panic("shapes-bad-cohort-member");
+    assert!(
+        message.contains("shape-cohort-b") && message.contains("shape-cohort"),
+        "{message}"
+    );
+}

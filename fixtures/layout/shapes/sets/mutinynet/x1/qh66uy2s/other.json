@@ -1,0 +1,31 @@
+{
+  "scenarioId": "shape-x1-cas-genesis",
+  "genesisDocument": {
+    "id": "did:btcr2:_",
+    "@context": [
+      "https://www.w3.org/ns/did/v1.1",
+      "https://btcr2.dev/context/v1"
+    ],
+    "verificationMethod": [
+      {
+        "id": "did:btcr2:_#initialKey",
+        "type": "Multikey",
+        "controller": "did:btcr2:_",
+        "publicKeyMultibase": "zQ3shqeDNCombkGtQACmgEXH6rZqY4wfn6LLDx5iofB1SwAaK"
+      }
+    ],
+    "authentication": [
+      "did:btcr2:_#initialKey"
+    ],
+    "assertionMethod": [
+      "did:btcr2:_#initialKey"
+    ],
+    "capabilityInvocation": [
+      "did:btcr2:_#initialKey"
+    ],
+    "capabilityDelegation": [
+      "did:btcr2:_#initialKey"
+    ],
+    "service": []
+  }
+}
