@@ -40,10 +40,10 @@ the minted `clean` fixture and the `chain-capture` RUNBOOK at compile time.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 371 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 373 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 64 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
-| `chain-capture` | 185 |
+| `chain-capture` | 188 |
 | `did-btcr2-resolver-http` | 62 lib + 9 bin + 47 conformance + 10 fixtures + 12 guard + 11 post + 5 schema + 6 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
