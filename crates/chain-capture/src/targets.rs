@@ -1,15 +1,18 @@
 //! Which vendor vectors this tool captures chain data for, and what each one
 //! expects.
 //!
-//! Three things live here: the target set (with the derivation that produced it,
+//! Four things live here: the target set (with the derivation that produced it,
 //! plus a test that re-derives it from the tree), the per-vector loader that
 //! reads a vector's DID, sidecar and expected resolve output from its own files,
-//! and the endpoint rule that maps a chain name onto an Esplora base URL.
+//! the explicit-root loader for sets that carry a `signals.json` record
+//! ([`load_in`]), and the endpoint rule that maps a chain name onto an Esplora
+//! base URL.
 
 use did_btcr2::identifier::{Did, Network};
 use did_btcr2_client::resolve_base_url;
 use onlyerror::Error;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
@@ -47,6 +50,14 @@ pub const UNSUPPORTED_BEACON_VECTORS: &[&str] = &[
     "mutinynet/x1/qkrrp544",
 ];
 
+/// Genesis beacon service types the resolver cannot query, so a set declaring
+/// one of them is out of scope for capture.
+///
+/// Read at runtime only by [`load_in`], which has no allow-list to consult; the
+/// allow-list path uses the same list in `drivable_set_matches_the_tree` to
+/// re-derive its constants from the tree.
+const UNSUPPORTED_BEACON_TYPES: &[&str] = &["CASBeacon", "SMTBeacon"];
+
 /// Target-layer failures. Every message names the vector it is about, including
 /// the network segment, so an operator reading a capture log knows which row
 /// failed without cross-referencing.
@@ -68,6 +79,25 @@ pub enum TargetError {
         vector: String,
         /// The drivable ids, comma-separated.
         drivable: String,
+    },
+
+    /// An id handed to [`load_in`] is not shaped like a set id. Checked before
+    /// any path is built, so the id is never a free-form path under the root.
+    #[error(
+        "{vector}: is not a set id of the form `<network>/<k1|x1>/<id>` (lowercase letters and digits in the last segment); pass the id as it appears under the suite root"
+    )]
+    InvalidVectorId {
+        /// The rejected id, verbatim.
+        vector: String,
+    },
+
+    /// A set loaded from an explicit suite root ships no `signals.json`.
+    #[error(
+        "{vector}: ships no signals.json, and an explicit suite root captures only sets that carry signals.json — capture a set without one through the default test-suite tree"
+    )]
+    NoSignals {
+        /// The set that ships no `signals.json`.
+        vector: String,
     },
 
     /// A fixture the vector must ship could not be read.
@@ -180,6 +210,35 @@ pub fn network_from_dir(name: &str) -> Result<Network, TargetError> {
     }
 }
 
+/// Require `id` to be a set id: exactly `{network}/{k1|x1}/{short}`, where
+/// `network` is a name [`network_from_dir`] knows and `short` is non-empty
+/// lowercase letters and digits.
+///
+/// A whitelist of the shape, not a blacklist of dangerous characters: nothing
+/// that passes can be absolute, climb out of the root with `..`, or reach a
+/// deeper directory than a set's own.
+fn check_vector_id(id: &str) -> Result<(), TargetError> {
+    let invalid = || TargetError::InvalidVectorId {
+        vector: id.to_string(),
+    };
+    let segments: Vec<&str> = id.split('/').collect();
+    let [network, kind, short] = segments[..] else {
+        return Err(invalid());
+    };
+    network_from_dir(network).map_err(|_| invalid())?;
+    if kind != "k1" && kind != "x1" {
+        return Err(invalid());
+    }
+    if short.is_empty()
+        || !short
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// Resolve the Esplora base URL for a network, honouring an operator override.
 ///
 /// A thin wrapper over the client's own endpoint rule so every chain this tool
@@ -250,14 +309,110 @@ pub struct VectorTarget {
     pub did: Did,
     /// `resolve/input.json`'s `resolutionOptions.sidecar`, verbatim.
     pub sidecar: Value,
-    /// `resolve/output.json`'s `didDocument`.
-    pub expected_document: Value,
-    /// `didDocumentMetadata.versionId`, read tolerantly (see [`version_id`]).
-    pub expected_version_id: u64,
-    /// `didDocumentMetadata.deactivated`.
-    pub expected_deactivated: bool,
-    /// `didDocumentMetadata.confirmations`, `None` when the vector states none.
-    pub expected_confirmations: Option<u64>,
+    /// What `resolve/output.json` says the resolve produces.
+    pub expected: ExpectedOutcome,
+    /// The set's `signals.json`, when it ships one.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the capture session does not route a set carrying signals.json through the signals gate yet"
+        )
+    )]
+    pub signals: Option<CaptureSignals>,
+}
+
+/// What a set's `resolve/output.json` says resolving its DID produces.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExpectedOutcome {
+    /// The resolve succeeds with this document and metadata.
+    Resolved {
+        /// `didDocument`.
+        document: Value,
+        /// `didDocumentMetadata.versionId`, read tolerantly (see [`version_id`]).
+        version_id: u64,
+        /// `didDocumentMetadata.deactivated`.
+        deactivated: bool,
+        /// `didDocumentMetadata.confirmations`, `None` when the set states none.
+        confirmations: Option<u64>,
+    },
+    /// The resolve fails; `didResolutionMetadata.error` names the code.
+    Error {
+        /// The error code the set records, verbatim.
+        code: String,
+    },
+}
+
+impl ExpectedOutcome {
+    /// The confirmations the set states, `None` for a set that states none or
+    /// expects an error.
+    pub fn confirmations(&self) -> Option<u64> {
+        match self {
+            Self::Resolved { confirmations, .. } => *confirmations,
+            Self::Error { .. } => None,
+        }
+    }
+}
+
+/// One entry of a set's `signals.json`: a Beacon Signal the set records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalRecord {
+    /// The 1-based update step the signal announces, `None` for a cohort
+    /// member whose share of an aggregated signal carries no update of its own.
+    pub update: Option<u64>,
+    /// A later announcement of an update an earlier entry already announced.
+    pub duplicate: bool,
+    /// The beacon address the signal belongs to.
+    pub address: String,
+    /// The signalling transaction, lowercase hex.
+    pub txid: String,
+    /// The height of the block confirming it.
+    pub block_height: u32,
+    /// The hash of that block, lowercase hex.
+    pub block_hash: String,
+    /// The 32 bytes the transaction's last output pushes.
+    pub signal_bytes: [u8; 32],
+    /// The chain tip the set's expected outputs were recorded against.
+    pub recorded_tip: u32,
+    /// The cohort's `id`, when the signal is aggregated.
+    pub cohort: Option<String>,
+}
+
+/// A set's `signals.json`: the upstream record of every Beacon Signal of the
+/// set, and the tip its expected outputs were recorded against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureSignals {
+    /// The `recordedTip` every entry agrees on.
+    pub recorded_tip: u32,
+    /// The entries, in file order.
+    pub entries: Vec<SignalRecord>,
+}
+
+/// The wire shape of one `signals.json` entry, before its rules are checked.
+///
+/// Only the members this tool reads; members upstream adds later are ignored
+/// rather than rejected, because the file is extended additively.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSignalEntry {
+    #[serde(default)]
+    update: Option<u64>,
+    #[serde(default)]
+    duplicate: bool,
+    address: String,
+    txid: String,
+    block_height: u32,
+    block_hash: String,
+    signal_bytes: String,
+    recorded_tip: u32,
+    #[serde(default)]
+    cohort: Option<RawCohort>,
+}
+
+/// The part of a `cohort` member this tool reads.
+#[derive(serde::Deserialize)]
+struct RawCohort {
+    id: String,
 }
 
 /// Load one vector's capture target from its own files.
@@ -322,25 +477,20 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
         ));
     }
 
-    let expected_document = output["didDocument"].clone();
-    if !expected_document.is_object() {
-        return Err(malformed(
-            id,
-            &output_path,
-            "no `didDocument` object; a resolve vector must state the document it expects",
-        ));
-    }
+    let expected = resolved_outcome(id, &output_path, &output)?;
 
-    let metadata = &output["didDocumentMetadata"];
-    let expected_version_id = version_id(id, &output_path, &metadata["versionId"])?;
-    let expected_deactivated = metadata["deactivated"].as_bool().ok_or_else(|| {
-        malformed(
+    // An allow-listed vector that later ships a signals.json is captured
+    // through the signals gate like any other set that carries one.
+    let signals_path = root.join(id).join("signals.json");
+    let signals = if signals_path.exists() {
+        Some(parse_signals(
             id,
-            &output_path,
-            "no `didDocumentMetadata.deactivated` boolean",
-        )
-    })?;
-    let expected_confirmations = confirmations(id, &output_path, &metadata["confirmations"])?;
+            &signals_path,
+            &read_json(id, &signals_path)?,
+        )?)
+    } else {
+        None
+    };
 
     Ok(VectorTarget {
         id: id.to_string(),
@@ -348,10 +498,306 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
         network,
         did,
         sidecar,
-        expected_document,
-        expected_version_id,
-        expected_deactivated,
-        expected_confirmations,
+        expected,
+        signals,
+    })
+}
+
+/// Load one set from an explicit suite root.
+///
+/// The path for regenerated-layout sets, which the allow-list does not name:
+/// the id is shape-checked instead ([`check_vector_id`]) before any path is
+/// built, and only a set that ships `signals.json` is accepted, because that
+/// record is what the capture gate compares the chain with.
+///
+/// Refusals, in order: a malformed id; no `signals.json`; a `signals.json` that
+/// breaks its shape rules; a set that is out of scope because it aggregates its
+/// signals in a cohort or declares a CAS or SMT genesis beacon. The cohort
+/// refusal comes before the duplicate rule and before anything looks for an
+/// `update/` directory, so a cohort-only set — no `update/`, no `update` member
+/// on any entry — is reported as unsupported rather than malformed.
+///
+/// Unlike [`load`], a set may carry no sidecar (read as `{}`), a sidecar
+/// without `updates`, and an expected error rather than a resolved document.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the capture session does not take a suite root yet; until it does, only the tests load through this path"
+    )
+)]
+pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
+    check_vector_id(id)?;
+    let network_dir = id
+        .split('/')
+        .next()
+        .expect("`check_vector_id` accepted exactly three segments")
+        .to_string();
+    let network = network_from_dir(&network_dir)?;
+    let set_dir = suite_root.join(id);
+
+    let signals_path = set_dir.join("signals.json");
+    if !signals_path.is_file() {
+        return Err(TargetError::NoSignals {
+            vector: id.to_string(),
+        });
+    }
+    let signals = parse_signals(id, &signals_path, &read_json(id, &signals_path)?)?;
+
+    let input_path = set_dir.join("resolve/input.json");
+    let output_path = set_dir.join("resolve/output.json");
+    let input = read_json(id, &input_path)?;
+    let output = read_json(id, &output_path)?;
+    let other_path = set_dir.join("other.json");
+    let other = if other_path.exists() {
+        read_json(id, &other_path)?
+    } else {
+        Value::Null
+    };
+
+    let did_str = input["did"].as_str().ok_or_else(|| {
+        malformed(
+            id,
+            &input_path,
+            "no `did` string at the top level; a resolve vector must name the DID it resolves",
+        )
+    })?;
+    let did = Did::from_str(did_str).map_err(|source| TargetError::Identifier {
+        vector: id.to_string(),
+        did: did_str.to_string(),
+        source,
+    })?;
+
+    // A set whose update is delivered some other way, or withheld on purpose,
+    // carries no sidecar or one without `updates`; the gate for these sets is
+    // the signals record, not the sidecar, so an empty sidecar is not vacuous.
+    let sidecar = match &input["resolutionOptions"]["sidecar"] {
+        Value::Null => Value::Object(serde_json::Map::new()),
+        object @ Value::Object(_) => object.clone(),
+        other => {
+            return Err(malformed(
+                id,
+                &input_path,
+                &format!("`resolutionOptions.sidecar` is `{other}`, expected an object"),
+            ));
+        }
+    };
+
+    // The genesis document of an x1 set lives in other.json or in the sidecar;
+    // a k1 set's is generated from its key and carries Singleton beacons only.
+    for genesis in [&other["genesisDocument"], &sidecar["genesisDocument"]] {
+        let declares_unsupported = genesis["service"].as_array().is_some_and(|services| {
+            services.iter().any(|service| {
+                service["type"]
+                    .as_str()
+                    .is_some_and(|t| UNSUPPORTED_BEACON_TYPES.contains(&t))
+            })
+        });
+        if declares_unsupported {
+            return Err(TargetError::UnsupportedBeacon(id.to_string()));
+        }
+    }
+
+    let expected = match &output["didResolutionMetadata"]["error"] {
+        Value::Null => resolved_outcome(id, &output_path, &output)?,
+        Value::String(code) => ExpectedOutcome::Error { code: code.clone() },
+        other => {
+            return Err(malformed(
+                id,
+                &output_path,
+                &format!("`didResolutionMetadata.error` is `{other}`, expected an error code"),
+            ));
+        }
+    };
+
+    Ok(VectorTarget {
+        id: id.to_string(),
+        network_dir,
+        network,
+        did,
+        sidecar,
+        expected,
+        signals: Some(signals),
+    })
+}
+
+/// Read a positive `resolve/output.json`: its document, versionId, deactivated
+/// flag and confirmations.
+fn resolved_outcome(
+    vector: &str,
+    path: &Path,
+    output: &Value,
+) -> Result<ExpectedOutcome, TargetError> {
+    let document = output["didDocument"].clone();
+    if !document.is_object() {
+        return Err(malformed(
+            vector,
+            path,
+            "no `didDocument` object; a resolve vector must state the document it expects",
+        ));
+    }
+
+    let metadata = &output["didDocumentMetadata"];
+    let version_id = version_id(vector, path, &metadata["versionId"])?;
+    let deactivated = metadata["deactivated"]
+        .as_bool()
+        .ok_or_else(|| malformed(vector, path, "no `didDocumentMetadata.deactivated` boolean"))?;
+    let confirmations = confirmations(vector, path, &metadata["confirmations"])?;
+    Ok(ExpectedOutcome::Resolved {
+        document,
+        version_id,
+        deactivated,
+        confirmations,
+    })
+}
+
+/// True for 64 lowercase hex characters: a txid, a block hash, 32 signal bytes.
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Parse and check a set's `signals.json`.
+///
+/// A second reader of the file the core crate's test harness parses — by
+/// necessity, since that parser is test-only and unreachable from here — so the
+/// two apply the same rules and both follow the upstream shape; unknown members
+/// are ignored, not rejected. The rules:
+///
+/// - the file is a bare array of at least one entry, all agreeing on
+///   `recordedTip`;
+/// - `txid`, `blockHash` and `signalBytes` are 64 lowercase hex;
+/// - `update` is optional, but an entry without it must carry `cohort`, and
+///   `duplicate` on an entry without `update` is malformed;
+/// - an entry carrying a cohort is refused as unsupported (an aggregated signal
+///   is a CAS or SMT beacon's), before the duplicate rule can fire;
+/// - duplicates are keyed on `update`, never on `signalBytes`: an entry repeating
+///   an earlier entry's `update` needs `duplicate: true`, the same
+///   `signalBytes` and a strictly higher `blockHeight`, and `duplicate: true` on
+///   a first announcement is malformed.
+fn parse_signals(vector: &str, path: &Path, raw: &Value) -> Result<CaptureSignals, TargetError> {
+    let bad = |detail: String| malformed(vector, path, &detail);
+
+    let array = raw.as_array().ok_or_else(|| {
+        bad("signals.json must be a bare array of signal entries, not an object or a scalar".into())
+    })?;
+    if array.is_empty() {
+        return Err(bad(
+            "signals.json holds no entry, so it records no recordedTip — a set with no Beacon \
+             Signal ships no signals.json"
+                .into(),
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(array.len());
+    for (index, raw_entry) in array.iter().enumerate() {
+        let entry: RawSignalEntry = serde_json::from_value(raw_entry.clone())
+            .map_err(|e| bad(format!("entry {index} is not a signal entry ({e})")))?;
+        for (member, value) in [
+            ("txid", &entry.txid),
+            ("blockHash", &entry.block_hash),
+            ("signalBytes", &entry.signal_bytes),
+        ] {
+            if !is_hex64(value) {
+                return Err(bad(format!(
+                    "entry {index} {member} must be 64 lowercase hex characters, got {value:?}"
+                )));
+            }
+        }
+        if entry.update.is_none() {
+            if entry.cohort.is_none() {
+                return Err(bad(format!(
+                    "entry {index} carries neither `update` nor `cohort` — an entry announcing \
+                     no update step of this set must name the cohort it shares a signal with"
+                )));
+            }
+            if entry.duplicate {
+                return Err(bad(format!(
+                    "entry {index} sets `duplicate` but carries no `update` — only a repeated \
+                     announcement of an update step can be a duplicate"
+                )));
+            }
+        }
+        let mut signal_bytes = [0u8; 32];
+        hex::decode_to_slice(&entry.signal_bytes, &mut signal_bytes)
+            .expect("64 lowercase hex characters decode to 32 bytes");
+        entries.push(SignalRecord {
+            update: entry.update,
+            duplicate: entry.duplicate,
+            address: entry.address,
+            txid: entry.txid,
+            block_height: entry.block_height,
+            block_hash: entry.block_hash,
+            signal_bytes,
+            recorded_tip: entry.recorded_tip,
+            cohort: entry.cohort.map(|c| c.id),
+        });
+    }
+
+    let recorded_tip = entries[0].recorded_tip;
+    if let Some((index, entry)) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.recorded_tip != recorded_tip)
+    {
+        return Err(bad(format!(
+            "entry {index} records recordedTip {} but entry 0 records {recorded_tip} — every \
+             entry of one file is recorded against the same tip",
+            entry.recorded_tip
+        )));
+    }
+
+    if entries.iter().any(|e| e.cohort.is_some()) {
+        return Err(TargetError::UnsupportedBeacon(vector.to_string()));
+    }
+
+    let mut first_announcement: BTreeMap<u64, usize> = BTreeMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(update) = entry.update else {
+            continue;
+        };
+        match first_announcement.get(&update) {
+            None => {
+                if entry.duplicate {
+                    return Err(bad(format!(
+                        "entry {index} sets `duplicate` on the first announcement of update \
+                         {update}"
+                    )));
+                }
+                first_announcement.insert(update, index);
+            }
+            Some(&first) => {
+                let original = &entries[first];
+                if !entry.duplicate {
+                    return Err(bad(format!(
+                        "entry {index} announces update {update} again (entry {first} announced \
+                         it first) without `duplicate: true`"
+                    )));
+                }
+                if entry.signal_bytes != original.signal_bytes {
+                    return Err(bad(format!(
+                        "entry {index} is a duplicate of entry {first} but pushes signalBytes \
+                         {} instead of {}",
+                        hex::encode(entry.signal_bytes),
+                        hex::encode(original.signal_bytes)
+                    )));
+                }
+                if entry.block_height <= original.block_height {
+                    return Err(bad(format!(
+                        "entry {index} is a duplicate of entry {first} at blockHeight {}, not \
+                         above the first announcement's {}",
+                        entry.block_height, original.block_height
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(CaptureSignals {
+        recorded_tip,
+        entries,
     })
 }
 
@@ -449,13 +895,35 @@ mod tests {
     use did_btcr2::document::{InitialDocument, ResolutionOptions};
     use std::collections::BTreeSet;
 
-    /// Genesis beacon service types the resolver cannot query, so a vector
-    /// declaring one of them is out of scope for capture.
-    ///
-    /// Lives with the check that applies it: the allow-lists above are what the
-    /// tool reads at runtime, and this is the rule that re-derives them from the
-    /// tree.
-    const UNSUPPORTED_BEACON_TYPES: &[&str] = &["CASBeacon", "SMTBeacon"];
+    /// The resolved expectation's fields, for the assertions written before the
+    /// outcome could be an expected error.
+    impl VectorTarget {
+        fn resolved(&self) -> (&Value, u64, bool, Option<u64>) {
+            match &self.expected {
+                ExpectedOutcome::Resolved {
+                    document,
+                    version_id,
+                    deactivated,
+                    confirmations,
+                } => (document, *version_id, *deactivated, *confirmations),
+                ExpectedOutcome::Error { code } => {
+                    panic!("{}: expects the error {code}, not a resolution", self.id)
+                }
+            }
+        }
+        fn expected_document(&self) -> &Value {
+            self.resolved().0
+        }
+        fn expected_version_id(&self) -> u64 {
+            self.resolved().1
+        }
+        fn expected_deactivated(&self) -> bool {
+            self.resolved().2
+        }
+        fn expected_confirmations(&self) -> Option<u64> {
+            self.resolved().3
+        }
+    }
 
     /// The vector tree is a git submodule; a non-recursive clone leaves it empty.
     /// Every test that reads it calls this first and skips green when it is
@@ -695,11 +1163,11 @@ mod tests {
             1,
             "this vector announces exactly one update"
         );
-        assert_eq!(target.expected_version_id, 2);
-        assert_eq!(target.expected_confirmations, Some(93));
-        assert!(!target.expected_deactivated);
+        assert_eq!(target.expected_version_id(), 2);
+        assert_eq!(target.expected_confirmations(), Some(93));
+        assert!(!target.expected_deactivated());
         assert_eq!(
-            target.expected_document["id"],
+            target.expected_document()["id"],
             *target.did.encode(),
             "the expected document is the one the vector states"
         );
@@ -727,13 +1195,14 @@ mod tests {
             "this test is only meaningful while the fixture encodes versionId as a number"
         );
 
-        assert_eq!(target.expected_version_id, 2);
+        assert_eq!(target.expected_version_id(), 2);
         assert_eq!(
-            target.expected_confirmations, None,
+            target.expected_confirmations(),
+            None,
             "the mutinynet vectors state no confirmations"
         );
         assert!(
-            target.expected_deactivated,
+            target.expected_deactivated(),
             "this vector's final update deactivates the DID"
         );
         assert_eq!(target.network, Network::Mutinynet);
@@ -828,7 +1297,7 @@ mod tests {
         assert_eq!(regtest.len(), 4);
         assert!(regtest.iter().all(|t| t.network_dir == "regtest"));
         assert!(
-            regtest.iter().all(|t| t.expected_confirmations.is_some()),
+            regtest.iter().all(|t| t.expected_confirmations().is_some()),
             "every regtest vector pins a confirmations count"
         );
 
@@ -972,5 +1441,573 @@ mod tests {
             error.to_string().contains("mutiny"),
             "the message names the value: {error}"
         );
+    }
+
+    /// A DID from the vendor vectors. `load_in` does not compare a set's DID
+    /// with its directory (the capture does, before any request), so the scratch
+    /// sets below reuse it under every network.
+    const REGTEST_DID: &str =
+        "did:btcr2:k1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s";
+
+    /// A scratch suite root unique to one test, removed by the test itself.
+    fn scratch_suite(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "chain-capture-suite-{}-{tag}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch suite root is creatable");
+        dir
+    }
+
+    /// One `signals.json` entry in the upstream shape. `seed` fills the txid,
+    /// `bytes` the signal bytes.
+    fn entry(update: Option<u64>, seed: u8, height: u32, bytes: u8, tip: u32) -> Value {
+        let mut entry = serde_json::json!({
+            "beaconId": format!("{REGTEST_DID}#initialP2WPKH"),
+            "address": "bcrt1qbeacon",
+            "txid": format!("{seed:02x}").repeat(32),
+            "blockHeight": height,
+            "blockHash": format!("{:064x}", height),
+            "blockTime": 1_700_000_000,
+            "mediantime": 1_699_999_900,
+            "signalBytes": format!("{bytes:02x}").repeat(32),
+            "recordedTip": tip,
+            "someLaterMember": "ignored",
+        });
+        if let Some(update) = update {
+            entry["update"] = serde_json::json!(update);
+        }
+        entry
+    }
+
+    /// A cohort member entry: no `update`, a `cohort`.
+    fn cohort_entry(seed: u8) -> Value {
+        let mut entry = entry(None, seed, 1000, 0x7c, 1010);
+        entry["cohort"] = serde_json::json!({ "id": "cas-09", "members": ["a", "b"] });
+        entry
+    }
+
+    fn positive_output() -> Value {
+        serde_json::json!({
+            "didDocument": { "id": REGTEST_DID },
+            "didDocumentMetadata": {
+                "versionId": "2",
+                "deactivated": false,
+                "confirmations": 11,
+            },
+            "didResolutionMetadata": { "contentType": "application/did" },
+        })
+    }
+
+    fn error_output(code: &str) -> Value {
+        serde_json::json!({
+            "didDocumentMetadata": {},
+            "didResolutionMetadata": { "error": code, "errorMessage": "JS text" },
+        })
+    }
+
+    /// Write a set's files under `root/id`. `None` leaves a file out.
+    fn write_set(
+        root: &Path,
+        id: &str,
+        signals: Option<Value>,
+        sidecar: Option<Value>,
+        output: Value,
+        other: Option<Value>,
+    ) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(dir.join("resolve")).expect("the set directory is creatable");
+        let write = |name: &str, value: &Value| {
+            std::fs::write(
+                dir.join(name),
+                serde_json::to_string_pretty(value).expect("JSON serializes"),
+            )
+            .expect("the set file is writable");
+        };
+        let mut input = serde_json::json!({ "did": REGTEST_DID, "resolutionOptions": {} });
+        if let Some(sidecar) = sidecar {
+            input["resolutionOptions"]["sidecar"] = sidecar;
+        }
+        write("resolve/input.json", &input);
+        write("resolve/output.json", &output);
+        if let Some(signals) = signals {
+            write("signals.json", &signals);
+        }
+        if let Some(other) = other {
+            write("other.json", &other);
+        }
+    }
+
+    /// `parse_signals` on an in-memory file.
+    fn parse(raw: Value) -> Result<CaptureSignals, TargetError> {
+        parse_signals("regtest/k1/qsignals", Path::new("signals.json"), &raw)
+    }
+
+    /// The detail of a malformed-fixture refusal, or a panic naming what came
+    /// back instead.
+    fn malformed_detail(result: Result<CaptureSignals, TargetError>) -> String {
+        match result {
+            Err(TargetError::MalformedFixture { detail, .. }) => detail,
+            other => panic!("expected a malformed-fixture refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_in_reads_a_set_with_its_signals_and_expected_resolution() {
+        let root = scratch_suite("happy");
+        let id = "signet/k1/qyp5h7kz";
+        write_set(
+            &root,
+            id,
+            Some(serde_json::json!([
+                entry(Some(1), 0xa1, 300, 0x11, 310),
+                entry(Some(2), 0xa2, 305, 0x22, 310),
+            ])),
+            Some(serde_json::json!({ "updates": [] })),
+            positive_output(),
+            Some(serde_json::json!({ "scenarioId": "k1-two-updates" })),
+        );
+
+        let target = load_in(&root, id).expect("a set carrying signals.json loads");
+        assert_eq!(target.id, id);
+        assert_eq!(target.network_dir, "signet");
+        assert_eq!(target.network, Network::Signet);
+        let signals = target
+            .signals
+            .as_ref()
+            .expect("the record travels with the target");
+        assert_eq!(signals.recorded_tip, 310);
+        assert_eq!(signals.entries.len(), 2);
+        assert_eq!(signals.entries[0].update, Some(1));
+        assert_eq!(signals.entries[0].txid, "a1".repeat(32));
+        assert_eq!(signals.entries[0].block_height, 300);
+        assert_eq!(signals.entries[0].block_hash, format!("{:064x}", 300));
+        assert_eq!(signals.entries[1].signal_bytes, [0x22; 32]);
+        assert!(!signals.entries[1].duplicate);
+        assert_eq!(signals.entries[1].cohort, None);
+        assert_eq!(
+            target.expected,
+            ExpectedOutcome::Resolved {
+                document: serde_json::json!({ "id": REGTEST_DID }),
+                version_id: 2,
+                deactivated: false,
+                confirmations: Some(11),
+            }
+        );
+
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_in_accepts_every_network_the_tree_names() {
+        let root = scratch_suite("networks");
+        for (id, network) in [
+            ("testnet4/x1/q9pspvd9", Network::TestnetV4),
+            ("regtest/k1/qgpepnx0", Network::Regtest),
+            ("mutinynet/k1/q5p6w9su", Network::Mutinynet),
+        ] {
+            write_set(
+                &root,
+                id,
+                Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+                None,
+                positive_output(),
+                None,
+            );
+            let target = load_in(&root, id).unwrap_or_else(|e| panic!("{id} loads: {e}"));
+            assert_eq!(target.network, network);
+        }
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_in_refuses_a_malformed_id_before_reading_anything() {
+        // A root that does not exist: any file read would surface as NoSignals
+        // or MissingFixture, so InvalidVectorId proves the id was refused first.
+        let root = std::env::temp_dir().join("chain-capture-suite-that-does-not-exist");
+        for bad in [
+            "../x/k1/a",
+            "/abs/k1/a",
+            "signet/k1/a/b",
+            "signet/z1/a",
+            "signet/k1/",
+            "Signet/k1/a",
+            "signet/k1/A",
+            "signet/k1/a.b",
+            "signet/k1/..",
+            "nowhere/k1/a",
+            "signet/k1",
+            "",
+        ] {
+            let error = load_in(&root, bad).expect_err("a malformed id must not load");
+            assert!(
+                matches!(error, TargetError::InvalidVectorId { ref vector } if vector == bad),
+                "`{bad}` must be refused as an id, got: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("<network>/<k1|x1>/<id>"),
+                "the message states the shape: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_in_refuses_a_set_without_signals() {
+        let root = scratch_suite("no-signals");
+        let id = "regtest/k1/qgppexmy";
+        write_set(&root, id, None, None, positive_output(), None);
+
+        let error = load_in(&root, id).expect_err("a set without signals.json must not load");
+        assert!(
+            matches!(error, TargetError::NoSignals { ref vector } if vector == id),
+            "got: {error}"
+        );
+        assert!(error.to_string().contains(id), "names the set: {error}");
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn signals_record_must_be_a_bare_array() {
+        let detail = malformed_detail(parse(serde_json::json!({})));
+        assert!(detail.contains("bare array"), "{detail}");
+        let detail = malformed_detail(parse(serde_json::json!({ "signals": [] })));
+        assert!(detail.contains("bare array"), "{detail}");
+        let detail = malformed_detail(parse(serde_json::json!([])));
+        assert!(detail.contains("no entry"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_refuses_disagreeing_recorded_tips() {
+        let detail = malformed_detail(parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 310),
+            entry(Some(2), 0xa2, 305, 0x22, 312),
+        ])));
+        assert!(
+            detail.contains("310") && detail.contains("312"),
+            "names both tips: {detail}"
+        );
+    }
+
+    #[test]
+    fn signals_record_refuses_non_hex_members() {
+        for member in ["signalBytes", "txid", "blockHash"] {
+            let mut bad = entry(Some(1), 0xa1, 300, 0x11, 310);
+            bad[member] = serde_json::json!("zz".repeat(32));
+            let detail = malformed_detail(parse(serde_json::json!([bad])));
+            assert!(detail.contains(member), "names {member}: {detail}");
+        }
+        let mut upper = entry(Some(1), 0xa1, 300, 0x11, 310);
+        upper["signalBytes"] = serde_json::json!("AB".repeat(32));
+        let detail = malformed_detail(parse(serde_json::json!([upper])));
+        assert!(detail.contains("lowercase hex"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_refuses_an_entry_missing_a_required_member() {
+        let mut bad = entry(Some(1), 0xa1, 300, 0x11, 310);
+        bad.as_object_mut()
+            .expect("an entry is an object")
+            .remove("recordedTip");
+        let detail = malformed_detail(parse(serde_json::json!([bad])));
+        assert!(detail.contains("recordedTip"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_refuses_an_unflagged_repeat() {
+        let detail = malformed_detail(parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 330),
+            entry(Some(1), 0xa2, 326, 0x11, 330),
+        ])));
+        assert!(detail.contains("duplicate"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_accepts_a_flagged_repeat() {
+        let mut repeat = entry(Some(1), 0xa2, 326, 0x11, 330);
+        repeat["duplicate"] = serde_json::json!(true);
+        let signals = parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 330),
+            repeat
+        ]))
+        .expect("a flagged repeat at a higher block is a duplicate");
+        assert!(signals.entries[1].duplicate);
+        assert_eq!(signals.entries[1].update, Some(1));
+    }
+
+    #[test]
+    fn signals_record_refuses_a_flagged_repeat_that_differs_or_is_not_higher() {
+        let mut other_bytes = entry(Some(1), 0xa2, 326, 0x12, 330);
+        other_bytes["duplicate"] = serde_json::json!(true);
+        let detail = malformed_detail(parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 330),
+            other_bytes
+        ])));
+        assert!(detail.contains("signalBytes"), "{detail}");
+
+        let mut same_block = entry(Some(1), 0xa2, 300, 0x11, 330);
+        same_block["duplicate"] = serde_json::json!(true);
+        let detail = malformed_detail(parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 330),
+            same_block
+        ])));
+        assert!(detail.contains("blockHeight 300"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_refuses_duplicate_on_a_first_occurrence() {
+        let mut first = entry(Some(1), 0xa1, 300, 0x11, 330);
+        first["duplicate"] = serde_json::json!(true);
+        let detail = malformed_detail(parse(serde_json::json!([first])));
+        assert!(detail.contains("first announcement"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_refuses_duplicate_without_update() {
+        let mut orphan = entry(None, 0xa1, 300, 0x11, 330);
+        orphan["duplicate"] = serde_json::json!(true);
+        orphan["cohort"] = serde_json::json!({ "id": "cas-09", "members": [] });
+        let detail = malformed_detail(parse(serde_json::json!([orphan])));
+        assert!(
+            detail.contains("duplicate") && detail.contains("no `update`"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn signals_record_keys_duplicates_on_update_not_on_bytes() {
+        // Two different updates whose entries carry the same signal bytes are
+        // two first announcements, not a repeat: the rule keys on `update`.
+        let signals = parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 330),
+            entry(Some(2), 0xa2, 305, 0x11, 330),
+        ]))
+        .expect("equal bytes under different updates are not duplicates");
+        assert!(signals.entries.iter().all(|e| !e.duplicate));
+    }
+
+    #[test]
+    fn signals_record_refuses_an_entry_with_neither_update_nor_cohort() {
+        let detail = malformed_detail(parse(serde_json::json!([entry(
+            None, 0xa1, 300, 0x11, 330
+        )])));
+        assert!(
+            detail.contains("`update`") && detail.contains("`cohort`"),
+            "names both members: {detail}"
+        );
+    }
+
+    #[test]
+    fn load_in_refuses_a_cohort_entry_as_unsupported() {
+        let root = scratch_suite("cohort");
+        let id = "mutinynet/x1/q5cfewep";
+        let mut member = entry(Some(1), 0xa1, 300, 0x11, 310);
+        member["cohort"] = serde_json::json!({ "id": "cas-09", "members": ["a", "b"] });
+        write_set(
+            &root,
+            id,
+            Some(serde_json::json!([member])),
+            None,
+            positive_output(),
+            None,
+        );
+
+        let error = load_in(&root, id).expect_err("a cohort set is out of scope");
+        assert!(
+            matches!(error, TargetError::UnsupportedBeacon(ref v) if v == id),
+            "got: {error}"
+        );
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_in_refuses_the_cohort_only_shape_as_unsupported() {
+        // The regenerated corpus's cohort-only sets: no update/ directory, and
+        // every signals.json entry carries `cohort` but no `update`. Out of
+        // scope, never malformed.
+        let root = scratch_suite("cohort-only");
+        let id = "regtest/x1/qh2etls9";
+        write_set(
+            &root,
+            id,
+            Some(serde_json::json!([cohort_entry(0xa1)])),
+            Some(serde_json::json!({})),
+            positive_output(),
+            Some(serde_json::json!({ "scenarioId": "cohort-member-b" })),
+        );
+        assert!(!root.join(id).join("update").exists());
+
+        let error = load_in(&root, id).expect_err("a cohort-only set is out of scope");
+        assert!(
+            matches!(error, TargetError::UnsupportedBeacon(ref v) if v == id),
+            "the cohort-only shape is unsupported, not malformed; got: {error}"
+        );
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_in_refuses_a_cas_or_smt_genesis_beacon() {
+        let root = scratch_suite("genesis-beacon");
+        let genesis = |kind: &str| {
+            serde_json::json!({
+                "id": REGTEST_DID,
+                "service": [
+                    { "id": "#a", "type": "SingletonBeacon", "serviceEndpoint": "bitcoin:x" },
+                    { "id": "#b", "type": kind, "serviceEndpoint": "bitcoin:y" },
+                ],
+            })
+        };
+        for (n, kind) in ["SMTBeacon", "CASBeacon"].into_iter().enumerate() {
+            // Once in other.json, once in the sidecar.
+            let in_other = format!("regtest/x1/qother{n}");
+            write_set(
+                &root,
+                &in_other,
+                Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+                None,
+                positive_output(),
+                Some(serde_json::json!({ "genesisDocument": genesis(kind) })),
+            );
+            let in_sidecar = format!("regtest/x1/qsidecar{n}");
+            write_set(
+                &root,
+                &in_sidecar,
+                Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+                Some(serde_json::json!({ "genesisDocument": genesis(kind) })),
+                error_output("INVALID_DID_UPDATE"),
+                None,
+            );
+            for id in [&in_other, &in_sidecar] {
+                let error = load_in(&root, id).expect_err("a CAS or SMT genesis is out of scope");
+                assert!(
+                    matches!(error, TargetError::UnsupportedBeacon(ref v) if v == id),
+                    "{id} ({kind}): got {error}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_in_reads_an_expected_error() {
+        // The withheld-update shape: update present, a sidecar carrying only
+        // the genesis document, and an expected error.
+        let root = scratch_suite("negative");
+        let id = "regtest/x1/qn05miss";
+        write_set(
+            &root,
+            id,
+            Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+            Some(serde_json::json!({ "genesisDocument": { "id": REGTEST_DID, "service": [] } })),
+            error_output("MISSING_UPDATE_DATA"),
+            None,
+        );
+
+        let target = load_in(&root, id).expect("a negative set loads");
+        assert_eq!(
+            target.expected,
+            ExpectedOutcome::Error {
+                code: "MISSING_UPDATE_DATA".to_string()
+            }
+        );
+        assert_eq!(target.expected.confirmations(), None);
+        assert!(target.sidecar.get("updates").is_none());
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_in_accepts_an_absent_sidecar_and_one_without_updates() {
+        let root = scratch_suite("sidecars");
+        let absent = "regtest/k1/qabsent";
+        write_set(
+            &root,
+            absent,
+            Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+            None,
+            positive_output(),
+            None,
+        );
+        assert_eq!(
+            load_in(&root, absent)
+                .expect("an absent sidecar loads")
+                .sidecar,
+            serde_json::json!({})
+        );
+
+        let empty = "regtest/k1/qempty";
+        write_set(
+            &root,
+            empty,
+            Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+            Some(serde_json::json!({})),
+            positive_output(),
+            None,
+        );
+        assert_eq!(
+            load_in(&root, empty)
+                .expect("a sidecar without updates loads")
+                .sidecar,
+            serde_json::json!({})
+        );
+
+        let scalar = "regtest/k1/qscalar";
+        write_set(
+            &root,
+            scalar,
+            Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+            Some(serde_json::json!("nope")),
+            positive_output(),
+            None,
+        );
+        assert!(matches!(
+            load_in(&root, scalar),
+            Err(TargetError::MalformedFixture { .. })
+        ));
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_from_reads_signals_when_an_allow_listed_vector_ships_them() {
+        let root = scratch_suite("allow-listed");
+        let id = "regtest/k1/qgppexmy";
+        write_set(
+            &root,
+            id,
+            None,
+            Some(serde_json::json!({ "updates": [] })),
+            positive_output(),
+            None,
+        );
+        let target = load_from(&root, id).expect("the allow-listed vector loads");
+        assert_eq!(target.signals, None, "no signals.json, no record");
+        assert_eq!(target.expected.confirmations(), Some(11));
+
+        std::fs::write(
+            root.join(id).join("signals.json"),
+            serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)]).to_string(),
+        )
+        .expect("signals.json is writable");
+        let target = load_from(&root, id).expect("the allow-listed vector loads");
+        assert_eq!(
+            target.signals.map(|s| s.recorded_tip),
+            Some(310),
+            "a vector that ships signals.json carries its record"
+        );
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    #[test]
+    fn load_leaves_the_vendor_vectors_without_a_signals_record() {
+        if !test_suite_present() {
+            return;
+        }
+        for id in DRIVABLE_VECTORS {
+            let target = load(id).unwrap_or_else(|e| panic!("{id} loads: {e}"));
+            assert!(target.signals.is_none(), "{id} ships no signals.json");
+            assert!(matches!(target.expected, ExpectedOutcome::Resolved { .. }));
+        }
     }
 }

@@ -26,7 +26,7 @@ use std::rc::Rc;
 use crate::fixture::{self, ChainFixture};
 use crate::pace::{PacePolicy, PaceState, PacedTransport, SystemClock};
 use crate::record::{self, Recording, RecordingTransport};
-use crate::targets::{self, VectorTarget};
+use crate::targets::{self, ExpectedOutcome, VectorTarget};
 use crate::validate;
 
 /// Capture-layer failures. Every message names the vector it is about, because a
@@ -284,7 +284,7 @@ pub fn emit_to(
         signals: fixture.signals.len(),
         tip_height,
         confirmations: ConfirmationsCheck {
-            expected: target.expected_confirmations,
+            expected: target.expected.confirmations(),
             observed: observed_confirmations,
         },
         path,
@@ -349,26 +349,42 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
         expected,
         got,
     };
+    let (expected_document, expected_version_id, expected_deactivated, expected_confirmations) =
+        match &target.expected {
+            ExpectedOutcome::Resolved {
+                document,
+                version_id,
+                deactivated,
+                confirmations,
+            } => (document, *version_id, *deactivated, *confirmations),
+            ExpectedOutcome::Error { code } => {
+                return Err(mismatch(
+                    "error",
+                    code.clone(),
+                    format!("resolved versionId {}", result.document_metadata.version_id),
+                ));
+            }
+        };
     let resolved_document: &Value = result.document.as_ref();
-    if *resolved_document != target.expected_document {
+    if resolved_document != expected_document {
         return Err(mismatch(
             "didDocument",
-            pretty(&target.expected_document),
+            pretty(expected_document),
             pretty(resolved_document),
         ));
     }
     let resolved_version_id = result.document_metadata.version_id.get();
-    if resolved_version_id != target.expected_version_id {
+    if resolved_version_id != expected_version_id {
         return Err(mismatch(
             "versionId",
-            target.expected_version_id.to_string(),
+            expected_version_id.to_string(),
             resolved_version_id.to_string(),
         ));
     }
-    if result.document_metadata.deactivated != target.expected_deactivated {
+    if result.document_metadata.deactivated != expected_deactivated {
         return Err(mismatch(
             "deactivated",
-            target.expected_deactivated.to_string(),
+            expected_deactivated.to_string(),
             result.document_metadata.deactivated.to_string(),
         ));
     }
@@ -376,7 +392,7 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     // resolver's own report is checked too. A vector that states none is not
     // checked here — the tip moves on a live chain and the vector never claimed
     // otherwise.
-    if let Some(expected) = target.expected_confirmations {
+    if let Some(expected) = expected_confirmations {
         let observed = result.document_metadata.confirmations;
         if observed.map(u64::from) != Some(expected) {
             return Err(mismatch(
@@ -663,10 +679,13 @@ mod tests {
             network: Network::Regtest,
             did: Did::from_str(REGTEST_DID).expect("a vendor DID parses"),
             sidecar,
-            expected_document: json!({ "id": REGTEST_DID }),
-            expected_version_id: 2,
-            expected_deactivated: false,
-            expected_confirmations: confirmations,
+            expected: ExpectedOutcome::Resolved {
+                document: json!({ "id": REGTEST_DID }),
+                version_id: 2,
+                deactivated: false,
+                confirmations,
+            },
+            signals: None,
         }
     }
 

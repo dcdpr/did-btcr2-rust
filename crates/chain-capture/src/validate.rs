@@ -354,7 +354,7 @@ pub fn validate(
     //    tip, so a single captured number has to reproduce four independent
     //    expectations — the strongest check available that a capture is sound,
     //    and the reason a re-capture starts from a fresh unpack of the export.
-    if let Some(expected) = target.expected_confirmations {
+    if let Some(expected) = target.expected.confirmations() {
         let got = u64::from(tip_height.saturating_sub(height).saturating_add(1));
         if got != expected {
             return Err(ValidateError::ConfirmationsMismatch {
@@ -471,7 +471,7 @@ fn applied_height(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::targets;
+    use crate::targets::{self, ExpectedOutcome};
     use did_btcr2::identifier::{Did, Network};
     use serde_json::json;
     use std::str::FromStr as _;
@@ -517,10 +517,13 @@ mod tests {
             network: Network::Regtest,
             did: Did::from_str(REGTEST_DID).expect("a vendor DID parses"),
             sidecar,
-            expected_document: json!({ "id": REGTEST_DID }),
-            expected_version_id: 2,
-            expected_deactivated: false,
-            expected_confirmations,
+            expected: ExpectedOutcome::Resolved {
+                document: json!({ "id": REGTEST_DID }),
+                version_id: 2,
+                deactivated: false,
+                confirmations: expected_confirmations,
+            },
+            signals: None,
         }
     }
 
