@@ -41,13 +41,13 @@ const DID_BTC1_CONTEXT: &str = "https://btcr2.dev/context/v1";
 // The genesis-document placeholder DID. Externally-prepared intermediate
 // documents are authored with this placeholder in every `id` position; binding
 // to a real DID substitutes it for the encoded `did:btcr2:…` string. Spec:
-// did-btcr2/src/data-structures.md:49, terminology.md:148-149.
+// did-btcr2/src/data-structures.md:56-57, terminology.md:148-149.
 const DID_PLACEHOLDER: &str = "did:btcr2:_";
 
 mod version_id_serde {
     //! Custom serde for `NonZeroU64` ↔ ASCII string.
     //!
-    //! Spec: did-btcr2/src/data-structures.md:341 — versionId is an
+    //! Spec: did-btcr2/src/data-structures.md:363 — versionId is an
     //! "ASCII string representation of the version".
     //!
     //! Pattern: matches the `Sha256Hash` manual-serde precedent for
@@ -348,7 +348,7 @@ where
         // an absent field defaults to false for initial documents (which
         // never carry it); the deactivate JSON Patch flips it to true via the
         // normal apply_update re-parse path — no special case here. A present
-        // field MUST be a JSON boolean (data-structures.md:339): a
+        // field MUST be a JSON boolean (data-structures.md:361): a
         // present-but-non-boolean value (e.g. `"true"`, `1`, `null`) is rejected
         // rather than silently coerced to false (active), which would let a
         // crafted `deactivated` mask a deactivated DID as active.
@@ -550,7 +550,7 @@ pub struct ResolutionResult {
     pub document_metadata: DocumentMetadata,
 }
 
-/// `didResolutionMetadata` per resolve.md:50 and data-structures.md
+/// `didResolutionMetadata` per resolve.md:51 and data-structures.md
 /// "DID Resolution Metadata". `#[non_exhaustive]` lets later work add the
 /// error JSON-LD fields without a breaking change; outside the crate, build
 /// it with `Default::default()` and assign fields.
@@ -567,10 +567,10 @@ pub struct ResolutionMetadata {
 
 /// `didDocumentMetadata` per adrs/0004-did-document-metadata-shape.md
 /// UNION resolution:
-/// - `version_id`: REQUIRED per resolve.md:52-57; OPTIONAL per
-///   data-structures.md:333-341. Always emitted as a UNION.
-/// - `confirmations`: REQUIRED per resolve.md:54; ABSENT in
-///   data-structures.md. `0` when the tip is known and no update was
+/// - `version_id`: REQUIRED per resolve.md:53-54 and
+///   data-structures.md:363. Always emitted.
+/// - `confirmations`: REQUIRED per resolve.md:55 and
+///   data-structures.md:360. `0` when the tip is known and no update was
 ///   applied (the spec's starting value); `None` only when the caller did
 ///   not supply `chain_tip_height` (fail-closed).
 /// - `deactivated`: REQUIRED per both sources.
@@ -578,7 +578,7 @@ pub struct ResolutionMetadata {
 ///   Always emitted as a UNION.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DocumentMetadata {
-    /// Spec wire shape: ASCII string per data-structures.md:341.
+    /// Spec wire shape: ASCII string per data-structures.md:363.
     /// Custom serde — `5` (number) would silently break interop.
     #[serde(rename = "versionId", with = "version_id_serde")]
     pub version_id: std::num::NonZeroU64,
@@ -591,7 +591,7 @@ pub struct DocumentMetadata {
 
     /// Sourced from `contemporary_doc.fields.deactivated` after the
     /// resolver's final apply_update.
-    // Always emitted (no skip_serializing_if): REQUIRED by both resolve.md:55 and data-structures.md.
+    // Always emitted (no skip_serializing_if): REQUIRED by both resolve.md:56 and data-structures.md.
     pub deactivated: bool,
 
     /// ISO-8601 timestamp of the most recent applied update (UNION).
@@ -1496,7 +1496,7 @@ impl InitialDocument {
         }
 
         // Resolve-path apply site: a proof-verification failure MUST surface as
-        // INVALID_DID_UPDATE (resolve.md:244), not the granular ProofVerification
+        // INVALID_DID_UPDATE (resolve.md:257), not the granular ProofVerification
         // code. Every other error apply_update raises is already InvalidDidUpdate,
         // so the whole apply step is spec-uniform. Find-refs confirms apply_update
         // has one production caller — the resolver resolve path — so this collapse
@@ -1519,7 +1519,7 @@ impl InitialDocument {
         })?;
 
         // The document identifier is immutable across an update: the post-patch
-        // document id MUST still equal this DID (resolve.md:211). Rejecting a
+        // document id MUST still equal this DID (resolve.md:222). Rejecting a
         // mismatch stops a patch from re-pointing the document identity.
         if fields.id != self.fields.id {
             return Err(Btcr2Error::InvalidDidUpdate(
@@ -2965,7 +2965,7 @@ mod tests {
     /// through serde_json::to_string AND serde_jcs::to_string as the spec ASCII
     /// string form (`"5"`), NOT as a JSON number (`5`).
     ///
-    /// Spec: did-btcr2/src/data-structures.md:341.
+    /// Spec: did-btcr2/src/data-structures.md:363.
     ///
     /// This test pins the contract that the version_id_serde module emits a
     /// JSON string. A regression where the custom serde is replaced with a
@@ -3068,7 +3068,7 @@ mod tests {
     // Config shape, the proofValue encoding, no-self-mutation, a wrong version
     // failing the resolver dedup, and a pinned deterministic golden vector.
     //
-    // Source spec lines are cited inline (e.g. update.md:85) rather than the
+    // Source spec lines are cited inline (e.g. update.md:86) rather than the
     // project's internal requirement ids.
     // ──────────────────────────────────────────────────────────────────────
 
@@ -3705,7 +3705,7 @@ mod tests {
         );
     }
 
-    /// resolve.md:232 — apply_update MUST reject an update whose proof
+    /// resolve.md:245 — apply_update MUST reject an update whose proof
     /// verificationMethod is NOT a member of the document's capabilityInvocation
     /// set (an update signed by a key the document never authorized to invoke its
     /// root capability). The same membership rule the construction side enforces
@@ -3757,7 +3757,7 @@ mod tests {
         }
     }
 
-    /// resolve.md:211 — apply_update MUST reject an update whose patch changes the
+    /// resolve.md:222 — apply_update MUST reject an update whose patch changes the
     /// document `id` (a post-patch `id != did`): a patch cannot re-point the
     /// document identity. Mapped to the spec-literal INVALID_DID_UPDATE
     /// (`Btcr2Error::InvalidDidUpdate`).
@@ -3847,7 +3847,7 @@ mod tests {
         assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
     }
 
-    /// update.md:87 — a vm_id present in verificationMethod but absent from
+    /// update.md:86 — a vm_id present in verificationMethod but absent from
     /// capabilityInvocation is rejected before signing.
     #[test]
     fn update_rejects_vm_not_in_capability_invocation() {
@@ -4661,7 +4661,7 @@ mod tests {
     }
 
     /// the `deactivated` parse boundary distinguishes three cases on
-    /// subject-controlled JSON (data-structures.md:339 — `deactivated` is a
+    /// subject-controlled JSON (data-structures.md:361 — `deactivated` is a
     /// REQUIRED boolean):
     ///   - absent  -> defaults to `false` (legitimate for initial documents,
     ///     which never carry the field),
@@ -4728,7 +4728,7 @@ mod tests {
         }
     }
 
-    /// update.md:51 — a patch that changes the DID document `id` is rejected
+    /// update.md:11 — a patch that changes the DID document `id` is rejected
     /// (identifier immutability).
     #[test]
     fn update_rejects_id_change() {
@@ -4797,7 +4797,7 @@ mod tests {
         );
     }
 
-    /// data-structures.md:195 — proofValue is a base58-btc multibase string
+    /// data-structures.md:206 — proofValue is a base58-btc multibase string
     /// (leading `z`) whose decoded body is exactly the 64-byte Schnorr signature.
     #[test]
     fn proof_value_is_base58btc_64_bytes() {
@@ -4823,7 +4823,7 @@ mod tests {
         );
     }
 
-    /// data-structures.md:106 — `targetVersionId` must be one more than the
+    /// data-structures.md:118 — `targetVersionId` must be one more than the
     /// current versionId. Construction-time enforcement is intentionally
     /// deferred to the resolver round-trip (the round-trip is the guard): an
     /// update built with targetVersionId 1 still produces a valid signed
@@ -5018,7 +5018,7 @@ mod tests {
     /// deeper at BIP340 verification inside `data_integrity_verify_proof`. Prior to
     /// that collapse this surfaced the granular `InvalidUpdateProof` (cryptosuite.rs:228);
     /// the resolve-path `apply_update` site now wraps ANY proof-verification failure
-    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:244), so this security
+    /// into the spec-uniform `INVALID_DID_UPDATE` (resolve.md:257), so this security
     /// regression test asserts `InvalidDidUpdate`. The rejection property (a tampered
     /// signature is refused) is unchanged — only the wire variant is spec-aligned.
     #[test]
@@ -5065,7 +5065,7 @@ mod tests {
         }
     }
 
-    /// resolve.md:244: a proof-verification failure raised on the resolve
+    /// resolve.md:257: a proof-verification failure raised on the resolve
     /// path inside `apply_update` MUST surface as `INVALID_DID_UPDATE`, not the
     /// granular BIP340 `InvalidUpdateProof`. This pins the wire-code collapse at the
     /// `data_integrity_verify_proof` apply site. A find-refs scope check confirmed

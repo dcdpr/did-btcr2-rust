@@ -76,10 +76,10 @@ impl Update {
         // `targetVersionId` is a JSON *number*, intentionally NOT the string form
         // used by the sibling `versionId` field in DocumentMetadata
         // (`version_id_serde`). The spec carries it unquoted
-        // (did-btcr2/src/data-structures.md:105-106,
+        // (did-btcr2/src/data-structures.md:116-118,
         // did-btcr2/src/example-data/btcr2-signed-update.json:29) and does integer
         // arithmetic/comparison on it during resolve
-        // (did-btcr2/src/operations/resolve.md:182-200: `targetVersionId - 2`,
+        // (did-btcr2/src/operations/resolve.md:193-211: `targetVersionId - 2`,
         // `== current_version_id + 1`). Do NOT "fix" this asymmetry by accepting a
         // string here — a string-form value must be rejected as UnexpectedJsonType.
         let target_version_id = u64::try_from(int_from_object(&json, "targetVersionId")?)
@@ -441,7 +441,8 @@ mod tests {
         }
     }
 
-    /// resolve.md:191 (`LATE_PUBLISHING` MUST): when the duplicate-check index is
+    /// resolve.md:211 (Confirm Duplicate Update, `LATE_PUBLISHING`): when the
+    /// duplicate-check index is
     /// IN RANGE but the historical update hash at that index differs from this
     /// update's hash, `confirm_duplicate` MUST raise `LatePublishingError` (a
     /// previously-published, conflicting update at the same version height is the

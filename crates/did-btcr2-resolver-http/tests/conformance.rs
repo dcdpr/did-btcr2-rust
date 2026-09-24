@@ -723,7 +723,7 @@ fn deactivated_document_maps_to_410() {
     assert_eq!(body(&resp)["didDocumentMetadata"]["deactivated"], true);
 }
 
-/// The method spec's shape (`resolve.md:164`): a deactivated DID resolves to
+/// The method spec's shape (`resolve.md:177-179`): a deactivated DID resolves to
 /// its deactivated document, so the 410 body is the full triple with
 /// `didDocument` present as an object, not null — under a bare `Accept` too,
 /// since a deactivated result is a resolution result whatever was negotiated.

@@ -70,7 +70,7 @@ pub enum Error {
     /// The caller answered a [`ResolverState::Requests`] with a history keyed
     /// by an address that is not a beacon of the current document, so no
     /// request for it was ever issued. Every tuple must carry the Beacon
-    /// Address whose history announced it (resolve.md:145), and that address
+    /// Address whose history announced it (resolve.md:152), and that address
     /// can only be one the document declares. A driver precondition, not a
     /// spec error: the history is not judged, it is refused.
     #[error(
@@ -151,7 +151,7 @@ pub struct Resolver<T = ()> {
     block_mediantimes: HashMap<BlockHash, DateTime<Utc>>,
     /// Signals already matched to sidecar updates but not yet processed,
     /// parked when an applied update introduced a beacon: Find Beacon Signals
-    /// precedes every Process Next Update (resolve.md:40-46), so the new
+    /// precedes every Process Next Update (resolve.md:41-47), so the new
     /// beacon is scanned first. The next round's tuples are merged into these
     /// and the merged pool re-sorted before processing resumes.
     pending_signals: Vec<AppliedSignal>,
@@ -229,7 +229,7 @@ impl Resolver {
     /// feed back), a [`ResolverState::BlockRequests`], or a
     /// [`ResolverState::Resolved`] result (did:btcr2 spec section 7.2.2.1).
     ///
-    /// The loop is the spec's (resolve.md:40-46): scan every beacon not yet
+    /// The loop is the spec's (resolve.md:41-47): scan every beacon not yet
     /// scanned, then take ONE tuple, apply it, and scan again. Each round's
     /// tuples are merged with any parked from an earlier round, sorted, and
     /// applied in order; after every applied update the beacon set is
@@ -273,12 +273,12 @@ impl Resolver {
                     return self.history_exhausted();
                 }
 
-                // Find Beacon Signals (resolve.md:122-149): build the tuples
+                // Find Beacon Signals (resolve.md:125-157): build the tuples
                 // (raises MISSING_UPDATE_DATA here, before the version_time bound —
-                // resolve.md:146-148).
+                // resolve.md:153-155).
                 signals.extend(self.process_beacon_signals(next_signals)?);
 
-                // Process Next Update step 3 (resolve.md:168): sort the union
+                // Process Next Update step 3 (resolve.md:180): sort the union
                 // of parked and new tuples by targetVersionId (ascending) with
                 // block_height as a tiebreaker; the spec removes the FIRST
                 // tuple, and that is what the version_time bound is evaluated
@@ -299,7 +299,7 @@ impl Resolver {
     /// every applied update. A tuple whose Beacon Address the document no
     /// longer declares when it is taken — removed by an update applied
     /// earlier in the pool — is skipped without being judged at all (step 4,
-    /// resolve.md:169). An update that introduced a beacon yields a
+    /// resolve.md:181). An update that introduced a beacon yields a
     /// [`ResolverState::Requests`] for it, with the tuples not yet processed
     /// parked in `pending_signals` for the next
     /// [`ResolverFsm::FindNextSignals`] to merge. Once the pool is drained
@@ -385,7 +385,7 @@ impl Resolver {
             beacon_address,
         }) = signals.next()
         {
-            // Process Next Update step 4 (resolve.md:169): the tuple's Beacon
+            // Process Next Update step 4 (resolve.md:181): the tuple's Beacon
             // Address must still be a beacon of the document AT THIS MOMENT —
             // an update applied earlier in this pool may have removed it.
             // Ignored outright: no versionTime gate (step 5), no
@@ -419,7 +419,7 @@ impl Resolver {
                 update.confirm_duplicate(&self.update_hash_history)?;
             }
 
-            // Process Next Update step 5 (resolve.md:170-179): the
+            // Process Next Update step 5 (resolve.md:182-190): the
             // versionTime bound applies to ANY tuple whose targetVersionId is
             // more than current_version_id (first bullet), evaluated against
             // THIS tuple's block. The duplicate branch above (`<= current`)
@@ -520,7 +520,7 @@ impl Resolver {
                 contemporary_hash = self.contemporary_doc.hash();
 
                 // Find Beacon Signals runs before every Process Next Update
-                // (resolve.md:40-46): a beacon this update introduced is
+                // (resolve.md:41-47): a beacon this update introduced is
                 // scanned now, and its tuples are merged with the ones still
                 // waiting, before the next tuple is taken. `request_cache`
                 // makes this a no-op unless the beacon set actually grew.
@@ -614,7 +614,7 @@ impl Resolver {
             let beacon_type = beacon.ty;
             let beacon_address = beacon.address().clone();
             for tx in txs {
-                // Spec MANDATES the last output (resolve.md:126 + terminology.md:221: Signal
+                // Spec MANDATES the last output (resolve.md:133 + terminology.md:221: Signal
                 // Bytes live in the LAST output). Do not scan all outputs — that would be
                 // non-conformant. Real-world OP_RETURN+change handling is tracked as a
                 // potential upstream spec-amendment.
@@ -886,11 +886,11 @@ fn esplora_base(esplora_url: Option<&str>) -> Result<String, Btcr2Error> {
     Ok(base.to_owned())
 }
 
-/// The spec's `updates` tuple (resolve.md:30,143-149): a beacon signal paired
+/// The spec's `updates` tuple (resolve.md:33,150-157): a beacon signal paired
 /// with the sidecar [`Update`] it resolves to, the confirming block's
 /// metadata (height for the confirmations computation, time and hash for the
 /// mediantime checks), and the Beacon Address whose history announced it
-/// (resolve.md:145). Produced by [`Resolver::process_beacon_signals`].
+/// (resolve.md:152). Produced by [`Resolver::process_beacon_signals`].
 #[derive(Debug)]
 struct AppliedSignal {
     update: Update,
@@ -901,7 +901,7 @@ struct AppliedSignal {
     block_hash: BlockHash,
     /// The Beacon Address whose history this signal was found in — the
     /// address the round's request named, not anything read off the
-    /// transaction. Process Next Update step 4 (resolve.md:169) checks it
+    /// transaction. Process Next Update step 4 (resolve.md:181) checks it
     /// against the document's beacons when the tuple is taken.
     beacon_address: Address,
 }
@@ -983,7 +983,7 @@ pub enum ResolverState {
     /// by the address exactly as it appears in each request's path
     /// (`/address/{address}/txs` → `address`) — every tuple the resolver
     /// builds carries the Beacon Address whose history announced it
-    /// (resolve.md:145), and the driver is the only party that knows which
+    /// (resolve.md:152), and the driver is the only party that knows which
     /// history came from which request. A requested address left out of the
     /// map is an empty history; an address no request named is a driver
     /// error ([`Error::UnrequestedBeaconHistory`]). Under each key, the
@@ -1024,7 +1024,7 @@ pub enum ResolverState {
 struct NextSignal {
     beacon_type: BeaconType,
     /// The Beacon Address whose history this signal was found in, carried
-    /// into [`AppliedSignal`] (resolve.md:145).
+    /// into [`AppliedSignal`] (resolve.md:152).
     beacon_address: Address,
     signal_bytes: Sha256Hash,
     block_time: DateTime<Utc>,
@@ -2852,7 +2852,7 @@ mod tests {
 
     /// Spec-authority ordering: the
     /// version_time bound must be evaluated against the FIRST tuple AFTER the
-    /// (targetVersionId, block_height) sort (resolve.md:168-173), and that choice
+    /// (targetVersionId, block_height) sort (resolve.md:180-185), and that choice
     /// must be deterministic regardless of the order in which beacon signals were
     /// discovered (HashMap iteration order is non-deterministic).
     ///
@@ -3025,7 +3025,7 @@ mod tests {
     /// `confirmations_use_the_most_recently_applied_update` and
     /// `later_duplicate_does_not_raise_confirmations`.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:38,57.
+    /// Spec: did-btcr2/src/operations/resolve.md:38,58.
     #[test]
     fn metadata_confirmations_saturate_against_chain_tip() {
         // terminal_state computes confirmations from chain_tip_height +
@@ -4480,7 +4480,7 @@ mod tests {
     /// 300, confirmations = 300 - 200 + 1 = 101 (from v3's height), NOT
     /// 300 - 100 + 1 = 201 (the old running-min bug).
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:38,57.
+    /// Spec: did-btcr2/src/operations/resolve.md:38,58.
     #[test]
     fn confirmations_use_the_most_recently_applied_update() {
         let (initial, update1, update2) = chained_two_updates();
@@ -4522,7 +4522,7 @@ mod tests {
     /// This asserts the SORT-guaranteed lowest-height-first outcome, not a
     /// synthetic lower-than-applied duplicate (which cannot arise under the sort).
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:57 footnote 2.
+    /// Spec: did-btcr2/src/operations/resolve.md:58 footnote 2.
     #[test]
     fn later_duplicate_does_not_raise_confirmations() {
         let (initial, update1, _update2) = chained_two_updates();
@@ -4642,7 +4642,7 @@ mod tests {
     /// `test-suite/` submodule, so there is nothing to skip on.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md — "Process Next Update"
-    /// steps 1, 2, 3 and 5 (resolve.md:164-173).
+    /// steps 1, 2, 3 and 5 (resolve.md:176-185).
     #[test]
     fn minted_chain_sequences_updates_across_rotating_beacons() {
         use crate::identifier::Did;
@@ -4965,7 +4965,8 @@ mod tests {
     /// The chain is read from the fixture, so this test covers whichever chain
     /// the scenario was last minted on.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:191 (`LATE_PUBLISHING` MUST).
+    /// Spec: did-btcr2/src/operations/resolve.md:211 (Confirm Duplicate Update,
+    /// `LATE_PUBLISHING` when the hashes differ).
     #[test]
     fn minted_fork_raises_late_publishing() {
         use crate::error::ProblemDetails as _;
@@ -5092,7 +5093,7 @@ mod tests {
     /// `contemporary_doc.fields.deactivated`. An initial document carries
     /// `false`; flipping the field surfaces `true` in the metadata.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md:55 (deactivated REQUIRED in metadata).
+    /// Spec: did-btcr2/src/operations/resolve.md:56 (deactivated REQUIRED in metadata).
     #[test]
     fn metadata_deactivated_follows_the_document() {
         // Un-deactivated initial document → metadata.deactivated == false.
@@ -5114,7 +5115,7 @@ mod tests {
     /// short-circuits — no further beacon signals mutate the document. The
     /// terminal state reflects `deactivated: true`.
     ///
-    /// Spec: did-btcr2/src/operations/resolve.md §"Process Next Update" step 2 (resolve.md:165-167)
+    /// Spec: did-btcr2/src/operations/resolve.md §"Process Next Update" step 2 (resolve.md:177-179)
     /// (if current_document.deactivated, resolve current_document as didDocument).
     #[test]
     fn deactivated_document_short_circuits_the_walk() {
@@ -5139,8 +5140,8 @@ mod tests {
     /// `update_lookup_table` raises `Btcr2Error::MissingUpdateData { update_hash }`
     /// directly — not a sidecar-not-found sentinel and not a panic.
     ///
-    /// Spec: did-btcr2/src/errors.md:21-23 (MISSING_UPDATE_DATA: BTCR2 Update data
-    /// can not be found in either the provided Sidecar Data nor in CAS).
+    /// Spec: did-btcr2/src/errors.md:25-27 (MISSING_UPDATE_DATA: data needed to
+    /// find what a Beacon Signal announces is in neither the Sidecar Data nor CAS).
     #[test]
     fn unknown_signal_hash_raises_missing_update_data() {
         // Empty sidecar (the missing-update fixture has zero updates) → empty
@@ -5553,7 +5554,7 @@ mod tests {
     }
 
     /// Genesis beacons A, B, C; v2 (from A) adds D; v3 from D; v4 from A.
-    /// resolve.md:40-46 runs Find Beacon Signals before EVERY Process Next
+    /// resolve.md:41-47 runs Find Beacon Signals before EVERY Process Next
     /// Update, so D is scanned right after v2 applies and v3 is found before
     /// v4 is judged. A resolver that only re-checks the beacon set at the end
     /// of a batch meets v4 with version 2 in force and raises LATE_PUBLISHING.
@@ -6435,7 +6436,7 @@ mod tests {
     /// have advanced a document that rotated away from it.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
-    /// (resolve.md:169).
+    /// (resolve.md:181).
     #[test]
     fn a_signal_from_a_removed_beacon_is_ignored() {
         let (initial, update_v2, update_v3, _update_v4) = chained_replacement_then_two_more();
@@ -6487,7 +6488,7 @@ mod tests {
     /// filter on beacon presence), and no beacon round follows.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
-    /// (resolve.md:169) before step 5 (resolve.md:170-173).
+    /// (resolve.md:181) before step 5 (resolve.md:182-185).
     #[test]
     fn an_ignored_tuple_does_not_stop_a_version_time_walk() {
         let (initial, update_v2, update_v3) = chained_removal_then_one_more();
@@ -6554,7 +6555,7 @@ mod tests {
     /// `pending_signals`.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
-    /// (resolve.md:169) before step 6 (resolve.md:175).
+    /// (resolve.md:181) before step 6 (resolve.md:186).
     #[test]
     fn a_removed_beacons_version_gap_is_ignored_not_late_publishing() {
         let (initial, update_v2, _update_v3, update_v4) = chained_replacement_then_two_more();
@@ -6605,8 +6606,8 @@ mod tests {
     /// Parked path: v2' is parked behind D's empty round.
     ///
     /// Spec: did-btcr2/src/operations/resolve.md "Process Next Update" step 4
-    /// (resolve.md:169) before step 6 and Confirm Duplicate Update
-    /// (resolve.md:194).
+    /// (resolve.md:181) before step 6 and Confirm Duplicate Update
+    /// (resolve.md:205).
     #[test]
     fn a_removed_beacons_conflicting_announcement_never_reaches_confirm_duplicate() {
         let (initial, update_v2, _update_v3, _update_v4) = chained_replacement_then_two_more();

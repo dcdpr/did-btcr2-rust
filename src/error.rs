@@ -63,7 +63,7 @@ pub enum Btcr2Error {
     /// Update payload could not be located in either the supplied sidecar
     /// data nor in CAS (spec MISSING_UPDATE_DATA).
     //
-    // Spec reference: did-btcr2/src/errors.md:21-23. Added for exactly this
+    // Spec reference: did-btcr2/src/errors.md:25-27. Added for exactly this
     // variant; the other non-spec error variants are handled separately.
     #[error(
         "Update payload could not be located in the sidecar data or CAS: update_hash={update_hash:?}"
