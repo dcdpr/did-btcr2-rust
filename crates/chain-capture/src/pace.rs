@@ -226,10 +226,13 @@ mod tests {
         body: Vec<u8>,
     }
 
+    /// Queued `(status, body)` replies per request path, shared by every clone.
+    type CannedReplies = Rc<RefCell<BTreeMap<String, VecDeque<(u16, String)>>>>;
+
     /// Queued `(status, body)` replies per request path; the last one repeats.
     #[derive(Clone, Default)]
     struct ScriptedTransport {
-        canned: Rc<RefCell<BTreeMap<String, VecDeque<(u16, String)>>>>,
+        canned: CannedReplies,
         seen: Rc<RefCell<Vec<Seen>>>,
     }
 
