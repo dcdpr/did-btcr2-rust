@@ -12,7 +12,7 @@
 //! whether the result is drivable.
 
 use chrono::Utc;
-use did_btcr2::document::{ResolutionOptions, SidecarData};
+use did_btcr2::document::{ResolutionOptions, ResolutionResult, SidecarData};
 use did_btcr2::identifier::Network;
 use did_btcr2_client::{Client, UreqTransport};
 use error_iter::ErrorIter as _;
@@ -334,74 +334,13 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     // as the tip the fixture will pin.
     let options = resolution_options_for(&target.sidecar, None)?;
     let resolved = client.resolve(&target.did, options);
-    let result = resolved.map_err(|source| CaptureError::ResolveFailed {
-        vector: target.id.clone(),
-        source,
-    })?;
 
     // The expected-output check. This is where a real chain is contacted on every
     // run, which is why no live-network test ships: a capture is accepted only
     // when it reproduces the vector's own stated resolution, so a substituted or
-    // partial body set cannot pass.
-    let mismatch = |field: &str, expected: String, got: String| CaptureError::ResolutionMismatch {
-        vector: target.id.clone(),
-        field: field.to_string(),
-        expected,
-        got,
-    };
-    let (expected_document, expected_version_id, expected_deactivated, expected_confirmations) =
-        match &target.expected {
-            ExpectedOutcome::Resolved {
-                document,
-                version_id,
-                deactivated,
-                confirmations,
-            } => (document, *version_id, *deactivated, *confirmations),
-            ExpectedOutcome::Error { code } => {
-                return Err(mismatch(
-                    "error",
-                    code.clone(),
-                    format!("resolved versionId {}", result.document_metadata.version_id),
-                ));
-            }
-        };
-    let resolved_document: &Value = result.document.as_ref();
-    if resolved_document != expected_document {
-        return Err(mismatch(
-            "didDocument",
-            pretty(expected_document),
-            pretty(resolved_document),
-        ));
-    }
-    let resolved_version_id = result.document_metadata.version_id.get();
-    if resolved_version_id != expected_version_id {
-        return Err(mismatch(
-            "versionId",
-            expected_version_id.to_string(),
-            resolved_version_id.to_string(),
-        ));
-    }
-    if result.document_metadata.deactivated != expected_deactivated {
-        return Err(mismatch(
-            "deactivated",
-            expected_deactivated.to_string(),
-            result.document_metadata.deactivated.to_string(),
-        ));
-    }
-    // A vector that states confirmations states them against one tip, so the
-    // resolver's own report is checked too. A vector that states none is not
-    // checked here — the tip moves on a live chain and the vector never claimed
-    // otherwise.
-    if let Some(expected) = expected_confirmations {
-        let observed = result.document_metadata.confirmations;
-        if observed.map(u64::from) != Some(expected) {
-            return Err(mismatch(
-                "confirmations",
-                expected.to_string(),
-                observed.map_or_else(|| "none".to_string(), |n| n.to_string()),
-            ));
-        }
-    }
+    // partial body set cannot pass. `None` means the set expects an error and
+    // the resolve failed with one; its recording is still the fixture.
+    let result = check_outcome(target, resolved)?;
 
     // The confirming block of every announcement, whether or not the resolve
     // asked for it: a replay under a `versionTime` bound reads its
@@ -428,8 +367,129 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
         tip,
         &recorded.addresses,
         &recorded.blocks,
-        result.document_metadata.confirmations,
+        result.and_then(|r| r.document_metadata.confirmations),
     )
+}
+
+/// The specification error code a client error carries, or `None` for a
+/// failure that is not a resolution outcome (transport, endpoint selection,
+/// JSON, funding).
+///
+/// The same mapping the HTTP resolver uses for its problem details: the core's
+/// own errors report their problem details, an identifier error is an invalid
+/// DID, and the code is the fragment after `#` in the problem `type`.
+fn client_error_code(err: &did_btcr2_client::Error) -> Option<String> {
+    use did_btcr2::error::{Btcr2Error, ProblemDetails as _};
+    use did_btcr2_client::Error;
+
+    let details = match err {
+        Error::Btcr2(e) => e.details(),
+        Error::Core(e) => e.details(),
+        Error::Resolver(e) => e.details(),
+        // `Btcr2Error`'s conversion takes the parse error by value and the
+        // parse error is not `Clone`, so its two arms are restated here;
+        // `outcome_identifier_codes_follow_the_core_conversion` fails if they
+        // drift apart.
+        Error::Identifier(did_btcr2::identifier::Error::MethodNotSupported(method)) => {
+            Btcr2Error::MethodNotSupported(method.clone()).details()
+        }
+        Error::Identifier(e) => Btcr2Error::InvalidDid(e.to_string()).details(),
+        _ => None,
+    }?;
+    let (_, code) = details["type"].as_str()?.rsplit_once('#')?;
+    (!code.is_empty()).then(|| code.to_string())
+}
+
+/// Judge a resolve against what the set says it produces.
+///
+/// A resolved expectation is compared on `didDocument`, `versionId`,
+/// `deactivated` and — when the set states them — exact `confirmations`: a
+/// capture measures against one tip, so the count must reproduce exactly. A
+/// resolve that fails is refused with the client's own error.
+///
+/// An expected error is satisfied by any failure that carries a specification
+/// error code, whatever the code: the capture only proves the chain makes the
+/// resolve fail with a specification error. Which code is right is the test
+/// harness's judgement, made through its single pinned divergence table on the
+/// run that follows the capture — a second table here would have to gain the
+/// same entries, and nothing could check that the two agree. A success, or a
+/// failure with no specification code (a transport or endpoint fault), is
+/// refused.
+///
+/// Returns the resolution for a resolved expectation and `None` for a
+/// reproduced error.
+fn check_outcome(
+    target: &VectorTarget,
+    resolved: Result<ResolutionResult, did_btcr2_client::Error>,
+) -> Result<Option<ResolutionResult>, CaptureError> {
+    let mismatch = |field: &str, expected: String, got: String| CaptureError::ResolutionMismatch {
+        vector: target.id.clone(),
+        field: field.to_string(),
+        expected,
+        got,
+    };
+    let failed = |source| CaptureError::ResolveFailed {
+        vector: target.id.clone(),
+        source,
+    };
+
+    match &target.expected {
+        ExpectedOutcome::Error { code } => match resolved {
+            Err(e) if client_error_code(&e).is_some() => Ok(None),
+            Err(e) => Err(failed(e)),
+            Ok(result) => Err(mismatch(
+                "error",
+                format!("an error (the set records {code})"),
+                format!("resolved versionId {}", result.document_metadata.version_id),
+            )),
+        },
+        ExpectedOutcome::Resolved {
+            document,
+            version_id,
+            deactivated,
+            confirmations,
+        } => {
+            let result = resolved.map_err(failed)?;
+            let resolved_document: &Value = result.document.as_ref();
+            if resolved_document != document {
+                return Err(mismatch(
+                    "didDocument",
+                    pretty(document),
+                    pretty(resolved_document),
+                ));
+            }
+            let resolved_version_id = result.document_metadata.version_id.get();
+            if resolved_version_id != *version_id {
+                return Err(mismatch(
+                    "versionId",
+                    version_id.to_string(),
+                    resolved_version_id.to_string(),
+                ));
+            }
+            if result.document_metadata.deactivated != *deactivated {
+                return Err(mismatch(
+                    "deactivated",
+                    deactivated.to_string(),
+                    result.document_metadata.deactivated.to_string(),
+                ));
+            }
+            // A set that states confirmations states them against one tip, so
+            // the resolver's own report is checked too. A set that states none
+            // is not checked here — the tip moves on a live chain and the set
+            // never claimed otherwise.
+            if let Some(expected) = confirmations {
+                let observed = result.document_metadata.confirmations;
+                if observed.map(u64::from) != Some(*expected) {
+                    return Err(mismatch(
+                        "confirmations",
+                        expected.to_string(),
+                        observed.map_or_else(|| "none".to_string(), |n| n.to_string()),
+                    ));
+                }
+            }
+            Ok(Some(result))
+        }
+    }
 }
 
 /// A JSON value as pretty text, for an error an operator has to read.
@@ -1185,5 +1245,269 @@ mod tests {
             observed: None,
         };
         assert!(missing.to_string().contains("MISMATCH"), "{missing}");
+    }
+
+    /// An offline resolution of the vendor DID: its generated
+    /// genesis document with the given metadata.
+    fn resolution(version: u64, deactivated: bool, confirmations: Option<u32>) -> ResolutionResult {
+        use did_btcr2::document::{
+            Document, DocumentMetadata, InitialDocument, ResolutionMetadata,
+        };
+        let did = Did::from_str(REGTEST_DID).expect("a vendor DID parses");
+        let genesis = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("a key DID's genesis document generates offline");
+        ResolutionResult {
+            resolution_metadata: ResolutionMetadata::default(),
+            document: Document::from(genesis),
+            document_metadata: DocumentMetadata {
+                version_id: std::num::NonZeroU64::new(version).expect("versions start at 1"),
+                confirmations,
+                deactivated,
+                updated: None,
+            },
+        }
+    }
+
+    /// A target expecting [`resolution`]'s document.
+    fn expecting(expected: ExpectedOutcome) -> VectorTarget {
+        let mut target = synthetic_target("signet/k1/qoutcome", json!({}), None);
+        target.expected = expected;
+        target
+    }
+
+    fn resolved_outcome(version_id: u64, confirmations: Option<u64>) -> ExpectedOutcome {
+        ExpectedOutcome::Resolved {
+            document: resolution(1, false, None).document.as_ref().clone(),
+            version_id,
+            deactivated: false,
+            confirmations,
+        }
+    }
+
+    fn expected_error(code: &str) -> ExpectedOutcome {
+        ExpectedOutcome::Error {
+            code: code.to_string(),
+        }
+    }
+
+    fn missing_update_data() -> did_btcr2_client::Error {
+        did_btcr2_client::Error::Btcr2(did_btcr2::error::Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash::from([0x11; 32]),
+        })
+    }
+
+    #[test]
+    fn outcome_resolved_accepts_a_matching_resolution() {
+        let target = expecting(resolved_outcome(2, Some(5)));
+        let result = check_outcome(&target, Ok(resolution(2, false, Some(5))))
+            .expect("a matching resolution passes")
+            .expect("a resolved expectation returns the resolution");
+        assert_eq!(result.document_metadata.confirmations, Some(5));
+    }
+
+    #[test]
+    fn outcome_resolved_refuses_a_different_confirmation_count() {
+        let target = expecting(resolved_outcome(2, Some(5)));
+        let error = check_outcome(&target, Ok(resolution(2, false, Some(6))))
+            .expect_err("confirmations are exact at capture: the tip is pinned");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ResolutionMismatch { ref field, ref expected, ref got, .. }
+                    if field == "confirmations" && expected == "5" && got == "6"
+            ),
+            "got: {error}"
+        );
+        let error = check_outcome(&target, Ok(resolution(2, false, None)))
+            .expect_err("a stated count needs a reported one");
+        assert!(
+            matches!(error, CaptureError::ResolutionMismatch { ref got, .. } if got == "none"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_resolved_without_stated_confirmations_does_not_compare_them() {
+        let target = expecting(resolved_outcome(2, None));
+        check_outcome(&target, Ok(resolution(2, false, Some(1_045))))
+            .expect("a set stating no confirmations is not checked on them");
+    }
+
+    #[test]
+    fn outcome_resolved_refuses_a_different_document_version_or_flag() {
+        let target = expecting(resolved_outcome(2, None));
+        for (result, field) in [
+            (resolution(3, false, None), "versionId"),
+            (resolution(2, true, None), "deactivated"),
+        ] {
+            let error = check_outcome(&target, Ok(result)).expect_err("a mismatch is refused");
+            assert!(
+                matches!(error, CaptureError::ResolutionMismatch { field: ref f, .. } if f == field),
+                "{field}: got {error}"
+            );
+        }
+        let other_document = expecting(ExpectedOutcome::Resolved {
+            document: json!({ "id": "did:btcr2:someone-else" }),
+            version_id: 2,
+            deactivated: false,
+            confirmations: None,
+        });
+        let error = check_outcome(&other_document, Ok(resolution(2, false, None)))
+            .expect_err("a different document is refused");
+        assert!(
+            matches!(error, CaptureError::ResolutionMismatch { ref field, .. } if field == "didDocument"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_resolved_refuses_a_failed_resolve_with_its_error() {
+        let target = expecting(resolved_outcome(2, None));
+        let error = check_outcome(&target, Err(missing_update_data()))
+            .expect_err("a failed resolve is not a resolution");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ResolveFailed {
+                    source: did_btcr2_client::Error::Btcr2(
+                        did_btcr2::error::Btcr2Error::MissingUpdateData { .. }
+                    ),
+                    ..
+                }
+            ),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn outcome_expected_error_accepts_the_same_code() {
+        let target = expecting(expected_error("MISSING_UPDATE_DATA"));
+        assert!(
+            check_outcome(&target, Err(missing_update_data()))
+                .expect("the recorded error is reproduced")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn outcome_expected_error_accepts_a_different_code() {
+        // The code is not compared at capture: the harness judges it.
+        let target = expecting(expected_error("NOT_FOUND"));
+        assert!(
+            check_outcome(&target, Err(missing_update_data()))
+                .expect("any specification error satisfies an expected error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn outcome_expected_error_accepts_a_code_the_set_spells_differently() {
+        // The set spells LATE_PUBLISHING_ERROR; the specification, and this
+        // resolver, say LATE_PUBLISHING.
+        let target = expecting(expected_error("LATE_PUBLISHING_ERROR"));
+        let late = did_btcr2_client::Error::Resolver(did_btcr2::resolver::Error::Btcr2Error(
+            did_btcr2::error::Btcr2Error::LatePublishingError("late".to_string()),
+        ));
+        assert_eq!(client_error_code(&late).as_deref(), Some("LATE_PUBLISHING"));
+        assert!(
+            check_outcome(&target, Err(late))
+                .expect("a coded failure satisfies an expected error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn outcome_expected_error_refuses_a_success() {
+        let target = expecting(expected_error("MISSING_UPDATE_DATA"));
+        let error = check_outcome(&target, Ok(resolution(2, false, Some(5))))
+            .expect_err("a resolve that succeeds does not reproduce an expected error");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ResolutionMismatch { ref field, ref expected, ref got, .. }
+                    if field == "error"
+                        && expected.contains("MISSING_UPDATE_DATA")
+                        && got == "resolved versionId 2"
+            ),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_expected_error_refuses_an_uncoded_error() {
+        let target = expecting(expected_error("MISSING_UPDATE_DATA"));
+        let transport =
+            did_btcr2_client::Error::Transport(did_btcr2_client::TransportError::Status {
+                status: 503,
+                body: "unavailable".to_string(),
+            });
+        let error = check_outcome(&target, Err(transport))
+            .expect_err("a transport fault is not a reproduced error");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ResolveFailed {
+                    source: did_btcr2_client::Error::Transport(_),
+                    ..
+                }
+            ),
+            "got: {error:?}"
+        );
+
+        let no_endpoint = did_btcr2_client::Error::NoDefaultEndpoint("regtest");
+        let error = check_outcome(&target, Err(no_endpoint))
+            .expect_err("an endpoint fault is not a reproduced error");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ResolveFailed {
+                    source: did_btcr2_client::Error::NoDefaultEndpoint(_),
+                    ..
+                }
+            ),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn outcome_client_error_code_maps_identifier_and_transport() {
+        let identifier = Did::from_str("did:btcr2:notbech32").expect_err("not a DID");
+        assert_eq!(
+            client_error_code(&did_btcr2_client::Error::Identifier(identifier)).as_deref(),
+            Some("INVALID_DID")
+        );
+        let transport = did_btcr2_client::Error::Transport(
+            did_btcr2_client::TransportError::Malformed("x".to_string()),
+        );
+        assert_eq!(client_error_code(&transport), None);
+        assert_eq!(
+            client_error_code(&did_btcr2_client::Error::UnknownNetwork("x".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn outcome_identifier_codes_follow_the_core_conversion() {
+        use did_btcr2::error::{Btcr2Error, ProblemDetails as _};
+        // Each identifier error, parsed twice: one copy goes through the core's
+        // own conversion, the other through this crate's restatement of it.
+        for did in ["did:btcr2:notbech32", "did:example:123", "not-a-did"] {
+            let owned = Did::from_str(did).expect_err("not a did:btcr2 identifier");
+            let borrowed = Did::from_str(did).expect_err("not a did:btcr2 identifier");
+            let core = Btcr2Error::from(owned).details().expect("details")["type"]
+                .as_str()
+                .and_then(|t| t.rsplit_once('#'))
+                .map(|(_, code)| code.to_string());
+            assert_eq!(
+                client_error_code(&did_btcr2_client::Error::Identifier(borrowed)),
+                core,
+                "{did}"
+            );
+        }
+        let method = Did::from_str("did:example:123").expect_err("another method");
+        assert_eq!(
+            client_error_code(&did_btcr2_client::Error::Identifier(method)).as_deref(),
+            Some("METHOD_NOT_SUPPORTED")
+        );
     }
 }
