@@ -226,7 +226,7 @@ pub enum Network {
     TestnetV4 = 4,
     /// Mutinynet
     Mutinynet = 5,
-    /// Custom test network (values 12 to 14)
+    /// Custom test network (values 12 to 15)
     Custom(u8),
 }
 
@@ -240,9 +240,9 @@ impl TryFrom<u8> for Network {
             3 => Ok(Network::TestnetV3),
             4 => Ok(Network::TestnetV4),
             5 => Ok(Network::Mutinynet),
-            // Spec algorithms.md Table 1: only 12..=14 is the custom partition;
-            // 6..=11 are reserved and 15 is undefined — reject both.
-            12..=14 => Ok(Network::Custom(nibble)),
+            // Spec algorithms.md Table 1: 6..=11 are reserved and MUST be
+            // rejected; 12..=15 are custom networks.
+            12..=15 => Ok(Network::Custom(nibble)),
             _ => Err(Error::InvalidNetwork(nibble)),
         }
     }
@@ -437,13 +437,13 @@ impl DidComponents {
     /// Create validated DID components.
     ///
     /// Rejects a [`Network::Custom`] whose nibble is outside the spec's custom
-    /// partition `12..=14` with [`Error::InvalidNetwork`], so a hand-built
+    /// range `12..=15` with [`Error::InvalidNetwork`], so a hand-built
     /// out-of-range Custom network can never enter a validated identifier. The
     /// other inputs are already type-constrained (`DidVersion` has a single
     /// variant; the named `Network` variants are all valid).
     pub fn new(version: DidVersion, network: Network, id_type: IdType) -> Result<Self, Error> {
         if let Network::Custom(n) = network
-            && !(12..=14).contains(&n)
+            && !(12..=15).contains(&n)
         {
             return Err(Error::InvalidNetwork(n));
         }
@@ -693,15 +693,14 @@ mod tests {
             );
         }
 
-        // The custom partition this implementation accepts, both directions.
-        for value in 12..=14u8 {
+        // The custom networks, both directions.
+        for value in 12..=15u8 {
             assert_eq!(Network::try_from(value).unwrap(), Network::Custom(value));
             assert_eq!(u8::from(Network::Custom(value)), value);
         }
 
-        // Reserved 6..=11, custom 15 (not accepted here), and every value that
-        // does not fit the nibble.
-        for value in (6..=11u8).chain([15]).chain(16..=u8::MAX) {
+        // Reserved 6..=11, and every value that does not fit the nibble.
+        for value in (6..=11u8).chain(16..=u8::MAX) {
             assert!(
                 matches!(Network::try_from(value), Err(Error::InvalidNetwork(v)) if v == value),
                 "network value {value} must be rejected as InvalidNetwork"
@@ -910,17 +909,17 @@ mod tests {
 
     #[test]
     fn test_custom_network() {
-        // Only the spec's custom partition 12..=14 decodes as Custom.
+        // Every custom value 12..=15 decodes as Custom.
         // Encode->parse round-trip requires a valid curve point.
         let key = IdType::from(&valid_secp256k1_pubkey_bytes()[..]);
-        for n in 12..=14u8 {
+        for n in 12..=15u8 {
             let did = encode_did_identifier(DidVersion::One, Network::Custom(n), key).unwrap();
             let components = parse_did_identifier(&did).unwrap();
             assert_eq!(components.network, Network::Custom(n));
         }
 
-        // Reserved (6..=11) and undefined (15) nibbles are typed-rejected.
-        for n in [6u8, 11, 15] {
+        // Reserved (6..=11) nibbles are typed-rejected.
+        for n in [6u8, 11] {
             assert!(
                 matches!(Network::try_from(n), Err(Error::InvalidNetwork(m)) if m == n),
                 "network nibble {n} must be rejected as InvalidNetwork"
@@ -951,8 +950,17 @@ mod tests {
                 "reserved network nibble {n} must be rejected on encode"
             );
         }
-        // And an in-range Custom is accepted.
-        assert!(DidComponents::new(DidVersion::One, Network::Custom(13), key).is_ok());
+        assert!(
+            matches!(
+                DidComponents::new(DidVersion::One, Network::Custom(16), key),
+                Err(Error::InvalidNetwork(16))
+            ),
+            "Custom(16) must be rejected by DidComponents::new"
+        );
+        // And an in-range Custom is accepted, including both ends of 12..=15.
+        for n in [12u8, 13, 15] {
+            assert!(DidComponents::new(DidVersion::One, Network::Custom(n), key).is_ok());
+        }
     }
 
     /// Migrated from the former public `parse_did_identifier` doctest

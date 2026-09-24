@@ -386,8 +386,8 @@ mod tests {
             Some("http://h:1")
         );
         assert_eq!(resolver.override_for(&did_on(Network::Regtest)), None);
-        // Every custom network (nibble 12..=14) shares the one `custom` key.
-        for nibble in 12..=14 {
+        // Every custom network (nibble 12..=15) shares the one `custom` key.
+        for nibble in 12..=15 {
             assert_eq!(
                 resolver.override_for(&did_on(Network::Custom(nibble))),
                 Some("http://c:2"),
