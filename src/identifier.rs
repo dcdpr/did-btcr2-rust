@@ -269,9 +269,15 @@ impl TryFrom<Network> for esploda::bitcoin::Network {
         match value {
             Network::Mainnet => Ok(Self::Bitcoin),
             Network::TestnetV3 => Ok(Self::Testnet),
+            // The bitcoin crate this workspace uses has no testnet4 variant.
+            // testnet4 shares testnet3's address prefixes (`tb`, `m`/`n`,
+            // `2`), so its addresses encode and validate under `Testnet`.
+            // The DID keeps network value 4, so a testnet3 DID and a
+            // testnet4 DID never share an identifier.
+            Network::TestnetV4 => Ok(Self::Testnet),
             Network::Regtest => Ok(Self::Regtest),
             Network::Signet | Network::Mutinynet => Ok(Self::Signet),
-            _ => Err(Error::InvalidNetwork(u8::from(value))),
+            Network::Custom(n) => Err(Error::InvalidNetwork(n)),
         }
     }
 }
@@ -704,6 +710,40 @@ mod tests {
             assert!(
                 matches!(Network::try_from(value), Err(Error::InvalidNetwork(v)) if v == value),
                 "network value {value} must be rejected as InvalidNetwork"
+            );
+        }
+    }
+
+    /// Every named network converts to the bitcoin crate's address network
+    /// (testnet4 shares testnet3's `Testnet`), and every custom network is
+    /// rejected with its own network value.
+    #[test]
+    fn bitcoin_network_conversion_covers_every_network() {
+        use esploda::bitcoin::Network as BitcoinNetwork;
+
+        let named = [
+            (Network::Mainnet, BitcoinNetwork::Bitcoin),
+            (Network::Signet, BitcoinNetwork::Signet),
+            (Network::Regtest, BitcoinNetwork::Regtest),
+            (Network::TestnetV3, BitcoinNetwork::Testnet),
+            (Network::TestnetV4, BitcoinNetwork::Testnet),
+            (Network::Mutinynet, BitcoinNetwork::Signet),
+        ];
+        for (network, expected) in named {
+            assert_eq!(
+                BitcoinNetwork::try_from(network).unwrap(),
+                expected,
+                "{network:?} converts to {expected:?}"
+            );
+        }
+
+        for value in 12..=15u8 {
+            assert!(
+                matches!(
+                    BitcoinNetwork::try_from(Network::Custom(value)),
+                    Err(Error::InvalidNetwork(v)) if v == value
+                ),
+                "custom network {value} must be rejected as InvalidNetwork({value})"
             );
         }
     }

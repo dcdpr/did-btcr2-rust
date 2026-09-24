@@ -71,6 +71,10 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - The CLI's `resolve`, `update`, and `deactivate` no longer default to testnet:
   the endpoint follows the DID; a contradicting `--network` is an error before
   any request. `create` still defaults to testnet.
+- `Network::TestnetV4` converts to the bitcoin crate's `Testnet` address
+  network (the two share address prefixes), so testnet4 DIDs build their
+  beacons and parse testnet4 beacon addresses; it was an `InvalidNetwork(4)`
+  error.
 
 ### Deprecated
 

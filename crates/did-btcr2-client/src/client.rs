@@ -930,10 +930,10 @@ mod tests {
 
     /// A key-based DID anchored to `network`, built from its components and
     /// re-parsed from its string form, exactly as a CLI user would hand it to
-    /// `resolve`. Built directly rather than through `create`, which also
-    /// derives beacon addresses and so cannot mint a DID on testnet4 (no
-    /// `esploda::bitcoin::Network` for it); the DID itself encodes every
-    /// network nibble.
+    /// `resolve`. Built from its components rather than through `create`, so
+    /// the endpoint tests need no beacon derivation; `create` derives beacons
+    /// for every named network, testnet4 included (see
+    /// `create_mints_a_testnet4_did_that_resolves_at_genesis`).
     fn did_on(network: Network) -> Did {
         let components =
             DidComponents::new(DidVersion::One, network, IdType::from(test_public_key()))
@@ -1068,6 +1068,57 @@ mod tests {
             Error::NoDefaultEndpoint(net) => assert_eq!(net, "regtest"),
             other => panic!("expected NoDefaultEndpoint, got {other:?}"),
         }
+    }
+
+    /// testnet4 has no variant in the bitcoin crate, but shares testnet3's
+    /// address prefixes: `create` derives testnet4 beacons as testnet
+    /// addresses, the DID keeps network value 4, and the fresh DID resolves
+    /// to its genesis document against an empty history.
+    #[test]
+    fn create_mints_a_testnet4_did_that_resolves_at_genesis() {
+        let client = Client::new("http://fake".to_string(), FakeTransport::new("[]"));
+        let doc = client
+            .create(&test_public_key(), Network::TestnetV4)
+            .expect("create derives testnet4 beacons");
+
+        let services = doc.as_ref()["service"]
+            .as_array()
+            .expect("the created document lists its services");
+        let singletons: Vec<&str> = services
+            .iter()
+            .filter(|s| s["type"] == "SingletonBeacon")
+            .map(|s| {
+                s["serviceEndpoint"]
+                    .as_str()
+                    .expect("a singleton beacon's endpoint is a string")
+            })
+            .collect();
+        assert!(!singletons.is_empty(), "create derives singleton beacons");
+        for endpoint in &singletons {
+            assert!(
+                ["bitcoin:tb1", "bitcoin:m", "bitcoin:n"]
+                    .iter()
+                    .any(|prefix| endpoint.starts_with(prefix)),
+                "a testnet4 beacon uses a testnet address: {endpoint}"
+            );
+        }
+
+        let did: Did = doc.as_ref()["id"]
+            .as_str()
+            .expect("document has a string id")
+            .parse()
+            .expect("document id parses as a Did");
+        assert_eq!(did.components().network(), Network::TestnetV4);
+
+        let result = client
+            .resolve(&did, ResolutionOptions::default())
+            .expect("a fresh testnet4 DID resolves");
+        assert_eq!(
+            result.document_metadata.version_id,
+            std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+            "genesis resolves to version 1",
+        );
+        assert!(!result.document_metadata.deactivated);
     }
 
     #[test]
