@@ -7,7 +7,7 @@
 //! is wrong" is the whole purpose of this module.
 
 use crate::fixture::CapturedSignal;
-use crate::targets::VectorTarget;
+use crate::targets::{CaptureSignals, VectorTarget};
 use did_btcr2::Update;
 use esploda::bitcoin::{opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
@@ -79,6 +79,74 @@ pub enum ValidateError {
         vector: String,
         /// Which two announcements break the order, with their blocks.
         detail: String,
+    },
+
+    /// An announcement at a captured address confirmed above the set's
+    /// `recordedTip`.
+    #[error(
+        "{vector}: transaction {txid} announces a signal in block {height}, above the recordedTip {recorded_tip} the set was recorded against — the chain moved past recordedTip, so capture before further beacon activity or report upstream"
+    )]
+    AnnouncementAboveRecordedTip {
+        /// The set being captured.
+        vector: String,
+        /// The announcing transaction.
+        txid: String,
+        /// The block it confirmed in.
+        height: u32,
+        /// The set's `recordedTip`.
+        recorded_tip: u32,
+    },
+
+    /// An announcement at a captured address is still in the mempool.
+    #[error(
+        "{vector}: transaction {txid} announces a signal but is unconfirmed, and the set's signals.json records only confirmed signals — the chain moved past recordedTip, so capture before further beacon activity or report upstream"
+    )]
+    UnconfirmedAnnouncement {
+        /// The set being captured.
+        vector: String,
+        /// The unconfirmed transaction.
+        txid: String,
+    },
+
+    /// A signals.json entry has no confirmed announcement in the capture.
+    #[error(
+        "{vector}: signals.json records transaction {txid}, but no captured transaction announces it — re-run the capture against the chain the set was recorded on"
+    )]
+    SignalNotOnChain {
+        /// The set being captured.
+        vector: String,
+        /// The recorded transaction that was not found.
+        txid: String,
+    },
+
+    /// A confirmed announcement that no signals.json entry records.
+    #[error(
+        "{vector}: transaction {txid} in block {height} announces a signal that signals.json does not record — re-run the capture against the chain the set was recorded on, or report the missing entry upstream"
+    )]
+    UnrecordedSignal {
+        /// The set being captured.
+        vector: String,
+        /// The unrecorded announcement.
+        txid: String,
+        /// The block it confirmed in.
+        height: u32,
+    },
+
+    /// An announcement and its signals.json entry disagree on one member.
+    #[error(
+        "{vector}: transaction {txid} disagrees with signals.json on {field}: recorded {recorded}, on chain {on_chain} — re-run the capture against the chain the set was recorded on"
+    )]
+    SignalMismatch {
+        /// The set being captured.
+        vector: String,
+        /// The transaction whose record disagrees.
+        txid: String,
+        /// The member that disagrees: `blockHeight`, `blockHash` or `signalBytes`.
+        field: &'static str,
+        /// What signals.json records.
+        recorded: String,
+        /// What the captured chain carries.
+        on_chain: String,
     },
 
     /// The captured chain does not reproduce the vector's stated confirmations.
@@ -307,6 +375,10 @@ pub fn assert_bodies_parse(
 
 /// Reject a capture that must not be written.
 ///
+/// The gate for a vector that ships no `signals.json`: it derives what the
+/// chain must carry from the sidecar's updates and their order. A set that
+/// carries one goes through [`validate_signals`] instead.
+///
 /// Returns the announcements the capture proved, in the order they were found,
 /// so the caller can put them straight into the fixture's provenance.
 pub fn validate(
@@ -368,6 +440,170 @@ pub fn validate(
     }
 
     Ok(scan_signals(addresses, &wanted))
+}
+
+/// A confirmed announcement found in a captured body.
+struct OnChainSignal {
+    /// Every captured address whose body carries the transaction.
+    addresses: Vec<String>,
+    /// The confirming block's height.
+    block_height: u32,
+    /// The confirming block's hash, as the indexer renders it.
+    block_hash: String,
+    /// The confirming block's header time.
+    block_time: i64,
+    /// The 32 pushed bytes.
+    bytes: [u8; 32],
+}
+
+/// Reject a capture of a set that carries `signals.json` unless the chain
+/// matches that record exactly.
+///
+/// For such a set the upstream record is the oracle. The ordering checks of
+/// [`validate`] would refuse legitimate sets — a duplicate announcement above a
+/// later update, an announcement deliberately below the current height — so
+/// this gate replaces them rather than running beside them, and it reads
+/// nothing from the sidecar (a set may carry none, or withhold its update on
+/// purpose).
+///
+/// Returns the proved announcements sorted by block height, then txid.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the capture session does not route a set carrying signals.json through this gate yet"
+    )
+)]
+pub fn validate_signals(
+    target: &VectorTarget,
+    signals: &CaptureSignals,
+    addresses: &BTreeMap<String, Vec<Value>>,
+) -> Result<Vec<CapturedSignal>, ValidateError> {
+    let vector = &target.id;
+
+    // 1. Every recorded body is an Esplora transaction list.
+    assert_bodies_parse(vector, addresses)?;
+
+    // 2. Every announcement at a captured address — a transaction whose last
+    //    output is `OP_RETURN <32 bytes>`, the resolver's own signal rule — is
+    //    confirmed at or below recordedTip. Every other transaction is left in
+    //    the recorded bodies and not judged, at any height: anyone can pay a
+    //    beacon address on a public chain, refusing such a payment above the
+    //    tip would make the set uncapturable for good, and replay never treats
+    //    it as a signal. One transaction seen at two addresses is one
+    //    announcement.
+    let mut on_chain: BTreeMap<String, OnChainSignal> = BTreeMap::new();
+    for (address, body) in addresses {
+        let txs = parse_body(body).expect("assert_bodies_parse accepted every body");
+        for tx in txs {
+            let Some(bytes) = announced_hash(&tx) else {
+                continue;
+            };
+            let txid = tx.txid.to_string();
+            let Status::Confirmed {
+                block_height,
+                block_hash,
+                block_time,
+            } = tx.status
+            else {
+                return Err(ValidateError::UnconfirmedAnnouncement {
+                    vector: vector.clone(),
+                    txid,
+                });
+            };
+            if block_height > signals.recorded_tip {
+                return Err(ValidateError::AnnouncementAboveRecordedTip {
+                    vector: vector.clone(),
+                    txid,
+                    height: block_height,
+                    recorded_tip: signals.recorded_tip,
+                });
+            }
+            on_chain
+                .entry(txid)
+                .or_insert_with(|| OnChainSignal {
+                    addresses: Vec::new(),
+                    block_height,
+                    block_hash: block_hash.to_string(),
+                    block_time: block_time.timestamp(),
+                    bytes,
+                })
+                .addresses
+                .push(address.clone());
+        }
+    }
+
+    // 3. The confirmed announcements and the entries are the same multiset:
+    //    each entry consumes the announcement with its txid, which must agree
+    //    on height, block hash and bytes; an announcement no entry consumed is
+    //    unrecorded.
+    //
+    // 4. There is no separate repeat check. Every announcement must match an
+    //    entry, and the loader has already enforced the `update`-keyed
+    //    duplicate rule on the entries; a byte-keyed repeat rule here would be
+    //    a second, divergent key.
+    let mut proved = Vec::with_capacity(signals.entries.len());
+    for entry in &signals.entries {
+        let Some(found) = on_chain.remove(&entry.txid) else {
+            return Err(ValidateError::SignalNotOnChain {
+                vector: vector.clone(),
+                txid: entry.txid.clone(),
+            });
+        };
+        let mismatch = |field: &'static str, recorded: String, on_chain: String| {
+            ValidateError::SignalMismatch {
+                vector: vector.clone(),
+                txid: entry.txid.clone(),
+                field,
+                recorded,
+                on_chain,
+            }
+        };
+        if found.block_height != entry.block_height {
+            return Err(mismatch(
+                "blockHeight",
+                entry.block_height.to_string(),
+                found.block_height.to_string(),
+            ));
+        }
+        if found.block_hash != entry.block_hash {
+            return Err(mismatch(
+                "blockHash",
+                entry.block_hash.clone(),
+                found.block_hash,
+            ));
+        }
+        if found.bytes != entry.signal_bytes {
+            return Err(mismatch(
+                "signalBytes",
+                hex::encode(entry.signal_bytes),
+                hex::encode(found.bytes),
+            ));
+        }
+        let address = if found.addresses.contains(&entry.address) {
+            entry.address.clone()
+        } else {
+            found.addresses[0].clone()
+        };
+        proved.push(CapturedSignal {
+            address,
+            txid: entry.txid.clone(),
+            block_height: found.block_height,
+            block_time: found.block_time,
+            update_hash: hex::encode(found.bytes),
+        });
+    }
+    if let Some((txid, found)) = on_chain.into_iter().next() {
+        return Err(ValidateError::UnrecordedSignal {
+            vector: vector.clone(),
+            txid,
+            height: found.block_height,
+        });
+    }
+
+    // 5. Chain order.
+    proved.sort_by(|a, b| (a.block_height, &a.txid).cmp(&(b.block_height, &b.txid)));
+    Ok(proved)
 }
 
 /// The block the resolver's `confirmations` is measured from, or a refusal when
@@ -471,7 +707,7 @@ fn applied_height(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::targets::{self, ExpectedOutcome};
+    use crate::targets::{self, CaptureSignals, ExpectedOutcome, SignalRecord};
     use did_btcr2::identifier::{Did, Network};
     use serde_json::json;
     use std::str::FromStr as _;
@@ -562,6 +798,31 @@ mod tests {
             "weight": 0,
             "fee": 0,
             "status": status,
+        })
+    }
+
+    /// An Esplora transaction body with one output, confirmed in the named
+    /// block. Unlike [`tx`], the txid and block hash are chosen by the caller,
+    /// so a signals record can name them.
+    fn tx_in_block(txid: &str, height: u32, block_hash: &str, script_hex: &str) -> Value {
+        json!({
+            "txid": txid,
+            "version": 2,
+            "locktime": 0,
+            "vin": [],
+            "vout": [
+                { "scriptpubkey": "0014abababababababababababababababababababab", "value": 1000 },
+                { "scriptpubkey": script_hex, "value": 0 },
+            ],
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": height,
+                "block_hash": block_hash,
+                "block_time": 1_700_000_000i64 + i64::from(height),
+            },
         })
     }
 
@@ -1001,6 +1262,400 @@ mod tests {
         assert!(
             error.to_string().contains(&hex::encode(hashes[1])),
             "the missing announcement is the second update: {error}"
+        );
+    }
+
+    /// A 64-hex txid filled with `seed`.
+    fn txid(seed: u8) -> String {
+        format!("{seed:02x}").repeat(32)
+    }
+
+    /// A block hash derived from the height, so every block has its own.
+    fn block_hash(height: u32) -> String {
+        format!("{height:064x}")
+    }
+
+    /// One confirmed announcement of `bytes` in its own transaction.
+    fn announce(seed: u8, height: u32, bytes: [u8; 32]) -> Value {
+        tx_in_block(&txid(seed), height, &block_hash(height), &op_return(bytes))
+    }
+
+    /// The signals.json entry that records [`announce`]'s transaction.
+    fn record(update: u64, seed: u8, height: u32, bytes: [u8; 32], tip: u32) -> SignalRecord {
+        SignalRecord {
+            update: Some(update),
+            duplicate: false,
+            address: "tb1qbeacon".to_string(),
+            txid: txid(seed),
+            block_height: height,
+            block_hash: block_hash(height),
+            signal_bytes: bytes,
+            recorded_tip: tip,
+            cohort: None,
+        }
+    }
+
+    fn signals(recorded_tip: u32, entries: Vec<SignalRecord>) -> CaptureSignals {
+        CaptureSignals {
+            recorded_tip,
+            entries,
+        }
+    }
+
+    /// A set target whose sidecar the gate must not need.
+    fn set_target() -> VectorTarget {
+        let mut target = target(json!({}), Some(11));
+        target.id = "signet/k1/qyp5h7kz".to_string();
+        target
+    }
+
+    const U1: [u8; 32] = [0x11; 32];
+    const U2: [u8; 32] = [0x22; 32];
+
+    #[test]
+    fn signals_gate_accepts_announcements_equal_to_the_record() {
+        let record = signals(
+            310,
+            vec![record(1, 0xa1, 300, U1, 310), record(2, 0xa2, 305, U2, 310)],
+        );
+        // Listed newest first: the returned signals are in chain order anyway.
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![announce(0xa2, 305, U2), announce(0xa1, 300, U1)],
+        )]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("a capture equal to the record passes");
+        assert_eq!(proved.len(), 2);
+        assert_eq!(proved[0].txid, txid(0xa1));
+        assert_eq!(proved[0].block_height, 300);
+        assert_eq!(proved[0].block_time, 1_700_000_300);
+        assert_eq!(proved[0].update_hash, hex::encode(U1));
+        assert_eq!(proved[0].address, "tb1qbeacon");
+        assert_eq!(proved[1].txid, txid(0xa2));
+        assert_eq!(proved[1].block_height, 305);
+    }
+
+    #[test]
+    fn signals_gate_accepts_a_flagged_duplicate_above_a_later_update() {
+        let mut repeat = record(1, 0xa3, 326, U1, 330);
+        repeat.duplicate = true;
+        let record = signals(
+            330,
+            vec![
+                record(1, 0xa1, 300, U1, 330),
+                record(2, 0xa2, 305, U2, 330),
+                repeat,
+            ],
+        );
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![
+                announce(0xa1, 300, U1),
+                announce(0xa2, 305, U2),
+                announce(0xa3, 326, U1),
+            ],
+        )]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("a repeat the record flags as a duplicate passes");
+        assert_eq!(proved.len(), 3);
+        assert_eq!(proved[2].block_height, 326);
+    }
+
+    #[test]
+    fn signals_gate_refuses_a_repeat_the_record_lacks() {
+        // The same chain as above, against a record without the flagged entry.
+        // (An unflagged repeat inside signals.json never reaches this gate:
+        // the loader refuses it.)
+        let record = signals(
+            330,
+            vec![record(1, 0xa1, 300, U1, 330), record(2, 0xa2, 305, U2, 330)],
+        );
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![
+                announce(0xa1, 300, U1),
+                announce(0xa2, 305, U2),
+                announce(0xa3, 326, U1),
+            ],
+        )]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("an unrecorded repeat is refused");
+        assert!(
+            matches!(error, ValidateError::UnrecordedSignal { ref txid, height: 326, .. } if *txid == super::tests::txid(0xa3)),
+            "got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("signet/k1/qyp5h7kz") && message.contains(&txid(0xa3)),
+            "names the set and the transaction: {message}"
+        );
+        assert!(message.contains("re-run the capture"), "{message}");
+    }
+
+    #[test]
+    fn signals_gate_accepts_an_announcement_below_the_current_height() {
+        // Update 2 is announced in block 299, below update 1's block 300: the
+        // ordering rule of the sidecar gate would refuse it, the record does not.
+        let record = signals(
+            310,
+            vec![record(1, 0xa1, 300, U1, 310), record(2, 0xa2, 299, U2, 310)],
+        );
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![announce(0xa1, 300, U1), announce(0xa2, 299, U2)],
+        )]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("no ordering check applies on this path");
+        assert_eq!(proved[0].block_height, 299);
+    }
+
+    #[test]
+    fn signals_gate_refuses_a_recorded_signal_missing_from_the_chain() {
+        let record = signals(
+            310,
+            vec![record(1, 0xa1, 300, U1, 310), record(2, 0xa2, 305, U2, 310)],
+        );
+        let addresses = bodies(&[("tb1qbeacon", vec![announce(0xa1, 300, U1)])]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("a recorded signal the chain lacks is refused");
+        assert!(
+            matches!(error, ValidateError::SignalNotOnChain { ref txid, .. } if *txid == super::tests::txid(0xa2)),
+            "got: {error}"
+        );
+        assert!(error.to_string().contains(&txid(0xa2)), "{error}");
+    }
+
+    #[test]
+    fn signals_gate_refuses_a_different_block_hash() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![tx_in_block(
+                &txid(0xa1),
+                300,
+                &block_hash(9_999),
+                &op_return(U1),
+            )],
+        )]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("a reorganised block is refused");
+        assert!(
+            matches!(
+                error,
+                ValidateError::SignalMismatch {
+                    field: "blockHash",
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("blockHash")
+                && message.contains(&block_hash(300))
+                && message.contains(&block_hash(9_999)),
+            "names the member and both values: {message}"
+        );
+    }
+
+    #[test]
+    fn signals_gate_refuses_a_different_height_or_different_bytes() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let moved = bodies(&[(
+            "tb1qbeacon",
+            vec![tx_in_block(
+                &txid(0xa1),
+                301,
+                &block_hash(300),
+                &op_return(U1),
+            )],
+        )]);
+        let error = validate_signals(&set_target(), &record, &moved)
+            .expect_err("a different height is refused");
+        assert!(
+            matches!(
+                error,
+                ValidateError::SignalMismatch {
+                    field: "blockHeight",
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+
+        let other_bytes = bodies(&[("tb1qbeacon", vec![announce(0xa1, 300, U2)])]);
+        let error = validate_signals(&set_target(), &record, &other_bytes)
+            .expect_err("different signal bytes are refused");
+        assert!(
+            matches!(
+                error,
+                ValidateError::SignalMismatch {
+                    field: "signalBytes",
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn signals_gate_refuses_an_announcement_above_the_recorded_tip() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![announce(0xa1, 300, U1), announce(0xa2, 315, U2)],
+        )]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("beacon activity past the recorded tip is refused");
+        assert!(
+            matches!(
+                error,
+                ValidateError::AnnouncementAboveRecordedTip { height: 315, recorded_tip: 310, ref txid, .. }
+                    if *txid == super::tests::txid(0xa2)
+            ),
+            "got: {error}"
+        );
+        let message = error.to_string();
+        for part in [
+            txid(0xa2).as_str(),
+            "315",
+            "310",
+            "capture before further beacon activity",
+        ] {
+            assert!(
+                message.contains(part),
+                "message must carry {part}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn signals_gate_accepts_dust_above_the_recorded_tip() {
+        // Anyone can pay a public beacon address. A plain payment above the tip
+        // is not an announcement: it stays in the recorded body and is not a
+        // signal.
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let dust = json!({
+            "txid": txid(0xd1),
+            "version": 2,
+            "locktime": 0,
+            "vin": [],
+            "vout": [{ "scriptpubkey": "0014cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "value": 546 }],
+            "size": 0,
+            "weight": 0,
+            "fee": 0,
+            "status": {
+                "confirmed": true,
+                "block_height": 315,
+                "block_hash": block_hash(315),
+                "block_time": 1_700_000_315i64,
+            },
+        });
+        let addresses = bodies(&[("tb1qbeacon", vec![dust.clone(), announce(0xa1, 300, U1)])]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("dust above the recorded tip does not block the capture");
+        assert_eq!(proved.len(), 1, "the dust is not a signal");
+        assert_eq!(proved[0].txid, txid(0xa1));
+        assert_eq!(
+            addresses["tb1qbeacon"][0], dust,
+            "the dust body stays in the recording untouched"
+        );
+    }
+
+    #[test]
+    fn signals_gate_accepts_a_non_announcement_op_return_above_the_tip() {
+        // OP_RETURN with a 31-byte push is not an announcement under the
+        // resolver's rule, so it is not judged either.
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let short_push = format!("6a1f{}", hex::encode([0x33; 31]));
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![
+                announce(0xa1, 300, U1),
+                tx_in_block(&txid(0xe1), 320, &block_hash(320), &short_push),
+            ],
+        )]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("a non-announcement above the tip is accepted");
+        assert_eq!(proved.len(), 1);
+    }
+
+    #[test]
+    fn signals_gate_refuses_an_unconfirmed_announcement() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[(
+            "tb1qbeacon",
+            vec![announce(0xa1, 300, U1), tx(&[op_return(U2)], 0xc9, None)],
+        )]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("a mempool announcement is refused");
+        assert!(
+            matches!(error, ValidateError::UnconfirmedAnnouncement { ref txid, .. } if *txid == "c9".repeat(32)),
+            "got: {error}"
+        );
+        assert!(error.to_string().contains("signet/k1/qyp5h7kz"), "{error}");
+    }
+
+    #[test]
+    fn signals_gate_refuses_an_unparseable_body_first() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[("tb1qbeacon", vec![json!({ "not": "a transaction" })])]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("an unusable body is refused before anything is compared");
+        assert!(
+            matches!(error, ValidateError::UnparseableBody { ref address, .. } if address == "tb1qbeacon"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn signals_gate_runs_for_a_negative_set_without_updates() {
+        // A withheld-update set: no `updates` in the sidecar, an expected error.
+        // The sidecar gate would refuse it as unusable; this one never reads it.
+        let mut target = set_target();
+        target.sidecar = json!({ "genesisDocument": { "id": REGTEST_DID } });
+        target.expected = ExpectedOutcome::Error {
+            code: "MISSING_UPDATE_DATA".to_string(),
+        };
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[("tb1qbeacon", vec![announce(0xa1, 300, U1)])]);
+
+        let proved = validate_signals(&target, &record, &addresses)
+            .expect("the gate runs on the record alone");
+        assert_eq!(proved.len(), 1);
+        assert!(matches!(
+            validate(&target, 310, &addresses),
+            Err(ValidateError::UnusableSidecar { .. })
+        ));
+    }
+
+    #[test]
+    fn signals_gate_counts_one_transaction_seen_at_two_addresses_once() {
+        // A transaction spending from one beacon and paying change to another
+        // appears in both address histories; it is still one announcement.
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[
+            ("tb1qbeacon", vec![announce(0xa1, 300, U1)]),
+            ("tb1qchange", vec![announce(0xa1, 300, U1)]),
+        ]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("one transaction, one entry");
+        assert_eq!(proved.len(), 1);
+        assert_eq!(
+            proved[0].address, "tb1qbeacon",
+            "the address the record names is kept"
         );
     }
 }
