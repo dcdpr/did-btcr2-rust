@@ -69,6 +69,18 @@ pub enum ValidateError {
         txid: String,
     },
 
+    /// The announcements are not ordered by version and height alike, so the
+    /// capture alone does not determine what the resolver finds.
+    #[error(
+        "{vector}: {detail}. Find Beacon Signals skips a transaction below the block of the update that was current when its beacon was scanned, and this gate cannot see which update introduced which beacon, so the capture does not determine which announcements the resolver finds or which block `confirmations` is measured from — the capture is refused. Re-mint the vector so that every update is announced at or above every announcement of an earlier update, and the last update in a single block"
+    )]
+    UnorderedAnnouncements {
+        /// The vector being captured.
+        vector: String,
+        /// Which two announcements break the order, with their blocks.
+        detail: String,
+    },
+
     /// The captured chain does not reproduce the vector's stated confirmations.
     #[error(
         "{vector}: expected {expected} confirmations but the capture yields {got} (chain tip {tip}, announcement in block {height}) — the chain has moved since the vector was minted, so either re-mint the scenario or capture from a chain whose tip still reproduces it"
@@ -330,7 +342,11 @@ pub fn validate(
         }
     }
 
-    // 4. The captured tip reproduces the vector's stated confirmations.
+    // 4. The announcements are ordered by version and height alike, which is
+    //    what makes the block the resolver measures from derivable at all.
+    let height = applied_height(&target.id, &updates, &scanned)?;
+
+    // 5. The captured tip reproduces the vector's stated confirmations.
     //
     //    The tip is whatever the chain reported; it is never back-derived from
     //    the expected value, which would make this assertion circular and unable
@@ -339,20 +355,6 @@ pub fn validate(
     //    expectations — the strongest check available that a capture is sound,
     //    and the reason a re-capture starts from a fresh unpack of the export.
     if let Some(expected) = target.expected_confirmations {
-        let applied =
-            applied_signal(&updates, &scanned).ok_or_else(|| ValidateError::MissingSignal {
-                vector: target.id.clone(),
-                update_hash_hex: hex::encode(
-                    updates
-                        .iter()
-                        .map(|u| u.hash)
-                        .next_back()
-                        .unwrap_or_default(),
-                ),
-            })?;
-        let (height, _) = applied
-            .confirmed
-            .expect("step 3 rejected every unconfirmed announcement");
         let got = u64::from(tip_height.saturating_sub(height).saturating_add(1));
         if got != expected {
             return Err(ValidateError::ConfirmationsMismatch {
@@ -368,23 +370,102 @@ pub fn validate(
     Ok(scan_signals(addresses, &wanted))
 }
 
-/// The announcement whose height the resolver's `confirmations` is measured
-/// from: the one carrying the update with the highest `targetVersionId` and,
-/// where that update was announced more than once, the LOWEST block height —
-/// because the ascending (targetVersionId, block height) sort applies the
-/// lowest-height announcement of an update first and the resolver's height does
-/// not move on a duplicate. This assumes no lower announcement of the last
-/// update sits on a beacon scanned after it applied (Find Beacon Signals would
-/// not find it).
-fn applied_signal<'a>(
+/// The block the resolver's `confirmations` is measured from, or a refusal when
+/// the capture does not determine it.
+///
+/// Find Beacon Signals does not find a transaction below the
+/// `current_block_height` in force when its beacon is scanned: 0 for a genesis
+/// beacon, but the block of the update that introduced it for any other. Which
+/// update introduced which beacon is not visible here, so instead of mirroring
+/// the filter this requires a shape in which the filter cannot change the
+/// outcome:
+///
+/// - every announcement of an update sits at or above every announcement of an
+///   update with a lower `targetVersionId`; and
+/// - every announcement of the last update (highest `targetVersionId`) sits in
+///   one block, at or above every other announcement.
+///
+/// Every `current_block_height` is the block of some applied announcement, so
+/// under the first rule no announcement of a later update is ever below the
+/// height its beacon is scanned at, and no update is skipped. Under the second
+/// the last update applies in that one block whichever announcement the
+/// resolver reads first, so that block is the one `confirmations` counts from.
+///
+/// Rejected rather than guessed: with v2 in block 100 on beacon A adding beacon
+/// D, and v3 announced on A in block 110 and on D in block 90, the resolver
+/// scans D at 100, never sees block 90, and measures from 110. The lowest
+/// announcement of the last update would be the wrong answer.
+///
+/// Updates sharing a `targetVersionId` (a late-publishing fork) are not ordered
+/// against each other. Every announcement is confirmed by the time this runs.
+fn applied_height(
+    vector: &str,
     updates: &[SidecarUpdate],
-    scanned: &'a [ScannedSignal],
-) -> Option<&'a ScannedSignal> {
-    let last = updates.iter().max_by_key(|u| u.target_version_id)?;
-    scanned
+    scanned: &[ScannedSignal],
+) -> Result<u32, ValidateError> {
+    let unordered = |detail: String| ValidateError::UnorderedAnnouncements {
+        vector: vector.to_string(),
+        detail,
+    };
+    let heights = |update: &SidecarUpdate| -> Vec<u32> {
+        scanned
+            .iter()
+            .filter(|s| s.update_hash == update.hash)
+            .filter_map(|s| s.confirmed.map(|(height, _)| height))
+            .collect()
+    };
+
+    for earlier in updates {
+        let Some(earlier_top) = heights(earlier).into_iter().max() else {
+            continue;
+        };
+        for later in updates
+            .iter()
+            .filter(|u| u.target_version_id > earlier.target_version_id)
+        {
+            if let Some(later_bottom) = heights(later).into_iter().min()
+                && later_bottom < earlier_top
+            {
+                return Err(unordered(format!(
+                    "update {} (targetVersionId {}) is announced in block {later_bottom}, below \
+                     block {earlier_top}, which announces update {} (targetVersionId {})",
+                    hex::encode(later.hash),
+                    later.target_version_id,
+                    hex::encode(earlier.hash),
+                    earlier.target_version_id,
+                )));
+            }
+        }
+    }
+
+    let last = updates
         .iter()
-        .filter(|s| s.update_hash == last.hash)
-        .min_by_key(|s| s.confirmed.map(|(height, _)| height))
+        .max_by_key(|u| u.target_version_id)
+        .ok_or_else(|| ValidateError::UnusableSidecar {
+            vector: vector.to_string(),
+            detail: "`updates` is empty".to_string(),
+        })?;
+    let applied = heights(last)
+        .into_iter()
+        .min()
+        .ok_or_else(|| ValidateError::MissingSignal {
+            vector: vector.to_string(),
+            update_hash_hex: hex::encode(last.hash),
+        })?;
+    let top = scanned
+        .iter()
+        .filter_map(|s| s.confirmed.map(|(height, _)| height))
+        .max()
+        .unwrap_or(applied);
+    if top > applied {
+        return Err(unordered(format!(
+            "the last update {} (targetVersionId {}) is announced in block {applied}, but \
+             another announcement sits in the later block {top}",
+            hex::encode(last.hash),
+            last.target_version_id,
+        )));
+    }
+    Ok(applied)
 }
 
 #[cfg(test)]
@@ -739,12 +820,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_measures_confirmations_from_the_lowest_height_of_a_repeated_announcement() {
-        let target = target(sidecar(vec![update(2, "a")]), Some(93));
+    fn validate_refuses_the_last_update_announced_in_two_blocks() {
+        let target = target(sidecar(vec![update(2, "a")]), None);
         let hashes = update_hashes("v", &target.sidecar).expect("hashes");
-        // The same announcement mined twice: the resolver applies the
-        // lower-height one first and a duplicate does not move its height, so
-        // the confirmations must be measured from 120, not from 150.
+        // The same announcement mined twice. Which one the resolver reads depends
+        // on whether the lower one sits on a beacon the update itself introduced
+        // (scanned at 150, so block 120 is never found) — which this gate cannot
+        // see, so it cannot say which block `confirmations` counts from.
         let addresses = bodies(&[(
             "bcrt1qbeacon",
             vec![
@@ -753,9 +835,129 @@ mod tests {
             ],
         )]);
 
-        let signals =
-            validate(&target, 212, &addresses).expect("the lower height is the applied one");
-        assert_eq!(signals.len(), 2, "both announcements are still reported");
+        let error = validate(&target, 212, &addresses)
+            .expect_err("a last update announced in two blocks is ambiguous");
+        let message = error.to_string();
+        assert!(
+            matches!(error, ValidateError::UnorderedAnnouncements { .. }),
+            "got: {error}"
+        );
+        for part in ["regtest/k1/qgppexmy", "block 120", "block 150", "Re-mint"] {
+            assert!(
+                message.contains(part),
+                "message must carry {part}: {message}"
+            );
+        }
+    }
+
+    /// v2 in block 100 on beacon A adds beacon D; v3 is announced on A in block
+    /// 110 and on D in block 90. The resolver scans D at height 100, never finds
+    /// block 90, and measures `confirmations` from 110 — so the lowest
+    /// announcement of the last update is not the applied one, and the gate
+    /// must refuse rather than measure from 90.
+    #[test]
+    fn validate_refuses_a_last_update_announced_below_its_own_other_announcement() {
+        let target = target(sidecar(vec![update(2, "a"), update(3, "b")]), Some(103));
+        let hashes = update_hashes("v", &target.sidecar).expect("hashes");
+        let addresses = bodies(&[
+            (
+                "bcrt1qbeacona",
+                vec![
+                    tx(&[op_return(hashes[0])], 0xd1, Some((100, 1_700_000_000))),
+                    tx(&[op_return(hashes[1])], 0xd2, Some((110, 1_700_000_100))),
+                ],
+            ),
+            (
+                "bcrt1qbeacond",
+                vec![tx(&[op_return(hashes[1])], 0xd3, Some((90, 1_699_999_900)))],
+            ),
+        ]);
+
+        // tip 192 - 90 + 1 = 103: measuring from the lowest announcement would
+        // reproduce the stated confirmations and pass, which is the bug.
+        let error = validate(&target, 192, &addresses)
+            .expect_err("the capture does not determine the applied block");
+        assert!(
+            matches!(error, ValidateError::UnorderedAnnouncements { .. }),
+            "got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&hex::encode(hashes[1])) && message.contains("block 90"),
+            "names the out-of-order announcement: {message}"
+        );
+    }
+
+    /// v2 in block 100 on A adds D; v3 is announced on D in block 90 and v4 on A
+    /// in block 110. The resolver scans D at 100 and never finds v3, so it never
+    /// reaches v4 — every update is announced somewhere, and the gate must still
+    /// refuse.
+    #[test]
+    fn validate_refuses_an_update_announced_below_an_earlier_one() {
+        let target = target(
+            sidecar(vec![update(2, "a"), update(3, "b"), update(4, "c")]),
+            None,
+        );
+        let hashes = update_hashes("v", &target.sidecar).expect("hashes");
+        let addresses = bodies(&[
+            (
+                "bcrt1qbeacona",
+                vec![
+                    tx(&[op_return(hashes[0])], 0xe1, Some((100, 1_700_000_000))),
+                    tx(&[op_return(hashes[2])], 0xe2, Some((110, 1_700_000_100))),
+                ],
+            ),
+            (
+                "bcrt1qbeacond",
+                vec![tx(&[op_return(hashes[1])], 0xe3, Some((90, 1_699_999_900)))],
+            ),
+        ]);
+
+        let error =
+            validate(&target, 200, &addresses).expect_err("an intermediate update may be skipped");
+        let message = error.to_string();
+        assert!(
+            matches!(error, ValidateError::UnorderedAnnouncements { .. }),
+            "got: {error}"
+        );
+        assert!(
+            message.contains("targetVersionId 3")
+                && message.contains("block 90")
+                && message.contains("block 100"),
+            "names both announcements: {message}"
+        );
+    }
+
+    /// The accepting half of the ordering rule: updates announced in rising
+    /// blocks across beacons, the last in one block, pass, and `confirmations`
+    /// is measured from that block. Two updates may share a block.
+    #[test]
+    fn validate_accepts_updates_announced_in_version_order() {
+        let target = target(
+            sidecar(vec![update(2, "a"), update(3, "b"), update(4, "c")]),
+            Some(81),
+        );
+        let hashes = update_hashes("v", &target.sidecar).expect("hashes");
+        let addresses = bodies(&[
+            (
+                "bcrt1qbeacona",
+                vec![
+                    tx(&[op_return(hashes[0])], 0xf1, Some((100, 1_700_000_000))),
+                    tx(&[op_return(hashes[2])], 0xf2, Some((120, 1_700_000_200))),
+                ],
+            ),
+            (
+                "bcrt1qbeacond",
+                vec![
+                    tx(&[op_return(hashes[1])], 0xf3, Some((100, 1_700_000_000))),
+                    tx(&[op_return(hashes[2])], 0xf4, Some((120, 1_700_000_200))),
+                ],
+            ),
+        ]);
+
+        // tip 200 - 120 + 1 = 81.
+        let signals = validate(&target, 200, &addresses).expect("an ordered capture validates");
+        assert_eq!(signals.len(), 4, "every announcement is reported");
     }
 
     #[test]

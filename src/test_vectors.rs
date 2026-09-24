@@ -123,14 +123,16 @@ impl ChainFixture {
     /// `confirmations` is computed from (`resolver.rs`, the
     /// `current_block_height` set when an update applies).
     ///
-    /// Derived the way the RESOLVER derives it: the signal announcing the update
-    /// with the highest `targetVersionId`, and — where that update was announced
-    /// more than once — the lowest block among them, because the ascending
-    /// (targetVersionId, block height) sort applies the lowest-height
-    /// announcement of an update first and the resolver's height does not move
-    /// on a duplicate. This assumes no lower announcement of the last update
-    /// sits on a beacon scanned after it applied (Find Beacon Signals would not
-    /// find it). The capture-time gate picks the same signal the same way.
+    /// The signal announcing the update with the highest `targetVersionId`, the
+    /// lowest block among them where it was announced more than once. That is
+    /// the block the resolver measures from only because
+    /// [`assert_version_and_height_agree`] holds on every fixture read: every
+    /// announcement of the last update sits in one block, at or above every
+    /// other announcement. Without that, a lower announcement on a beacon added
+    /// by a later update would be below the `current_block_height` the beacon is
+    /// scanned at, Find Beacon Signals would not find it, and the resolver would
+    /// measure from a higher block. The capture-time gate enforces the same rule
+    /// and picks the same signal.
     ///
     /// A fixture that carries no sidecar of its own (every vendor row: the
     /// sidecar lives in the test-suite tree) falls back to the highest block.
@@ -168,6 +170,31 @@ impl ChainFixture {
         })?;
         let parsed = crate::Update::from_json_value(last.clone()).ok()?;
         Some(hex::encode(parsed.hash().as_bytes()))
+    }
+
+    /// `(announcement hash, targetVersionId)` for every sidecar update this
+    /// fixture carries, hashed the same way as [`Self::applied_update_hash`].
+    /// Empty when the fixture has no sidecar of its own; an update the core
+    /// cannot parse is left out, because no signal can announce it.
+    fn sidecar_update_versions(&self) -> Vec<(String, u64)> {
+        use crate::canonical_hash::CanonicalHash as _;
+
+        let Some(updates) = self
+            .sidecar
+            .as_ref()
+            .and_then(|sidecar| sidecar.get("updates"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Vec::new();
+        };
+        updates
+            .iter()
+            .filter_map(|update| {
+                let version = update.get("targetVersionId")?.as_u64()?;
+                let parsed = crate::Update::from_json_value(update.clone()).ok()?;
+                Some((hex::encode(parsed.hash().as_bytes()), version))
+            })
+            .collect()
     }
 
     /// The minimum `block_time` across the signals — the anchor for a
@@ -310,20 +337,58 @@ fn assert_signals_consistent(fixture: &ChainFixture, vector_id: &str) {
 /// Require the fixture's signals to be ordered the same way by version and by
 /// height.
 ///
-/// The resolver applies updates in `(targetVersionId, block height)` order and
-/// measures `confirmations` from the last one it applied, so the signal in the
-/// highest block and the signal announcing the highest version are the same
-/// signal on any chain that was minted step by step. They are not the same RULE,
-/// though, and a chain where they diverged — a reorg, a mempool race on a public
-/// chain, a hand-edited fixture — would make a replay assert against a block the
-/// resolver never measured from, producing a failure that pointed at the
-/// resolver.
+/// Two rules, the same two the capture-time gate enforces:
 ///
-/// Checked here so it fails as what it is: a problem with the fixture.
+/// - every announcement of an update sits at or above every announcement of an
+///   update with a lower `targetVersionId`; and
+/// - every announcement of the last update sits in one block, at or above every
+///   other announcement.
+///
+/// Find Beacon Signals does not find a transaction below the
+/// `current_block_height` in force when its beacon is scanned — the block of
+/// the update that introduced the beacon, for any beacon but a genesis one. A
+/// fixture breaking the first rule could have an update the resolver never
+/// finds; one breaking the second could have its last update applied from a
+/// higher block than [`ChainFixture::latest_signal`] names. Either way a replay
+/// would assert against something the resolver never saw, producing a failure
+/// that pointed at the resolver. On any chain minted step by step both rules
+/// hold; a reorg, a mempool race on a public chain, or a hand-edited fixture can
+/// break them.
+///
+/// Checked here so it fails as what it is: a problem with the fixture. Updates
+/// sharing a `targetVersionId` (a late-publishing fork) are not ordered against
+/// each other.
 fn assert_version_and_height_agree(fixture: &ChainFixture, vector_id: &str, rerun: &str) {
     let Some(applied) = fixture.applied_update_hash() else {
         return;
     };
+    let heights = |hash: &str| -> Vec<u32> {
+        fixture
+            .signals
+            .iter()
+            .filter(|signal| signal.update_hash == hash)
+            .map(|signal| signal.block_height)
+            .collect()
+    };
+    let versions = fixture.sidecar_update_versions();
+    for (earlier_hash, earlier_version) in &versions {
+        let Some(earlier_top) = heights(earlier_hash).into_iter().max() else {
+            continue;
+        };
+        for (later_hash, later_version) in versions.iter().filter(|(_, v)| v > earlier_version) {
+            if let Some(later_bottom) = heights(later_hash).into_iter().min() {
+                assert!(
+                    later_bottom >= earlier_top,
+                    "{vector_id}: update {later_hash} (targetVersionId {later_version}) is \
+                     announced in block {later_bottom}, below block {earlier_top}, which \
+                     announces update {earlier_hash} (targetVersionId {earlier_version}) — the \
+                     announcements are not ordered by version and height alike, so the resolver \
+                     may never find the later one. Re-run `{rerun}` rather than editing the \
+                     fixture"
+                );
+            }
+        }
+    }
     let Some(by_version) = fixture
         .signals
         .iter()
@@ -3361,6 +3426,70 @@ fn chain_fixture_rejects_signals_whose_version_and_height_order_disagree() {
             signal.block_height = lowest - 1;
         }
     }
+    assert_version_and_height_agree(&fixture, "minted/clean-rotating-beacons", "<rerun>");
+}
+
+/// An intermediate update announced below an earlier one fails, even though the
+/// last update still sits in the highest block: the resolver scans a beacon
+/// added by the earlier update at that update's block and would never find the
+/// intermediate one, so it would stop before the last update.
+#[test]
+#[should_panic(expected = "may never find the later one")]
+fn chain_fixture_rejects_an_intermediate_update_below_an_earlier_one() {
+    let mut fixture = read_chain_fixture("minted/clean-rotating-beacons");
+    let mut versions = fixture.sidecar_update_versions();
+    versions.sort_by_key(|(_, version)| *version);
+    let [(first, _), (middle, _), ..] = &versions[..] else {
+        panic!("the clean scenario announces three updates: {versions:?}");
+    };
+    let first_height = fixture
+        .signals
+        .iter()
+        .find(|signal| signal.update_hash == *first)
+        .map(|signal| signal.block_height)
+        .expect("the first update is announced");
+    for signal in &mut fixture.signals {
+        if signal.update_hash == *middle {
+            signal.block_height = first_height - 1;
+        }
+    }
+    // The last update is untouched and still in the highest block, so only
+    // the version-order rule can reject this.
+    let applied = fixture.applied_update_hash().expect("a minted sidecar");
+    let highest = fixture.signals.iter().map(|s| s.block_height).max();
+    assert_eq!(
+        fixture.latest_signal().map(|s| s.block_height),
+        highest,
+        "{applied} still sits in the highest block"
+    );
+    assert_version_and_height_agree(&fixture, "minted/clean-rotating-beacons", "<rerun>");
+}
+
+/// v2 adds a beacon; v3 is announced on an older beacon in the highest block
+/// and again on the new beacon below v2's block. The resolver scans the new
+/// beacon at v2's block, never finds the lower copy, and measures from the
+/// higher one — so the lowest announcement of the last update is not the
+/// applied one, and the fixture is refused rather than asserted against it.
+#[test]
+#[should_panic(expected = "not ordered by version and height alike")]
+fn chain_fixture_rejects_a_lower_copy_of_the_last_update() {
+    let mut fixture = read_chain_fixture("minted/clean-rotating-beacons");
+    let applied = fixture
+        .applied_update_hash()
+        .expect("a minted fixture carries its own sidecar");
+    let lowest = fixture
+        .signals
+        .iter()
+        .map(|signal| signal.block_height)
+        .min()
+        .expect("signals is non-empty");
+    fixture.signals.push(CapturedSignal {
+        address: "bcrt1qaddedbeacon".to_string(),
+        txid: "d3".repeat(32),
+        block_height: lowest - 1,
+        block_time: 0,
+        update_hash: applied,
+    });
     assert_version_and_height_agree(&fixture, "minted/clean-rotating-beacons", "<rerun>");
 }
 
