@@ -13,6 +13,7 @@
 
 use chrono::Utc;
 use did_btcr2::document::{ResolutionOptions, SidecarData};
+use did_btcr2::identifier::Network;
 use did_btcr2_client::{Client, UreqTransport};
 use error_iter::ErrorIter as _;
 use onlyerror::Error;
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::fixture::{self, ChainFixture};
+use crate::pace::{PacePolicy, PaceState, PacedTransport, SystemClock};
 use crate::record::{self, Recording, RecordingTransport};
 use crate::targets::{self, VectorTarget};
 use crate::validate;
@@ -309,9 +311,22 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     // blocks are fetched after the resolve through the second handle.
     let recording = Rc::new(RefCell::new(Recording::default()));
     let transport = UreqTransport::new();
+    // One pace state for the session, so the resolve traffic and the block
+    // fetches are spaced as one stream against a hosted indexer. The pacer sits
+    // below the recorder because the recorder refuses a non-2xx answer: a
+    // rate-limited reply is retried here and never reaches the fixture.
+    let pace = Rc::new(RefCell::new(PaceState::default()));
+    let policy = if target.network == Network::Regtest {
+        PacePolicy::unpaced()
+    } else {
+        PacePolicy::public_indexer()
+    };
     let client = Client::new(
         base_url.to_string(),
-        RecordingTransport::sharing(transport.clone(), Rc::clone(&recording)),
+        RecordingTransport::sharing(
+            PacedTransport::sharing(transport.clone(), SystemClock, policy, Rc::clone(&pace)),
+            Rc::clone(&recording),
+        ),
     );
 
     // `chain_tip_height` is None on purpose: the client fetches
@@ -376,7 +391,10 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     // asked for it: a replay under a `versionTime` bound reads its
     // `mediantime`, and a capture without it cannot host that probe.
     let addresses = recording.borrow().addresses.clone();
-    let blocks_transport = RecordingTransport::sharing(transport, Rc::clone(&recording));
+    let blocks_transport = RecordingTransport::sharing(
+        PacedTransport::sharing(transport, SystemClock, policy, Rc::clone(&pace)),
+        Rc::clone(&recording),
+    );
     record::capture_announcement_blocks(&blocks_transport, base_url, &addresses).map_err(
         |source| CaptureError::ResolveFailed {
             vector: target.id.clone(),
