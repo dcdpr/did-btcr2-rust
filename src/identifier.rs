@@ -667,17 +667,46 @@ mod tests {
         sk.public_key(&secp).serialize()
     }
 
+    /// Every row of the spec's network-value table (algorithms.md, Table 1)
+    /// maps in both directions, and every value outside the accepted rows is
+    /// rejected with the value it was given.
     #[test]
     fn test_network_conversion() {
-        assert_eq!(Network::try_from(0).unwrap(), Network::Mainnet);
-        assert_eq!(Network::try_from(1).unwrap(), Network::Signet);
-        assert_eq!(Network::try_from(5).unwrap(), Network::Mutinynet);
-        assert_eq!(Network::try_from(12).unwrap(), Network::Custom(12));
-        assert!(Network::try_from(16).is_err());
+        let named = [
+            (0u8, Network::Mainnet),
+            (1, Network::Signet),
+            (2, Network::Regtest),
+            (3, Network::TestnetV3),
+            (4, Network::TestnetV4),
+            (5, Network::Mutinynet),
+        ];
+        for (value, network) in named {
+            assert_eq!(
+                Network::try_from(value).unwrap(),
+                network,
+                "network value {value} decodes to {network:?}"
+            );
+            assert_eq!(
+                u8::from(network),
+                value,
+                "{network:?} encodes to network value {value}"
+            );
+        }
 
-        assert_eq!(u8::from(Network::Mainnet), 0);
-        assert_eq!(u8::from(Network::Signet), 1);
-        assert_eq!(u8::from(Network::Custom(12)), 12);
+        // The custom partition this implementation accepts, both directions.
+        for value in 12..=14u8 {
+            assert_eq!(Network::try_from(value).unwrap(), Network::Custom(value));
+            assert_eq!(u8::from(Network::Custom(value)), value);
+        }
+
+        // Reserved 6..=11, custom 15 (not accepted here), and every value that
+        // does not fit the nibble.
+        for value in (6..=11u8).chain([15]).chain(16..=u8::MAX) {
+            assert!(
+                matches!(Network::try_from(value), Err(Error::InvalidNetwork(v)) if v == value),
+                "network value {value} must be rejected as InvalidNetwork"
+            );
+        }
     }
 
     #[test]

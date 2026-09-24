@@ -457,6 +457,12 @@ const CURATED: &[ConformanceRow] = &[
         prefix: "* `btcr2_version` must be `0`. introduce `version_number` as `btcr2_version + 1`",
         status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
     },
+    // The cited test maps every named row of Table 1 (bitcoin=0 .. mutinynet=5)
+    // and the accepted custom values 12..=14 in both directions, and rejects
+    // reserved 6..=11 and everything above 15. Table 1 lists 15 as a custom
+    // value too; this implementation rejects it (the sentence is a SHOULD and a
+    // custom value's meaning is by mutual agreement), which `test_custom_network`
+    // also pins.
     ConformanceRow {
         id: "algorithms.md:network-name-integer-representable",
         file: "did-btcr2/src/algorithms.md",
