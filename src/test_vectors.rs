@@ -1795,11 +1795,13 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
     vectors
 }
 
-/// The five assertions the harness can make about an operation vector.
+/// The six assertions the harness can make about an operation vector.
 ///
-/// Accounting is per (vector x kind) row rather than per vector: a vector whose
-/// derivation is asserted but whose resolve cannot be driven offline must show
-/// up as one driven row and one skipped row, not as a single "covered" vector.
+/// Accounting is per row rather than per vector: a vector whose derivation is
+/// asserted but whose resolve cannot be driven offline must show up as one
+/// driven row and one skipped row, not as a single "covered" vector. A row is
+/// one (vector x kind) pair ([`RowKey::set`]), except for `ResolveOption`,
+/// which has one row per numbered resolve case ([`RowKey::case`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum AssertionKind {
     /// `create/input.json` -> the encoded DID equals `create/output.json.did`.
@@ -1815,16 +1817,21 @@ pub(crate) enum AssertionKind {
     /// Applying every update step in order to the genesis document reproduces
     /// `resolve/output.json.didDocument`.
     EndState,
+    /// One resolve case under `resolve/NN/`, driven with that case's own
+    /// options; `Resolve` stays the main `resolve/input.json`/`output.json`
+    /// pair, so its count stays comparable across corpus revisions.
+    ResolveOption,
 }
 
 impl AssertionKind {
     /// Every kind, in report order.
-    pub(crate) const ALL: [AssertionKind; 5] = [
+    pub(crate) const ALL: [AssertionKind; 6] = [
         Self::Derivation,
         Self::GenesisKey,
         Self::Resolve,
         Self::UpdateCrypto,
         Self::EndState,
+        Self::ResolveOption,
     ];
 }
 
@@ -1836,6 +1843,48 @@ impl fmt::Display for AssertionKind {
             Self::Resolve => f.write_str("resolve"),
             Self::UpdateCrypto => f.write_str("update-crypto"),
             Self::EndState => f.write_str("end-state"),
+            Self::ResolveOption => f.write_str("resolve-option"),
+        }
+    }
+}
+
+/// The ledger's unit of accounting: one row per (set, kind), except
+/// [`AssertionKind::ResolveOption`], which has one row per `resolve/NN` case of
+/// the set.
+///
+/// Drivers insert the key of every row they actually asserted against, and the
+/// ledger derives the keys it expects; the two sets are compared per kind.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RowKey {
+    /// The set's id, e.g. `"mutinynet/x1/q5m2fh36"`.
+    pub(crate) vector: String,
+    /// The `resolve/NN` case name for a resolve-option row; `None` otherwise.
+    pub(crate) case: Option<String>,
+}
+
+impl RowKey {
+    /// The row of a set-level kind.
+    pub(crate) fn set(vector: impl Into<String>) -> Self {
+        Self {
+            vector: vector.into(),
+            case: None,
+        }
+    }
+
+    /// The row of one `resolve/{case}` case of a set.
+    pub(crate) fn case(vector: impl Into<String>, case: impl Into<String>) -> Self {
+        Self {
+            vector: vector.into(),
+            case: Some(case.into()),
+        }
+    }
+}
+
+impl fmt::Display for RowKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.case {
+            None => f.write_str(&self.vector),
+            Some(case) => write!(f, "{} resolve/{case}", self.vector),
         }
     }
 }
@@ -1879,13 +1928,20 @@ pub(crate) enum SkipReason {
     UnsupportedBeaconType,
     /// The vector's update `@context` predates the spec's pin; regenerated
     /// upstream and absorbed when the regenerated suite is bumped. Applies to
-    /// the Resolve kind only: the UpdateCrypto and EndState drivers rebuild the
+    /// the Resolve kind and the set's resolve-option cases only: the
+    /// UpdateCrypto and EndState drivers rebuild the
     /// update from `input.json` and compare document hashes, so those rows
     /// stay driven. Until the resolver rejects a non-pinned `@context`, the
     /// rows parked here would still pass; the skip lands before the reject so
     /// that no commit is ever red, and the label becomes literally true once
     /// the reject lands.
     StaleContext,
+    /// The set's main `resolve/output.json` carries
+    /// `didResolutionMetadata.error`. Applies to UpdateCrypto and EndState: the
+    /// set is built to fail resolution, so its Resolve row asserts the error
+    /// code and there is no expected end state to reproduce. Derivation and
+    /// GenesisKey stay driven, because `create/` still holds a valid DID.
+    ExpectedError,
     /// A one-off no derived rule expresses; the payload is the stated reason.
     Override(&'static str),
 }
@@ -1903,6 +1959,9 @@ impl fmt::Display for SkipReason {
                 "update @context predates the spec pin; regenerated upstream, absorbed at the \
                  test-suite bump",
             ),
+            Self::ExpectedError => f.write_str(
+                "the set's expected result is an error; its Resolve row asserts the code",
+            ),
             Self::Override(reason) => f.write_str(reason),
         }
     }
@@ -1918,16 +1977,22 @@ impl fmt::Display for SkipReason {
 /// driven. Both sides must move together or the override would turn the suite
 /// red instead of yielding a stated skip.
 pub(crate) struct SkipOverride {
-    /// Row key, e.g. `"mutinynet/x1/qh66uy2s"`.
+    /// The set's id, e.g. `"mutinynet/x1/qh66uy2s"`.
     pub(crate) vector: &'static str,
     /// The assertion this entry suppresses.
     pub(crate) kind: AssertionKind,
+    /// The `resolve/NN` case this entry suppresses, for a
+    /// [`AssertionKind::ResolveOption`] entry; `None` for every other kind.
+    /// An entry matches exactly one row, so a resolve-option entry without a
+    /// case, or a set-level entry with one, matches nothing and is reported
+    /// stale.
+    pub(crate) case: Option<&'static str>,
     /// Why, in plain domain language.
     pub(crate) reason: &'static str,
 }
 
 /// Empty by design: every skipped row on disk today is covered by a derived
-/// rule. An entry added here must match a discovered (vector, kind) or the
+/// rule. An entry added here must match a discovered row or the
 /// suite fails — additions cannot hide, and neither can removals.
 pub(crate) const SKIP_OVERRIDES: &[SkipOverride] = &[];
 
@@ -2028,6 +2093,10 @@ pub(crate) const STALE_UPDATE_CONTEXT: &[&str] = &[
 /// and [`STALE_UPDATE_CONTEXT`] empties. UpdateCrypto and EndState are
 /// unaffected: their drivers never read the vector's `@context`.
 ///
+/// ResolveOption is 0: the current test-suite pin ships no `resolve/NN` case,
+/// so there is nothing to drive yet. Raise it when the regenerated suite, which
+/// does ship such cases, is absorbed.
+///
 /// Compared with `>=`, so upstream ADDING vectors raises coverage without
 /// failing; only silent coverage LOSS fails.
 ///
@@ -2041,6 +2110,7 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
     (AssertionKind::Resolve, 4),
     (AssertionKind::UpdateCrypto, 17),
     (AssertionKind::EndState, 17),
+    (AssertionKind::ResolveOption, 0),
 ];
 
 /// Derive the reasons a vector's `resolve` row cannot be driven, from the
@@ -2076,7 +2146,8 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
 /// because it reads a field this function's unit-tested signature does not
 /// carry:
 /// 4. any update step's `@context` (or its proof's) is not the pinned array
-///    -> `StaleContext` (Resolve only) — from the vector's own update files
+///    -> `StaleContext` (Resolve and resolve-option only) — from the vector's
+///    own update files
 ///    (`update/**/output.json`, `resolve/input.json` sidecar `updates`).
 pub(crate) fn derived_resolve_skip_reasons(
     delivery: &Delivery,
@@ -2122,7 +2193,8 @@ pub(crate) fn derived_resolve_skip_reasons(
 
 impl Vector {
     /// The kinds this vector has files for. `UpdateCrypto` and `EndState` exist
-    /// only for update-bearing vectors; the other three exist for every vector.
+    /// only for update-bearing vectors, `ResolveOption` only for a set with at
+    /// least one `resolve/NN` case; the other three exist for every vector.
     pub(crate) fn applicable_kinds(&self) -> Vec<AssertionKind> {
         AssertionKind::ALL
             .into_iter()
@@ -2133,8 +2205,26 @@ impl Vector {
                 AssertionKind::UpdateCrypto | AssertionKind::EndState => {
                     self.update_layout != UpdateLayout::None
                 }
+                AssertionKind::ResolveOption => !self.resolve_cases.is_empty(),
             })
             .collect()
+    }
+
+    /// This vector's rows of `kind`: none when the kind does not apply, one
+    /// per `resolve/NN` case (in case order) for `ResolveOption`, and the one
+    /// set-level row otherwise.
+    pub(crate) fn rows(&self, kind: AssertionKind) -> Vec<RowKey> {
+        if !self.applicable_kinds().contains(&kind) {
+            return Vec::new();
+        }
+        match kind {
+            AssertionKind::ResolveOption => self
+                .resolve_cases
+                .iter()
+                .map(|case| RowKey::case(self.id.as_str(), case.name.as_str()))
+                .collect(),
+            _ => vec![RowKey::set(self.id.as_str())],
+        }
     }
 
     /// Whether the harness can actually assert this kind against this vector,
@@ -2148,7 +2238,9 @@ impl Vector {
         match kind {
             AssertionKind::Derivation | AssertionKind::GenesisKey => true,
             // The resolve driver needs a genesis source and, past genesis, a
-            // captured chain fixture to feed the beacon signals from.
+            // captured chain fixture to feed the beacon signals from. A
+            // resolve case resolves the same set with other options, so it
+            // needs exactly the same inputs.
             //
             // For an external vector the genesis source is
             // `resolve/input.json.resolutionOptions.sidecar.genesisDocument`;
@@ -2162,7 +2254,7 @@ impl Vector {
             // capture for a row this says is drivable is a bug that
             // `read_chain_fixture` raises by name — not a reason to quietly
             // drop the row.
-            AssertionKind::Resolve => {
+            AssertionKind::Resolve | AssertionKind::ResolveOption => {
                 self.id_type != VectorIdType::External || self.has_sidecar_genesis_document
             }
             AssertionKind::UpdateCrypto | AssertionKind::EndState => {
@@ -2171,13 +2263,9 @@ impl Vector {
         }
     }
 
-    /// Every reason this row is skipped. Empty means the row is expected to be
-    /// driven.
-    ///
-    /// The derived delivery/anchoring reasons scope to `Resolve` alone: they
-    /// say nothing about whether a patch sequence reproduces a document, so an
-    /// unanchored vector still drives derivation, genesis-key, update-crypto
-    /// and end-state. Overrides apply to whatever kind they name.
+    /// Every reason this set-level row is skipped. Empty means the row is
+    /// expected to be driven. The `case: None` form of
+    /// [`Vector::row_skip_reasons`].
     ///
     /// The override table is always explicit. There is deliberately no
     /// live-table convenience wrapper: one existed, most call sites used it out
@@ -2197,22 +2285,56 @@ impl Vector {
         kind: AssertionKind,
         overrides: &[SkipOverride],
     ) -> BTreeSet<SkipReason> {
-        let mut reasons = if kind == AssertionKind::Resolve {
-            derived_resolve_skip_reasons(&self.delivery, &self.genesis_service_types)
-        } else {
-            BTreeSet::new()
-        };
+        self.row_skip_reasons(kind, None, overrides)
+    }
 
-        // Rule 4: a pre-pin update `@context`, from the vector's own update
-        // files. Resolve only — the update-crypto and end-state drivers never
-        // read the vector's `@context` (they rebuild the update and compare
-        // document hashes), so those rows are genuinely driven.
-        if kind == AssertionKind::Resolve && self.stale_update_context {
-            reasons.insert(SkipReason::StaleContext);
+    /// Every reason one row is skipped: the set-level row when `case` is
+    /// `None`, the `resolve/{case}` row of `ResolveOption` otherwise. Empty
+    /// means the row is expected to be driven.
+    ///
+    /// Derived reasons by kind:
+    /// - `Resolve` and `ResolveOption`: the delivery, anchoring and beacon
+    ///   rules of [`derived_resolve_skip_reasons`], plus `StaleContext`. A
+    ///   resolve case inherits exactly its set's reasons: a case of a
+    ///   CAS-delivered set is as undeliverable as the main pair.
+    /// - `UpdateCrypto` and `EndState`: `ExpectedError` when the set's main
+    ///   resolve pair expects an error. The delivery reasons say nothing about
+    ///   whether a patch sequence reproduces a document, so an unanchored set
+    ///   still drives both.
+    /// - `Derivation` and `GenesisKey`: none.
+    ///
+    /// An override applies when it names this set, this kind and this case.
+    pub(crate) fn row_skip_reasons(
+        &self,
+        kind: AssertionKind,
+        case: Option<&str>,
+        overrides: &[SkipOverride],
+    ) -> BTreeSet<SkipReason> {
+        let mut reasons = BTreeSet::new();
+        match kind {
+            AssertionKind::Resolve | AssertionKind::ResolveOption => {
+                reasons.extend(derived_resolve_skip_reasons(
+                    &self.delivery,
+                    &self.genesis_service_types,
+                ));
+                // Rule 4: a pre-pin update `@context`, from the vector's own
+                // update files. The update-crypto and end-state drivers never
+                // read the vector's `@context` (they rebuild the update and
+                // compare document hashes), so those rows are genuinely driven.
+                if self.stale_update_context {
+                    reasons.insert(SkipReason::StaleContext);
+                }
+            }
+            AssertionKind::UpdateCrypto | AssertionKind::EndState => {
+                if self.is_negative() {
+                    reasons.insert(SkipReason::ExpectedError);
+                }
+            }
+            AssertionKind::Derivation | AssertionKind::GenesisKey => {}
         }
 
         for entry in overrides {
-            if entry.vector == self.id && entry.kind == kind {
+            if entry.vector == self.id && entry.kind == kind && entry.case == case {
                 reasons.insert(SkipReason::Override(entry.reason));
             }
         }
@@ -2220,7 +2342,18 @@ impl Vector {
         reasons
     }
 
-    /// Whether a driver for `kind` should assert against this vector.
+    /// Whether a driver for `kind` should assert against this vector's
+    /// set-level row. The `case: None` form of [`Vector::should_drive_row_with`].
+    pub(crate) fn should_drive_with(
+        &self,
+        kind: AssertionKind,
+        overrides: &[SkipOverride],
+    ) -> bool {
+        self.should_drive_row_with(kind, None, overrides)
+    }
+
+    /// Whether a driver for `kind` should assert against one row of this
+    /// vector (`case` names the `resolve/NN` case of a resolve-option row).
     ///
     /// The conjunction of "the harness structurally can" and "nothing says not
     /// to". Every driver loop gates on exactly this, and `expected_driven`
@@ -2239,54 +2372,65 @@ impl Vector {
     ///
     /// Takes the override table explicitly so a driver and the ledger can both
     /// be exercised against a synthetic table while the live one is empty.
-    pub(crate) fn should_drive_with(
+    pub(crate) fn should_drive_row_with(
         &self,
         kind: AssertionKind,
+        case: Option<&str>,
         overrides: &[SkipOverride],
     ) -> bool {
-        self.is_drivable(kind) && self.skip_reasons_with(kind, overrides).is_empty()
+        self.is_drivable(kind) && self.row_skip_reasons(kind, case, overrides).is_empty()
     }
 }
 
 /// The rows the ledger expects a driver for `kind` to have asserted against:
-/// applicable, and `should_drive_with` the given override table.
+/// every row of `kind` that `should_drive_row_with` admits under the given
+/// override table.
 pub(crate) fn expected_driven_with(
     kind: AssertionKind,
     vectors: &[Vector],
     overrides: &[SkipOverride],
-) -> BTreeSet<String> {
+) -> BTreeSet<RowKey> {
     vectors
         .iter()
-        .filter(|v| v.applicable_kinds().contains(&kind) && v.should_drive_with(kind, overrides))
-        .map(|v| v.id.clone())
+        .flat_map(|v| {
+            v.rows(kind)
+                .into_iter()
+                .filter(move |row| v.should_drive_row_with(kind, row.case.as_deref(), overrides))
+        })
         .collect()
 }
 
 /// Assert that a driver's observed set equals the ledger's expected set for its
 /// own kind.
 ///
-/// "Driven" is observed, not declared: the caller passes the ids it actually
+/// "Driven" is observed, not declared: the caller passes the rows it actually
 /// asserted against. A driver that skipped a row the ledger expects it to drive
 /// fails here, as does a driver that asserted against a row the ledger has
 /// classified as skipped.
 ///
-/// Sharing `should_drive_with` with the driver loop gates does not make this
-/// vacuous. The gate runs once per row at the top of the loop; `observed` is
-/// filled at the bottom, after the assertions. Any early exit in between — a
+/// Sharing `should_drive_row_with` with the driver loop gates does not make
+/// this vacuous. The gate runs once per row at the top of the loop; `observed`
+/// is filled at the bottom, after the assertions. Any early exit in between — a
 /// `continue`, a `?`, a conditional that quietly walks past a step — leaves the
-/// id out of `observed` and fails here.
+/// row out of `observed` and fails here.
 ///
 /// The override table must match the one the driver gated on, or the two tell
 /// different stories about the same run.
 pub(crate) fn reconcile_driven_with(
     kind: AssertionKind,
     vectors: &[Vector],
-    observed: &BTreeSet<String>,
+    observed: &BTreeSet<RowKey>,
     overrides: &[SkipOverride],
 ) {
     let expected = expected_driven_with(kind, vectors, overrides);
-    let missing: Vec<&String> = expected.difference(observed).collect();
-    let extra: Vec<&String> = observed.difference(&expected).collect();
+    let missing: Vec<String> = expected
+        .difference(observed)
+        .map(RowKey::to_string)
+        .collect();
+    let extra: Vec<String> = observed
+        .difference(&expected)
+        .map(RowKey::to_string)
+        .collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
         "{kind} coverage diverged from the vector ledger.\n  \
@@ -2306,16 +2450,17 @@ pub(crate) fn reconcile_driven_with(
 /// upstream and that the harness cannot assert anything about must force an
 /// explicit decision rather than passing green unexercised.
 ///
-/// Scope, so this is not over-trusted as a five-kind guard: `is_drivable` is
+/// Scope, so this is not over-trusted as a six-kind guard: `is_drivable` is
 /// unconditionally `true` for `Derivation` and `GenesisKey`, and is exactly
 /// "the vector has an `update/` directory" for `UpdateCrypto` and `EndState` —
 /// which is also what makes those kinds applicable at all. So only a `Resolve`
-/// row can currently reach this report, and only in the narrow shape "external
-/// id type, expected versionId 1, no sidecar genesis document, and no delivery
-/// declaration". That shape is real — it is one upstream vector away — but a
-/// new *operation* arriving upstream is caught by `classify_operation_dirs`,
-/// not here. Widen this report if a future kind gains a conditional
-/// drivability rule.
+/// or `ResolveOption` row can currently reach this report, and only in the
+/// narrow shape "external id type, no sidecar genesis document, and no derived
+/// reason". Derived reasons now reach Resolve, ResolveOption, UpdateCrypto and
+/// EndState, but only the two resolve kinds have a conditional drivability
+/// rule. A new *operation* arriving upstream is caught by
+/// `classify_operation_dirs`, not here. Widen this report if a future kind
+/// gains a conditional drivability rule.
 ///
 /// Deliberately reads `is_drivable`, not the combined drive gate: a row with a
 /// reason is classified, and a row without one that the harness cannot drive is
@@ -2328,36 +2473,50 @@ pub(crate) fn unclassified_rows_with(
     let mut rows = Vec::new();
     for v in vectors {
         for kind in v.applicable_kinds() {
-            if !v.is_drivable(kind) && v.skip_reasons_with(kind, overrides).is_empty() {
-                rows.push(format!(
-                    "  {} :: {kind} — classify it: drive it, add a derived skip rule, \
-                     or add a SKIP_OVERRIDES entry with a reason",
-                    v.id
-                ));
+            for row in v.rows(kind) {
+                if !v.is_drivable(kind)
+                    && v.row_skip_reasons(kind, row.case.as_deref(), overrides)
+                        .is_empty()
+                {
+                    rows.push(format!(
+                        "  {row} :: {kind} — classify it: drive it, add a derived skip rule, \
+                         or add a SKIP_OVERRIDES entry with a reason"
+                    ));
+                }
             }
         }
     }
     rows
 }
 
-/// Overrides that match no discovered (vector, kind) row.
+/// Overrides that match no discovered row.
 ///
 /// The symmetric half of the set invariant: additions to the test suite cannot
 /// hide behind an unexercised harness, and removals cannot hide behind a skip
-/// entry nobody deleted.
+/// entry nobody deleted. An entry matches when a discovered set has a row of
+/// its kind with its case, so a resolve-option entry naming a case the set
+/// does not ship is stale.
 pub(crate) fn stale_overrides(overrides: &[SkipOverride], vectors: &[Vector]) -> Vec<String> {
     overrides
         .iter()
         .filter(|o| {
+            let key = RowKey {
+                vector: o.vector.to_string(),
+                case: o.case.map(str::to_string),
+            };
             !vectors
                 .iter()
-                .any(|v| v.id == o.vector && v.applicable_kinds().contains(&o.kind))
+                .any(|v| v.id == o.vector && v.rows(o.kind).contains(&key))
         })
         .map(|o| {
+            let key = RowKey {
+                vector: o.vector.to_string(),
+                case: o.case.map(str::to_string),
+            };
             format!(
-                "  {} :: {} — stale SKIP override: the vector or the assertion no longer \
-                 exists; delete the entry",
-                o.vector, o.kind
+                "  {key} :: {} — stale SKIP override: the vector, the case or the assertion no \
+                 longer exists; delete the entry",
+                o.kind
             )
         })
         .collect()
@@ -2373,31 +2532,31 @@ pub(crate) fn stale_overrides(overrides: &[SkipOverride], vectors: &[Vector]) ->
 /// gate is a conjunction precisely so that such a row yields a stated skip
 /// rather than a reconciliation failure.
 ///
-/// Scope, so this is not over-trusted as a five-kind guard: the derived reasons
-/// are `Resolve`-scoped (`skip_reasons_with` returns an empty set for every
-/// other kind), so `derived` is non-empty only for a `Resolve` row and the loop
-/// `continue`s unconditionally for the other four kinds. Iterating
-/// `applicable_kinds()` is deliberate — it costs nothing and needs no edit if a
-/// future rule gains a wider scope — but today this reports on `Resolve` alone.
+/// Scope: derived reasons now reach Resolve, ResolveOption (the delivery,
+/// anchoring, beacon and stale-context rules), and UpdateCrypto and EndState
+/// (`ExpectedError` on a negative set). `Derivation` and `GenesisKey` carry no
+/// derived reason, so the loop `continue`s for those rows unconditionally.
 pub(crate) fn redundant_overrides(vectors: &[Vector], overrides: &[SkipOverride]) -> Vec<String> {
     let mut rows = Vec::new();
     for v in vectors {
         for kind in v.applicable_kinds() {
-            let derived = v.skip_reasons_with(kind, &[]);
-            if derived.is_empty() {
-                continue;
-            }
-            let redundant: Vec<SkipReason> = v
-                .skip_reasons_with(kind, overrides)
-                .into_iter()
-                .filter(|reason| matches!(reason, SkipReason::Override(_)))
-                .collect();
-            if !redundant.is_empty() {
-                rows.push(format!(
-                    "  {} :: {kind} — hand-written skip {redundant:?} is redundant: a derived \
-                     rule already skips this row for {derived:?}; delete the entry",
-                    v.id
-                ));
+            for row in v.rows(kind) {
+                let case = row.case.as_deref();
+                let derived = v.row_skip_reasons(kind, case, &[]);
+                if derived.is_empty() {
+                    continue;
+                }
+                let redundant: Vec<SkipReason> = v
+                    .row_skip_reasons(kind, case, overrides)
+                    .into_iter()
+                    .filter(|reason| matches!(reason, SkipReason::Override(_)))
+                    .collect();
+                if !redundant.is_empty() {
+                    rows.push(format!(
+                        "  {row} :: {kind} — hand-written skip {redundant:?} is redundant: a \
+                         derived rule already skips this row for {derived:?}; delete the entry"
+                    ));
+                }
             }
         }
     }
@@ -2426,17 +2585,17 @@ pub(crate) fn render_summary_with(vectors: &[Vector], overrides: &[SkipOverride]
 
     for kind in AssertionKind::ALL {
         let (mut driven, mut skipped) = (0usize, 0usize);
-        for v in vectors
-            .iter()
-            .filter(|v| v.applicable_kinds().contains(&kind))
-        {
-            total_rows += 1;
-            if v.should_drive_with(kind, overrides) {
-                driven += 1;
-            } else {
-                skipped += 1;
-                for reason in v.skip_reasons_with(kind, overrides) {
-                    *by_reason.entry(reason).or_default() += 1;
+        for v in vectors {
+            for row in v.rows(kind) {
+                let case = row.case.as_deref();
+                total_rows += 1;
+                if v.should_drive_row_with(kind, case, overrides) {
+                    driven += 1;
+                } else {
+                    skipped += 1;
+                    for reason in v.row_skip_reasons(kind, case, overrides) {
+                        *by_reason.entry(reason).or_default() += 1;
+                    }
                 }
             }
         }
@@ -3442,7 +3601,7 @@ fn derived_reasons_cover_the_three_rules() {
 }
 
 /// The anchoring and delivery reasons say nothing about whether a patch
-/// sequence reproduces a document, so they scope to `Resolve` alone — an
+/// sequence reproduces a document, so they scope to the resolve kinds — an
 /// unanchored, CAS-delivered vector still drives its update assertions.
 #[test]
 fn delivery_reasons_scope_to_resolve_only() {
@@ -3489,8 +3648,24 @@ fn applicable_kinds_track_the_update_layout() {
         UpdateLayout::Numbered(vec!["01".into(), "02".into()]),
     ] {
         v.update_layout = layout;
-        assert_eq!(v.applicable_kinds(), AssertionKind::ALL.to_vec());
+        assert_eq!(
+            v.applicable_kinds(),
+            vec![
+                AssertionKind::Derivation,
+                AssertionKind::GenesisKey,
+                AssertionKind::Resolve,
+                AssertionKind::UpdateCrypto,
+                AssertionKind::EndState,
+            ]
+        );
     }
+
+    // A numbered resolve case makes the resolve-option kind apply too.
+    v.resolve_cases = vec![ResolveCase {
+        name: "01".into(),
+        outcome: positive_outcome(1, true),
+    }];
+    assert_eq!(v.applicable_kinds(), AssertionKind::ALL.to_vec());
 }
 
 /// The resolve driver sources an external vector's genesis document from
@@ -3536,6 +3711,7 @@ fn an_override_stops_a_structurally_drivable_row_from_being_driven() {
     const OVERRIDES: &[SkipOverride] = &[SkipOverride {
         vector: "regtest/x1/q2fz9mz6",
         kind: AssertionKind::Derivation,
+        case: None,
         reason: "upstream vector encodes its genesis bytes at the wrong length",
     }];
 
@@ -3738,7 +3914,7 @@ fn synthetic_ledger() -> Vec<Vector> {
 fn reconcile_panic_message(
     kind: AssertionKind,
     vectors: &[Vector],
-    observed: &BTreeSet<String>,
+    observed: &BTreeSet<RowKey>,
 ) -> String {
     let payload = std::panic::catch_unwind(|| reconcile_driven_with(kind, vectors, observed, &[]))
         .expect_err("reconcile_driven must panic when the sets diverge");
@@ -3751,10 +3927,13 @@ fn reconcile_panic_message(
 fn expected_driven_tracks_should_drive() {
     let vectors = synthetic_ledger();
     for kind in AssertionKind::ALL {
-        let want: BTreeSet<String> = vectors
+        let want: BTreeSet<RowKey> = vectors
             .iter()
-            .filter(|v| v.should_drive_with(kind, &[]))
-            .map(|v| v.id.clone())
+            .flat_map(|v| {
+                v.rows(kind)
+                    .into_iter()
+                    .filter(|row| v.should_drive_row_with(kind, row.case.as_deref(), &[]))
+            })
             .collect();
         assert_eq!(
             expected_driven_with(kind, &vectors, &[]),
@@ -3765,11 +3944,11 @@ fn expected_driven_tracks_should_drive() {
     // Vacuity guard: the fixture actually exercises both columns.
     assert_eq!(
         expected_driven_with(AssertionKind::Resolve, &vectors, &[]),
-        BTreeSet::from(["regtest/k1/qgpakaw4".to_string()])
+        BTreeSet::from([RowKey::set("regtest/k1/qgpakaw4")])
     );
     assert_eq!(
         expected_driven_with(AssertionKind::UpdateCrypto, &vectors, &[]),
-        BTreeSet::from(["mutinynet/x1/q5m2fh36".to_string()])
+        BTreeSet::from([RowKey::set("mutinynet/x1/q5m2fh36")])
     );
 }
 
@@ -3789,7 +3968,7 @@ fn reconcile_passes_on_an_exact_observed_set() {
 fn reconcile_fails_when_a_drivable_row_was_skipped() {
     let vectors = synthetic_ledger();
     let mut observed = expected_driven_with(AssertionKind::Derivation, &vectors, &[]);
-    let dropped = "mutinynet/x1/qh66uy2s".to_string();
+    let dropped = RowKey::set("mutinynet/x1/qh66uy2s");
     assert!(
         observed.remove(&dropped),
         "the dropped row must have been expected in the first place"
@@ -3797,7 +3976,7 @@ fn reconcile_fails_when_a_drivable_row_was_skipped() {
 
     let message = reconcile_panic_message(AssertionKind::Derivation, &vectors, &observed);
     assert!(
-        message.contains(&dropped) && message.contains("expected but not driven"),
+        message.contains(&dropped.to_string()) && message.contains("expected but not driven"),
         "the message must name the missing row: {message}"
     );
 }
@@ -3808,12 +3987,12 @@ fn reconcile_fails_when_a_drivable_row_was_skipped() {
 fn reconcile_fails_on_an_unexpected_driven_row() {
     let vectors = synthetic_ledger();
     let mut observed = expected_driven_with(AssertionKind::Resolve, &vectors, &[]);
-    let extra = "mutinynet/x1/qh66uy2s".to_string();
+    let extra = RowKey::set("mutinynet/x1/qh66uy2s");
     observed.insert(extra.clone());
 
     let message = reconcile_panic_message(AssertionKind::Resolve, &vectors, &observed);
     assert!(
-        message.contains(&extra) && message.contains("driven but not expected"),
+        message.contains(&extra.to_string()) && message.contains("driven but not expected"),
         "the message must name the unexpected row: {message}"
     );
 }
@@ -3858,6 +4037,7 @@ fn stale_override_is_reported() {
     const GONE: &[SkipOverride] = &[SkipOverride {
         vector: "mutinynet/x1/__gone__",
         kind: AssertionKind::Resolve,
+        case: None,
         reason: "the vector was removed upstream",
     }];
     let rows = stale_overrides(GONE, &vectors);
@@ -3873,6 +4053,7 @@ fn stale_override_is_reported() {
     const WRONG_KIND: &[SkipOverride] = &[SkipOverride {
         vector: "regtest/k1/qgpakaw4",
         kind: AssertionKind::UpdateCrypto,
+        case: None,
         reason: "the update walk cannot be driven for this vector",
     }];
     let rows = stale_overrides(WRONG_KIND, &vectors);
@@ -3887,6 +4068,7 @@ fn stale_override_is_reported() {
     const LIVE: &[SkipOverride] = &[SkipOverride {
         vector: "mutinynet/x1/q5m2fh36",
         kind: AssertionKind::UpdateCrypto,
+        case: None,
         reason: "the update walk cannot be driven for this vector",
     }];
     assert!(stale_overrides(LIVE, &vectors).is_empty());
@@ -4043,6 +4225,7 @@ fn redundant_override_on_a_derived_skip_row_is_reported() {
     const OVERRIDES: &[SkipOverride] = &[SkipOverride {
         vector: "mutinynet/x1/qh66uy2s",
         kind: AssertionKind::Resolve,
+        case: None,
         reason: "genesis document is delivered out of band",
     }];
 
@@ -4071,6 +4254,7 @@ fn override_on_a_row_no_rule_covers_is_not_redundant() {
     const OVERRIDES: &[SkipOverride] = &[SkipOverride {
         vector: "regtest/x1/q2fz9mz6",
         kind: AssertionKind::Derivation,
+        case: None,
         reason: "upstream vector encodes its genesis bytes at the wrong length",
     }];
 
@@ -4088,7 +4272,7 @@ fn override_on_a_row_no_rule_covers_is_not_redundant() {
     );
     assert!(
         !expected_driven_with(AssertionKind::Derivation, ledger, OVERRIDES)
-            .contains("regtest/x1/q2fz9mz6"),
+            .contains(&RowKey::set("regtest/x1/q2fz9mz6")),
         "and suppresses the ledger's expectation in the same step"
     );
     assert!(
@@ -4748,7 +4932,7 @@ fn resolve_driven_set_is_the_expected_four_ids() {
 
     let observed = expected_driven_with(AssertionKind::Resolve, &vectors, &[]);
 
-    let expected: BTreeSet<String> = [
+    let expected: BTreeSet<RowKey> = [
         // Genesis-era, driven since the offline harness landed.
         "mutinynet/k1/q5puld7y",
         "mutinynet/x1/q5g3smvu",
@@ -4756,11 +4940,11 @@ fn resolve_driven_set_is_the_expected_four_ids() {
         "regtest/x1/q2fz9mz6",
     ]
     .into_iter()
-    .map(str::to_string)
+    .map(RowKey::set)
     .collect();
 
-    let missing: Vec<&String> = expected.difference(&observed).collect();
-    let extra: Vec<&String> = observed.difference(&expected).collect();
+    let missing: Vec<&RowKey> = expected.difference(&observed).collect();
+    let extra: Vec<&RowKey> = observed.difference(&expected).collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
         "the resolve driven set moved.\n  \
@@ -4780,6 +4964,7 @@ fn resolve_driven_set_is_the_expected_four_ids() {
 fn override_still_sorts_after_every_derived_reason() {
     let ordered: Vec<SkipReason> = BTreeSet::from([
         SkipReason::Override("a one-off"),
+        SkipReason::ExpectedError,
         SkipReason::StaleContext,
         SkipReason::UnsupportedBeaconType,
         SkipReason::SmtDelivery,
@@ -4797,8 +4982,325 @@ fn override_still_sorts_after_every_derived_reason() {
             SkipReason::SmtDelivery,
             SkipReason::UnsupportedBeaconType,
             SkipReason::StaleContext,
+            SkipReason::ExpectedError,
             SkipReason::Override("a one-off"),
         ]
+    );
+}
+
+// --- Rows, resolve cases and expected errors ----------------------------------
+
+/// A `ResolveCase` named `name` expecting a version-1 document.
+fn positive_case(name: &str) -> ResolveCase {
+    ResolveCase {
+        name: name.to_string(),
+        outcome: positive_outcome(1, true),
+    }
+}
+
+/// A set whose main resolve pair expects `NOT_FOUND`, with one update step, so
+/// every kind but the resolve-option one applies.
+fn negative_vector(id: &str, kind: &str) -> Vector {
+    let mut v = synthetic_vector(id, kind);
+    v.outcome = Outcome::Error {
+        code: "NOT_FOUND".into(),
+    };
+    v.delivery.negative = true;
+    v.delivery.announcement = Some(AnnouncementDelivery::Sidecar);
+    v.update_layout = UpdateLayout::Flat;
+    v
+}
+
+/// A set-level row prints as the set id, a case row as `{id} resolve/{NN}`,
+/// and set rows sort before the case rows of the same set.
+#[test]
+fn row_key_displays_a_set_and_a_case() {
+    assert_eq!(RowKey::set("a/k1/x").to_string(), "a/k1/x");
+    assert_eq!(
+        RowKey::case("a/k1/x", "03").to_string(),
+        "a/k1/x resolve/03"
+    );
+    assert!(RowKey::set("a/k1/x") < RowKey::case("a/k1/x", "01"));
+    assert!(RowKey::case("a/k1/x", "01") < RowKey::case("a/k1/x", "02"));
+    assert_ne!(RowKey::set("a/k1/x"), RowKey::case("a/k1/x", "01"));
+}
+
+/// One resolve-option row per `resolve/NN` case, in case order; none when the
+/// set ships only the main pair. Every other kind keeps its one set-level row.
+#[test]
+fn resolve_option_has_one_row_per_case() {
+    let mut v = synthetic_vector("mutinynet/k1/q5puld7y", "k1");
+    assert!(v.rows(AssertionKind::ResolveOption).is_empty());
+    assert!(!v.applicable_kinds().contains(&AssertionKind::ResolveOption));
+
+    v.resolve_cases = vec![positive_case("01"), positive_case("02")];
+    assert_eq!(
+        v.rows(AssertionKind::ResolveOption),
+        vec![
+            RowKey::case("mutinynet/k1/q5puld7y", "01"),
+            RowKey::case("mutinynet/k1/q5puld7y", "02"),
+        ]
+    );
+    assert_eq!(
+        v.rows(AssertionKind::Resolve),
+        vec![RowKey::set("mutinynet/k1/q5puld7y")]
+    );
+    // Not applicable: no update steps, so no rows.
+    assert!(v.rows(AssertionKind::UpdateCrypto).is_empty());
+
+    // Both cases are driven; the ledger counts each.
+    assert_eq!(
+        expected_driven_with(AssertionKind::ResolveOption, std::slice::from_ref(&v), &[]),
+        BTreeSet::from([
+            RowKey::case("mutinynet/k1/q5puld7y", "01"),
+            RowKey::case("mutinynet/k1/q5puld7y", "02"),
+        ])
+    );
+}
+
+/// A resolve case inherits exactly its set's derived Resolve reasons: a case of
+/// a set with a CAS beacon is as undeliverable as the main pair, and so is a
+/// case of a stale or pending set.
+#[test]
+fn resolve_option_inherits_the_sets_resolve_reasons() {
+    let mut v = synthetic_vector("mutinynet/x1/q4lqu6gr", "x1");
+    v.resolve_cases = vec![positive_case("01"), positive_case("02")];
+    v.genesis_service_types = vec!["CASBeacon".into()];
+
+    let set_reasons = v.skip_reasons_with(AssertionKind::Resolve, &[]);
+    assert!(set_reasons.contains(&SkipReason::CasDelivery));
+    for case in ["01", "02"] {
+        let case_reasons = v.row_skip_reasons(AssertionKind::ResolveOption, Some(case), &[]);
+        assert!(case_reasons.contains(&SkipReason::CasDelivery), "{case}");
+        assert_eq!(
+            case_reasons, set_reasons,
+            "case {case} inherits the set's reasons"
+        );
+        assert!(!v.should_drive_row_with(AssertionKind::ResolveOption, Some(case), &[]));
+    }
+
+    v.genesis_service_types.clear();
+    v.stale_update_context = true;
+    v.delivery.pending = true;
+    assert_eq!(
+        v.row_skip_reasons(AssertionKind::ResolveOption, Some("01"), &[]),
+        BTreeSet::from([SkipReason::Unanchored, SkipReason::StaleContext])
+    );
+
+    // Summary: two skipped resolve-option rows, each counted under both reasons.
+    let summary = render_summary_with(std::slice::from_ref(&v), &[]);
+    assert!(
+        summary
+            .lines()
+            .any(|line| line.trim_start().starts_with("resolve-option")
+                && line.split_whitespace().collect::<Vec<_>>() == ["resolve-option", "0", "2"]),
+        "{summary}"
+    );
+}
+
+/// A resolve case needs the same inputs as the main pair: an external set with
+/// no sidecar genesis document cannot drive either, and with no derived reason
+/// both rows are reported unclassified, the case row by its case key.
+#[test]
+fn resolve_option_drivability_follows_resolve() {
+    let mut v = synthetic_vector("mutinynet/x1/__orphan__", "x1");
+    v.resolve_cases = vec![positive_case("01")];
+    assert!(v.is_drivable(AssertionKind::ResolveOption));
+
+    v.has_sidecar_genesis_document = false;
+    assert!(!v.is_drivable(AssertionKind::Resolve));
+    assert!(!v.is_drivable(AssertionKind::ResolveOption));
+
+    let rows = unclassified_rows_with(std::slice::from_ref(&v), &[]);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("mutinynet/x1/__orphan__ resolve/01 :: resolve-option")),
+        "{rows:?}"
+    );
+}
+
+/// A driver that walked past one resolve case fails reconciliation naming the
+/// case, not just the set.
+#[test]
+fn resolve_option_reconcile_names_the_missing_case() {
+    let mut v = synthetic_vector("regtest/k1/qgpakaw4", "k1");
+    v.resolve_cases = vec![positive_case("01"), positive_case("02")];
+    let vectors = vec![v];
+
+    let observed = BTreeSet::from([RowKey::case("regtest/k1/qgpakaw4", "01")]);
+    let message = reconcile_panic_message(AssertionKind::ResolveOption, &vectors, &observed);
+    assert!(
+        message.contains("regtest/k1/qgpakaw4 resolve/02")
+            && message.contains("expected but not driven"),
+        "{message}"
+    );
+    // A set-level key is not a resolve-option row.
+    let mut observed = expected_driven_with(AssertionKind::ResolveOption, &vectors, &[]);
+    observed.insert(RowKey::set("regtest/k1/qgpakaw4"));
+    let message = reconcile_panic_message(AssertionKind::ResolveOption, &vectors, &observed);
+    assert!(message.contains("driven but not expected"), "{message}");
+}
+
+/// An override naming one resolve case skips that case alone. One naming a
+/// case the set does not ship, a resolve-option entry without a case, and a
+/// set-level entry with a case all match nothing and are reported stale.
+#[test]
+fn resolve_option_override_names_one_case() {
+    const REASON: &str = "the case's options exercise an unimplemented feature";
+    const ONE_CASE: &[SkipOverride] = &[SkipOverride {
+        vector: "regtest/k1/qgpakaw4",
+        kind: AssertionKind::ResolveOption,
+        case: Some("02"),
+        reason: REASON,
+    }];
+    let mut v = synthetic_vector("regtest/k1/qgpakaw4", "k1");
+    v.resolve_cases = vec![positive_case("01"), positive_case("02")];
+    let vectors = vec![v.clone()];
+
+    assert!(v.should_drive_row_with(AssertionKind::ResolveOption, Some("01"), ONE_CASE));
+    assert!(!v.should_drive_row_with(AssertionKind::ResolveOption, Some("02"), ONE_CASE));
+    assert_eq!(
+        v.row_skip_reasons(AssertionKind::ResolveOption, Some("02"), ONE_CASE),
+        BTreeSet::from([SkipReason::Override(REASON)])
+    );
+    assert!(
+        v.should_drive_with(AssertionKind::Resolve, ONE_CASE),
+        "the main pair is untouched"
+    );
+    assert_eq!(
+        expected_driven_with(AssertionKind::ResolveOption, &vectors, ONE_CASE),
+        BTreeSet::from([RowKey::case("regtest/k1/qgpakaw4", "01")])
+    );
+    assert!(stale_overrides(ONE_CASE, &vectors).is_empty());
+    assert!(unclassified_rows_with(&vectors, ONE_CASE).is_empty());
+    assert!(redundant_overrides(&vectors, ONE_CASE).is_empty());
+
+    const MISSING_CASE: &[SkipOverride] = &[SkipOverride {
+        vector: "regtest/k1/qgpakaw4",
+        kind: AssertionKind::ResolveOption,
+        case: Some("99"),
+        reason: REASON,
+    }];
+    let rows = stale_overrides(MISSING_CASE, &vectors);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].contains("regtest/k1/qgpakaw4 resolve/99") && rows[0].contains("stale SKIP"),
+        "{}",
+        rows[0]
+    );
+
+    const NO_CASE: &[SkipOverride] = &[SkipOverride {
+        vector: "regtest/k1/qgpakaw4",
+        kind: AssertionKind::ResolveOption,
+        case: None,
+        reason: REASON,
+    }];
+    assert_eq!(stale_overrides(NO_CASE, &vectors).len(), 1);
+
+    const CASE_ON_SET_KIND: &[SkipOverride] = &[SkipOverride {
+        vector: "regtest/k1/qgpakaw4",
+        kind: AssertionKind::Resolve,
+        case: Some("01"),
+        reason: REASON,
+    }];
+    assert_eq!(stale_overrides(CASE_ON_SET_KIND, &vectors).len(), 1);
+    assert!(
+        v.should_drive_with(AssertionKind::Resolve, CASE_ON_SET_KIND),
+        "a case-bearing entry never matches the set-level row"
+    );
+}
+
+/// On a negative set, the update-crypto and end-state rows skip with
+/// `ExpectedError`; the Resolve row carries the assertion, and derivation and
+/// genesis-key stay driven because `create/` still holds a valid DID.
+#[test]
+fn expected_error_skips_the_update_rows_of_a_negative_set() {
+    let v = negative_vector("regtest/k1/qgppexmy", "k1");
+    assert!(v.is_negative());
+
+    for kind in [AssertionKind::UpdateCrypto, AssertionKind::EndState] {
+        assert_eq!(
+            v.skip_reasons_with(kind, &[]),
+            BTreeSet::from([SkipReason::ExpectedError]),
+            "{kind}"
+        );
+        assert!(!v.should_drive_with(kind, &[]), "{kind}");
+    }
+    for kind in [
+        AssertionKind::Derivation,
+        AssertionKind::GenesisKey,
+        AssertionKind::Resolve,
+    ] {
+        assert!(
+            v.skip_reasons_with(kind, &[]).is_empty(),
+            "{kind}: {:?}",
+            v.skip_reasons_with(kind, &[])
+        );
+        assert!(v.should_drive_with(kind, &[]), "{kind}");
+    }
+
+    // A derived reason, so the summary counts it and a hand-written skip on
+    // the same row is redundant.
+    let summary = render_summary_with(std::slice::from_ref(&v), &[]);
+    assert!(
+        summary.contains(&SkipReason::ExpectedError.to_string()),
+        "{summary}"
+    );
+    const OVERRIDES: &[SkipOverride] = &[SkipOverride {
+        vector: "regtest/k1/qgppexmy",
+        kind: AssertionKind::EndState,
+        case: None,
+        reason: "the set fails resolution",
+    }];
+    let rows = redundant_overrides(std::slice::from_ref(&v), OVERRIDES);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("end-state") && rows[0].contains("redundant"));
+}
+
+/// A positive set never carries `ExpectedError`, on any kind, whatever else
+/// applies to it.
+#[test]
+fn expected_error_never_applies_to_a_positive_set() {
+    let mut v = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
+    v.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
+    v.resolve_cases = vec![positive_case("01")];
+    v.delivery.pending = true;
+    v.stale_update_context = true;
+    v.genesis_service_types = vec!["CASBeacon".into()];
+    // A negative resolve CASE does not make the set negative: only the main
+    // pair decides.
+    v.resolve_cases.push(ResolveCase {
+        name: "02".into(),
+        outcome: Outcome::Error {
+            code: "INVALID_DID".into(),
+        },
+    });
+    assert!(!v.is_negative());
+
+    for kind in AssertionKind::ALL {
+        for row in v.rows(kind) {
+            assert!(
+                !v.row_skip_reasons(kind, row.case.as_deref(), &[])
+                    .contains(&SkipReason::ExpectedError),
+                "{row} :: {kind}"
+            );
+        }
+    }
+}
+
+/// The resolve-option kind is the last line of the kind table, after end-state.
+#[test]
+fn resolve_option_is_listed_after_end_state_in_the_summary() {
+    let summary = render_summary_with(&synthetic_ledger(), &[]);
+    let end_state = summary.find("  end-state ").expect("end-state line");
+    let resolve_option = summary
+        .find("  resolve-option ")
+        .expect("resolve-option line");
+    assert!(end_state < resolve_option, "{summary}");
+    assert!(
+        summary.contains("  resolve-option       0        0\n"),
+        "no case in the synthetic ledger:\n{summary}"
     );
 }
 

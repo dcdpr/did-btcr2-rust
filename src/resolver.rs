@@ -1121,9 +1121,9 @@ mod tests {
     use crate::document::Document;
     use crate::test_vectors::{
         AssertionKind, ChainFixture, Corpus, DRIVEN_FLOOR, FIXTURES_WITHOUT_SIGNAL_BLOCKS,
-        NUMBER_ENCODED_VERSION_ID, SKIP_OVERRIDES, SkipOverride, Vector, VectorIdType, discover_in,
-        expected_driven_with, field_bool, field_hex, field_nonzero_version_id, field_str,
-        field_u64, field_version_id, network_dirs_with_vectors, read_chain_fixture,
+        NUMBER_ENCODED_VERSION_ID, RowKey, SKIP_OVERRIDES, SkipOverride, Vector, VectorIdType,
+        discover_in, expected_driven_with, field_bool, field_hex, field_nonzero_version_id,
+        field_str, field_u64, field_version_id, network_dirs_with_vectors, read_chain_fixture,
         read_fixture_or_skip, reconcile_driven_with, redundant_overrides, render_minted_summary,
         render_summary_with, stale_overrides, test_suite_checked_out, unclassified_rows_with,
     };
@@ -1235,7 +1235,7 @@ mod tests {
                 "{id}: create-derived DID must equal create/output.json.did"
             );
 
-            observed.insert(id.clone());
+            observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::Derivation, vectors, &observed, overrides);
     }
@@ -1339,7 +1339,7 @@ mod tests {
                 );
             }
 
-            observed.insert(id.clone());
+            observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::GenesisKey, vectors, &observed, overrides);
     }
@@ -1794,7 +1794,7 @@ mod tests {
                 }
             }
 
-            observed.insert(id.clone());
+            observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::Resolve, vectors, &observed, overrides);
     }
@@ -2008,7 +2008,7 @@ mod tests {
                 carried = Some(initial);
             }
 
-            observed.insert(id.clone());
+            observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::UpdateCrypto, vectors, &observed, overrides);
     }
@@ -2125,7 +2125,7 @@ mod tests {
                  resolve/output.json.didDocument"
             );
 
-            observed.insert(id.clone());
+            observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::EndState, vectors, &observed, overrides);
     }
@@ -2245,26 +2245,31 @@ mod tests {
             SkipOverride {
                 vector: "regtest/x1/q2fz9mz6",
                 kind: AssertionKind::Derivation,
+                case: None,
                 reason: REASON,
             },
             SkipOverride {
                 vector: "regtest/k1/qgpakaw4",
                 kind: AssertionKind::GenesisKey,
+                case: None,
                 reason: REASON,
             },
             SkipOverride {
                 vector: "regtest/k1/qgpakaw4",
                 kind: AssertionKind::Resolve,
+                case: None,
                 reason: REASON,
             },
             SkipOverride {
                 vector: "mutinynet/x1/q5m2fh36",
                 kind: AssertionKind::UpdateCrypto,
+                case: None,
                 reason: REASON,
             },
             SkipOverride {
                 vector: "mutinynet/x1/q5m2fh36",
                 kind: AssertionKind::EndState,
+                case: None,
                 reason: REASON,
             },
         ];
@@ -2281,14 +2286,16 @@ mod tests {
         );
         for entry in LIVE_OVERRIDE {
             assert!(
-                expected_driven_with(entry.kind, &vectors, &[]).contains(entry.vector),
+                expected_driven_with(entry.kind, &vectors, &[])
+                    .contains(&RowKey::set(entry.vector)),
                 "{}: without the override the row is driven for {}, so the override changes \
                  something",
                 entry.vector,
                 entry.kind,
             );
             assert!(
-                !expected_driven_with(entry.kind, &vectors, LIVE_OVERRIDE).contains(entry.vector),
+                !expected_driven_with(entry.kind, &vectors, LIVE_OVERRIDE)
+                    .contains(&RowKey::set(entry.vector)),
                 "{}: a live override must remove the row from the {} expectation",
                 entry.vector,
                 entry.kind,
