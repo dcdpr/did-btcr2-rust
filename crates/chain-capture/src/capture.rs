@@ -222,6 +222,9 @@ pub struct CaptureOutcome {
     pub signals: usize,
     /// The chain tip the fixture pins.
     pub tip_height: u32,
+    /// Whether the capture was pinned to the set's `recordedTip` rather than
+    /// the live tip.
+    pub recorded_tip: bool,
     /// The confirmations check for this row.
     pub confirmations: ConfirmationsCheck,
     /// Where the fixture was written.
@@ -280,6 +283,7 @@ pub fn emit_to(
         empty_addresses: addresses.values().filter(|txs| txs.is_empty()).count(),
         signals: fixture.signals.len(),
         tip_height,
+        recorded_tip: false,
         confirmations: ConfirmationsCheck {
             expected: target.expected.confirmations(),
             observed: observed_confirmations,
@@ -326,6 +330,7 @@ pub fn emit_signals_to(
         empty_addresses: addresses.values().filter(|txs| txs.is_empty()).count(),
         signals: fixture.signals.len(),
         tip_height,
+        recorded_tip: true,
         confirmations: ConfirmationsCheck {
             expected: target.expected.confirmations(),
             observed: observed_confirmations,
@@ -759,19 +764,31 @@ fn render_summary(
     // A chain whose vectors state `confirmations` measures every one of them
     // against a single tip. The fixtures written above replay from their files
     // whatever the chain does next; the tip is stated so the operator knows
-    // what a later re-capture has to be taken against.
+    // what a later re-capture has to be taken against. A capture pinned to a
+    // set's `recordedTip` can be repeated for as long as the live tip is at or
+    // above it and the beacon has announced nothing above it, since the tool
+    // pins the same tip again and refuses either; an unpinned capture measures against the live tip, so once the
+    // chain has been mined on only a fresh unpack of the export reproduces it.
     let shared_tip = rows
         .iter()
         .filter_map(|(_, row)| row.as_ref().ok())
         .find(|outcome| outcome.confirmations.expected.is_some())
-        .map(|outcome| outcome.tip_height);
-    if let Some(tip) = shared_tip {
-        out.push_str(&format!(
+        .map(|outcome| (outcome.tip_height, outcome.recorded_tip));
+    match shared_tip {
+        Some((tip, true)) => out.push_str(&format!(
+            "  tip {tip}: every confirmations expectation captured above is measured \
+             against the set's recordedTip, {tip}. The fixtures replay from their files \
+             regardless; a re-capture works as long as the live tip is at or above the \
+             recordedTip and no announcement has been confirmed above it — the tool \
+             refuses either.\n"
+        )),
+        Some((tip, false)) => out.push_str(&format!(
             "  tip {tip}: every confirmations expectation captured above is measured \
              against this tip. The fixtures replay from their files regardless; to \
              re-capture a `{network_dir}` vector after this chain has been mined on, \
              start from a fresh unpack of the export.\n"
-        ));
+        )),
+        None => {}
     }
     out
 }
@@ -1062,6 +1079,10 @@ mod tests {
         )
         .expect("a validated capture is written");
         assert!(
+            !outcome.recorded_tip,
+            "a capture without signals.json measures against the live tip"
+        );
+        assert!(
             outcome
                 .path
                 .starts_with(std::fs::canonicalize(&root).expect("the scratch root resolves")),
@@ -1318,6 +1339,7 @@ mod tests {
             empty_addresses: 1,
             signals: 1,
             tip_height: 212,
+            recorded_tip: false,
             confirmations,
             path: PathBuf::from("/fixtures/chain").join(format!("{id}.json")),
         }
@@ -1424,6 +1446,34 @@ mod tests {
         assert!(
             !summary.to_lowercase().contains("do not mine"),
             "mining is not forbidden: the fixtures replay from their files: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_recorded_tip_session_footer_states_the_recorded_tip_rule() {
+        let mut pinned = sample_outcome(
+            "signet/k1/qyp5h7kz",
+            ConfirmationsCheck {
+                expected: Some(4),
+                observed: Some(4),
+            },
+        );
+        pinned.recorded_tip = true;
+        let rows = vec![("signet/k1/qyp5h7kz".to_string(), Ok(pinned))];
+        let summary = render_summary("signet", "https://mempool.space/signet/api", &rows);
+
+        assert!(summary.contains("tip 212"), "{summary}");
+        assert!(
+            summary.contains("recordedTip"),
+            "a pinned session names the tip it was pinned to: {summary}"
+        );
+        assert!(
+            summary.contains("at or above"),
+            "a pinned session states when a re-capture works: {summary}"
+        );
+        assert!(
+            !summary.contains("fresh unpack"),
+            "a public chain has no export to unpack: {summary}"
         );
     }
 
@@ -2190,6 +2240,7 @@ mod tests {
 
             let outcome = set.capture().expect("the set captures");
             assert_eq!(outcome.tip_height, RECORDED_TIP);
+            assert!(outcome.recorded_tip, "the capture is pinned to recordedTip");
             assert_eq!(outcome.signals, 1);
             assert_eq!(
                 outcome.confirmations,
