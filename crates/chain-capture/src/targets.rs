@@ -844,16 +844,16 @@ fn malformed(vector: &str, path: &Path, detail: &str) -> TargetError {
 const TARGET_OPTIONS: [&str; 3] = ["versionId", "versionTime", "minConf"];
 
 /// Refuse a main resolve input that asks for a target condition or a
-/// confirmation depth.
+/// confirmation depth, because this tool cannot yet capture such a resolve.
 ///
 /// Capture resolves the main pair with its sidecar and the pinned tip and
 /// nothing else ([`crate::capture::resolution_options_for`]). The core crate's
 /// replay honours `versionId`, `versionTime` and `minConf` wherever an input
 /// carries them, so a main input carrying one would have capture validate a
 /// different resolve from the one replay runs, and the refuse-to-write gate
-/// could refuse a valid set or bless a recording of another walk. The test
-/// suite puts those options in the numbered `resolve/NN/` cases, which are
-/// replayed off the main pair's capture and never captured themselves.
+/// could refuse a valid set or bless a recording of another walk. This is a
+/// limitation of the capture, not a defect in the set: capturing it needs
+/// this tool extended to resolve with the input's options.
 fn refuse_target_options(vector: &str, path: &Path, input: &Value) -> Result<(), TargetError> {
     match TARGET_OPTIONS
         .into_iter()
@@ -864,10 +864,11 @@ fn refuse_target_options(vector: &str, path: &Path, input: &Value) -> Result<(),
             vector,
             path,
             &format!(
-                "the main resolve input sets `resolutionOptions.{option}`; this tool captures \
-                 the main resolve with only its sidecar and the recorded tip, so a capture \
-                 would validate a different resolve from the one the suite replays — a \
-                 target condition or depth belongs in a numbered `resolve/NN/` case"
+                "the main resolve input sets `resolutionOptions.{option}`; this tool does not \
+                 yet capture a main resolve with a target option — it resolves the main pair \
+                 with only its sidecar and the recorded tip, so a capture would validate a \
+                 different resolve from the one the suite replays. Capturing such a set needs \
+                 this tool extended to resolve with the input's options."
             ),
         )),
     }
@@ -2094,11 +2095,18 @@ mod tests {
             load_in(&root, &set).expect("the set loads before the option is added");
             set_main_option(&root, &set, option, value.clone());
             match load_in(&root, &set) {
-                Err(TargetError::MalformedFixture { detail, .. }) => assert!(
-                    detail.contains(&format!("resolutionOptions.{option}"))
-                        && detail.contains("resolve/NN/"),
-                    "the refusal names the option and where it belongs: {detail}"
-                ),
+                Err(TargetError::MalformedFixture { detail, .. }) => {
+                    assert!(
+                        detail.contains(&format!("resolutionOptions.{option}"))
+                            && detail.contains("does not yet capture")
+                            && detail.contains("extended"),
+                        "the refusal names the option as a capture limitation: {detail}"
+                    );
+                    assert!(
+                        !detail.contains("resolve/NN/"),
+                        "the refusal does not blame the set's layout: {detail}"
+                    );
+                }
                 other => panic!("{option}: expected a refusal, got {other:?}"),
             }
 
