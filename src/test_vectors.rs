@@ -278,7 +278,8 @@ fn is_hex64(value: &str) -> bool {
 /// `recordedTip`. An entry's `update` N, when present, must name an update step
 /// the set has — `update/{NN}` in a numbered layout, or N = 1 for a flat
 /// `update/` — and an entry without `update` must name its `cohort`. The
-/// `txid`, `blockHash` and `signalBytes` are 64 lowercase hex.
+/// `txid`, `blockHash` and `signalBytes` are 64 lowercase hex, and no two
+/// entries share a `txid`.
 ///
 /// Duplicates are keyed on `update` alone: an entry repeating an earlier
 /// entry's `update` must set `duplicate: true`, push the same `signalBytes`,
@@ -330,6 +331,7 @@ pub(crate) fn parse_signals(
     }
 
     let mut first_announcement: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut first_txid: BTreeMap<&str, usize> = BTreeMap::new();
     for (index, entry) in entries.iter().enumerate() {
         for (member, value) in [
             ("txid", &entry.txid),
@@ -342,6 +344,14 @@ pub(crate) fn parse_signals(
                      {value:?}"
                 ));
             }
+        }
+        if let Some(first) = first_txid.insert(&entry.txid, index) {
+            return Err(format!(
+                "{ctx}: entries {first} and {index} both record transaction {} — one \
+                 transaction carries one Beacon Signal, so it has one entry; a repeated \
+                 announcement is a later transaction",
+                entry.txid
+            ));
         }
 
         let Some(update) = entry.update else {
@@ -6216,11 +6226,10 @@ fn signals_reject_duplicate_without_update() {
 /// push the same bytes.
 #[test]
 fn signals_never_pair_entries_without_update() {
+    let mut second = signal_entry(None, 300, Some(cohort_json()));
+    second["txid"] = serde_json::json!("a9".repeat(32));
     let signals = signals_from(
-        serde_json::json!([
-            signal_entry(None, 300, Some(cohort_json())),
-            signal_entry(None, 300, Some(cohort_json())),
-        ]),
+        serde_json::json!([signal_entry(None, 300, Some(cohort_json())), second]),
         &UpdateLayout::None,
     )
     .expect("two update-less cohort entries are independent");
@@ -6251,6 +6260,7 @@ fn signals_reject_malformed_hex() {
 fn signals_accept_a_flagged_duplicate() {
     let mut repeat = signal_entry(Some(1), 326, None);
     repeat["duplicate"] = serde_json::json!(true);
+    repeat["txid"] = serde_json::json!("a9".repeat(32));
     let signals = signals_from(
         serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
         &two_steps(),
@@ -6260,13 +6270,40 @@ fn signals_accept_a_flagged_duplicate() {
 }
 
 /// The same repeat without the flag is rejected.
+/// Two entries recording one transaction are malformed, named by both
+/// indices, whatever else they carry — a repeated announcement is a later
+/// transaction, so even a flagged duplicate needs its own txid.
 #[test]
-fn signals_reject_an_unflagged_repeat() {
+fn signals_reject_a_repeated_txid() {
+    let mut repeat = signal_entry(Some(1), 326, None);
+    repeat["duplicate"] = serde_json::json!(true);
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
+        &two_steps(),
+    )
+    .expect_err("two entries cannot record one transaction");
+    assert!(
+        err.contains("entries 0 and 1") && err.contains(&"a1".repeat(32)),
+        "the message names both entries and the transaction: {err}"
+    );
+
     let err = signals_from(
         serde_json::json!([
-            signal_entry(Some(1), 300, None),
-            signal_entry(Some(1), 326, None)
+            signal_entry(None, 300, Some(cohort_json())),
+            signal_entry(None, 300, Some(cohort_json())),
         ]),
+        &UpdateLayout::None,
+    )
+    .expect_err("cohort entries cannot share a transaction either");
+    assert!(err.contains("entries 0 and 1"), "{err}");
+}
+
+#[test]
+fn signals_reject_an_unflagged_repeat() {
+    let mut repeat = signal_entry(Some(1), 326, None);
+    repeat["txid"] = serde_json::json!("a9".repeat(32));
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
         &two_steps(),
     )
     .expect_err("a repeated update needs duplicate: true");
@@ -6291,6 +6328,7 @@ fn signals_reject_duplicate_on_a_first_occurrence() {
 fn signals_reject_a_duplicate_with_different_signal_bytes() {
     let mut repeat = signal_entry(Some(1), 326, None);
     repeat["duplicate"] = serde_json::json!(true);
+    repeat["txid"] = serde_json::json!("a9".repeat(32));
     repeat["signalBytes"] = serde_json::json!("d4".repeat(32));
     let err = signals_from(
         serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
@@ -6306,6 +6344,7 @@ fn signals_reject_a_duplicate_not_above_the_first() {
     for height in [300, 299] {
         let mut repeat = signal_entry(Some(1), height, None);
         repeat["duplicate"] = serde_json::json!(true);
+        repeat["txid"] = serde_json::json!("a9".repeat(32));
         let err = signals_from(
             serde_json::json!([signal_entry(Some(1), 300, None), repeat]),
             &two_steps(),

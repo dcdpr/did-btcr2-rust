@@ -661,7 +661,9 @@ fn is_hex64(value: &str) -> bool {
 ///
 /// - the file is a bare array of at least one entry, all agreeing on
 ///   `recordedTip`;
-/// - `txid`, `blockHash` and `signalBytes` are 64 lowercase hex;
+/// - `txid`, `blockHash` and `signalBytes` are 64 lowercase hex, and no two
+///   entries share a `txid` (the gate would otherwise report the second as a
+///   signal not on chain, pointing at the chain instead of the file);
 /// - `update` is optional, but an entry without it must carry `cohort`, and
 ///   `duplicate` on an entry without `update` is malformed;
 /// - an entry carrying a cohort is refused as unsupported (an aggregated signal
@@ -685,6 +687,7 @@ fn parse_signals(vector: &str, path: &Path, raw: &Value) -> Result<CaptureSignal
     }
 
     let mut entries = Vec::with_capacity(array.len());
+    let mut first_txid: BTreeMap<String, usize> = BTreeMap::new();
     for (index, raw_entry) in array.iter().enumerate() {
         let entry: RawSignalEntry = serde_json::from_value(raw_entry.clone())
             .map_err(|e| bad(format!("entry {index} is not a signal entry ({e})")))?;
@@ -698,6 +701,14 @@ fn parse_signals(vector: &str, path: &Path, raw: &Value) -> Result<CaptureSignal
                     "entry {index} {member} must be 64 lowercase hex characters, got {value:?}"
                 )));
             }
+        }
+        if let Some(first) = first_txid.insert(entry.txid.clone(), index) {
+            return Err(bad(format!(
+                "entries {first} and {index} both record transaction {} — one transaction \
+                 carries one Beacon Signal, so it has one entry; a repeated announcement is a \
+                 later transaction",
+                entry.txid
+            )));
         }
         if entry.update.is_none() {
             if entry.cohort.is_none() {
@@ -1750,6 +1761,29 @@ mod tests {
             entry(Some(1), 0xa2, 326, 0x11, 330),
         ])));
         assert!(detail.contains("duplicate"), "{detail}");
+    }
+
+    #[test]
+    fn signals_record_refuses_a_repeated_txid() {
+        // A flagged duplicate at a higher block is otherwise well-formed; it is
+        // the shared txid that the record refuses, naming both entries.
+        let mut repeat = entry(Some(1), 0xa1, 326, 0x11, 330);
+        repeat["duplicate"] = serde_json::json!(true);
+        let detail = malformed_detail(parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 330),
+            repeat
+        ])));
+        assert!(
+            detail.contains("entries 0 and 1") && detail.contains(&"a1".repeat(32)),
+            "the refusal names both entries and the transaction: {detail}"
+        );
+
+        // Refused as malformed before a cohort is refused as unsupported.
+        let detail = malformed_detail(parse(serde_json::json!([
+            cohort_entry(0xc1),
+            cohort_entry(0xc1)
+        ])));
+        assert!(detail.contains("entries 0 and 1"), "{detail}");
     }
 
     #[test]
