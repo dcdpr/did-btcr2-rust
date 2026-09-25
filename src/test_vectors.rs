@@ -678,6 +678,12 @@ fn assert_signals_consistent(fixture: &ChainFixture, vector_id: &str) {
 /// Checked here so it fails as what it is: a problem with the fixture. Updates
 /// sharing a `targetVersionId` (a late-publishing fork) are not ordered against
 /// each other.
+///
+/// A set that carries `signals.json` is checked by the exact match of its
+/// replayed announcements against that file ([`signals_match`]) instead, and
+/// its capture carries no sidecar, so this check does not run for it: the
+/// regenerated suite ships sets that break this ordering on purpose (a
+/// duplicate at a later height, an announcement below the current height).
 fn assert_version_and_height_agree(fixture: &ChainFixture, vector_id: &str, rerun: &str) {
     let Some(applied) = fixture.applied_update_hash() else {
         return;
@@ -770,6 +776,201 @@ pub(crate) fn read_chain_fixture_in(chain_root: &Path, vector_id: &str) -> Chain
     });
     assert_signals_consistent(&fixture, vector_id);
     fixture
+}
+
+/// One Beacon Signal on chain, as the exact-match check between a set's
+/// `signals.json` and its replayed chain compares it: which transaction, in
+/// which block, pushing which 32 bytes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Announcement {
+    /// The signalling transaction, 64 lowercase hex.
+    pub(crate) txid: String,
+    /// The height of the block confirming it.
+    pub(crate) block_height: u32,
+    /// The hash of the block confirming it, 64 lowercase hex.
+    pub(crate) block_hash: String,
+    /// The 32 bytes its last output pushes, 64 lowercase hex.
+    pub(crate) signal_bytes: String,
+}
+
+impl fmt::Display for Announcement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "txid {} at block {} ({}) pushing {}",
+            self.txid, self.block_height, self.block_hash, self.signal_bytes
+        )
+    }
+}
+
+impl From<&SignalEntry> for Announcement {
+    fn from(entry: &SignalEntry) -> Self {
+        Self {
+            txid: entry.txid.clone(),
+            block_height: entry.block_height,
+            block_hash: entry.block_hash.clone(),
+            signal_bytes: entry.signal_bytes.clone(),
+        }
+    }
+}
+
+/// The 32 bytes `tx` announces, when its LAST output is exactly
+/// `OP_RETURN <32 bytes>`.
+///
+/// Mirrors the resolver's Find Beacon Signals and the capture tool's gate: last
+/// output only, the whole script must parse cleanly, and it must be exactly two
+/// instructions pushing exactly 32 bytes.
+fn announced_bytes(tx: &Transaction) -> Option<[u8; 32]> {
+    use esploda::bitcoin::{opcodes::all::OP_RETURN, script::Instruction};
+
+    let txout = tx.outputs.last()?;
+    let ops = txout
+        .script_pubkey
+        .instructions()
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let [Instruction::Op(OP_RETURN), Instruction::PushBytes(bytes)] = ops[..] else {
+        return None;
+    };
+    <[u8; 32]>::try_from(bytes.as_bytes()).ok()
+}
+
+/// Every announcement the replayed chain serves: one per confirmed transaction,
+/// across every captured address, whose last output is `OP_RETURN <32 bytes>`.
+/// An unconfirmed announcement is left out, as the resolver leaves it out. The
+/// result is sorted.
+pub(crate) fn fixture_announcements(fixture: &ChainFixture) -> Vec<Announcement> {
+    let mut announcements: Vec<Announcement> = fixture
+        .addresses
+        .values()
+        .flatten()
+        .filter_map(|tx| {
+            let bytes = announced_bytes(tx)?;
+            let Status::Confirmed {
+                block_height,
+                block_hash,
+                ..
+            } = &tx.status
+            else {
+                return None;
+            };
+            Some(Announcement {
+                txid: tx.txid.to_string(),
+                block_height: *block_height,
+                block_hash: block_hash.to_string(),
+                signal_bytes: hex::encode(bytes),
+            })
+        })
+        .collect();
+    announcements.sort();
+    announcements
+}
+
+/// `signals.json` and the replayed chain agree exactly: the same announcements,
+/// counted with multiplicity, on `txid`, `blockHeight`, `blockHash` and
+/// `signalBytes`.
+///
+/// Multiset equality is what makes a flagged duplicate — a second entry for an
+/// update already announced — a real claim: it must be matched by a second
+/// announcement on chain, and a chain holding only the first fails. `Err` names
+/// the first announcement one side has and the other lacks.
+pub(crate) fn signals_match(
+    entries: &[SignalEntry],
+    announcements: &[Announcement],
+) -> Result<(), String> {
+    let mut balance: BTreeMap<Announcement, i64> = BTreeMap::new();
+    for entry in entries {
+        *balance.entry(Announcement::from(entry)).or_default() += 1;
+    }
+    for announcement in announcements {
+        *balance.entry(announcement.clone()).or_default() -= 1;
+    }
+    match balance.into_iter().find(|(_, count)| *count != 0) {
+        None => Ok(()),
+        Some((announcement, count)) if count > 0 => Err(format!(
+            "signals.json records {announcement}, which the replayed chain does not serve \
+             ({count} more in signals.json than on chain)"
+        )),
+        Some((announcement, count)) => Err(format!(
+            "the replayed chain serves {announcement}, which signals.json does not record \
+             ({} more on chain than in signals.json)",
+            -count
+        )),
+    }
+}
+
+/// A resolved `confirmations` is at least the recorded one.
+///
+/// The recorded value was taken at the set's recorded tip; a replay served at
+/// that tip or later can only see as many confirmations or more, so below is a
+/// failure and above is not. `recorded` absent asserts nothing here: the
+/// older layout states no number on some sets, and the driver checks those by
+/// provenance instead.
+pub(crate) fn confirmations_at_least(
+    resolved: Option<u32>,
+    recorded: Option<u64>,
+) -> Result<(), String> {
+    let Some(recorded) = recorded else {
+        return Ok(());
+    };
+    match resolved {
+        Some(resolved) if u64::from(resolved) >= recorded => Ok(()),
+        Some(resolved) => Err(format!(
+            "resolved confirmations {resolved} is below the recorded {recorded}"
+        )),
+        None => Err(format!(
+            "resolved confirmations is absent; the output records {recorded}"
+        )),
+    }
+}
+
+/// A resolved `confirmations` equals the recorded one: the stricter check for a
+/// set whose replay tip is pinned to the recorded tip, where the value is fixed
+/// and an over-report is as wrong as an under-report.
+pub(crate) fn confirmations_exact(
+    resolved: Option<u32>,
+    recorded: Option<u64>,
+) -> Result<(), String> {
+    if resolved.map(u64::from) == recorded {
+        Ok(())
+    } else {
+        Err(format!(
+            "resolved confirmations {} must equal the recorded {}",
+            resolved.map_or("absent".to_string(), |r| r.to_string()),
+            recorded.map_or("absent".to_string(), |r| r.to_string()),
+        ))
+    }
+}
+
+/// The resolved `versionId` matches an expected positive outcome.
+///
+/// When the output encodes `versionId` as the ASCII string the specification
+/// requires, the comparison is between strings, with no numeric coercion: a
+/// recorded `"03"` does not match a resolved 3. When the output encodes it as a
+/// JSON number (the known defect pinned by [`NUMBER_ENCODED_VERSION_ID`]), the
+/// numbers are compared. An error outcome never matches.
+pub(crate) fn version_id_matches(resolved: u64, expected: &Outcome) -> Result<(), String> {
+    match expected {
+        Outcome::Positive {
+            version_id_string: Some(recorded),
+            ..
+        } => {
+            let resolved = resolved.to_string();
+            (resolved == *recorded).then_some(()).ok_or_else(|| {
+                format!("resolved versionId \"{resolved}\" must equal the recorded \"{recorded}\"")
+            })
+        }
+        Outcome::Positive {
+            version_id: recorded,
+            version_id_string: None,
+            ..
+        } => (resolved == *recorded).then_some(()).ok_or_else(|| {
+            format!("resolved versionId {resolved} must equal the recorded {recorded}")
+        }),
+        Outcome::Error { code } => Err(format!(
+            "resolved versionId {resolved}, but the output records error {code}"
+        )),
+    }
 }
 
 /// Read `dir`, distinguishing "the path is not there" from "the path is there
@@ -6459,4 +6660,211 @@ fn shapes_bad_cohort_member_fails_discovery() {
         message.contains("shape-cohort-b") && message.contains("shape-cohort"),
         "{message}"
     );
+}
+
+// --- resolve comparison rules ---------------------------------------------------
+
+#[test]
+fn confirmations_at_least_accepts_equal_and_above() {
+    assert_eq!(confirmations_at_least(Some(7), Some(7)), Ok(()));
+    assert_eq!(confirmations_at_least(Some(8), Some(7)), Ok(()));
+}
+
+#[test]
+fn confirmations_at_least_rejects_below_naming_both_values() {
+    let err = confirmations_at_least(Some(6), Some(7)).expect_err("6 is below the recorded 7");
+    assert!(
+        err.contains("confirmations") && err.contains('6') && err.contains('7'),
+        "the message names both values: {err}"
+    );
+}
+
+#[test]
+fn confirmations_at_least_rejects_an_absent_resolved_value() {
+    let err = confirmations_at_least(None, Some(7)).expect_err("absent is not at least 7");
+    assert!(
+        err.contains('7'),
+        "the message names the recorded value: {err}"
+    );
+}
+
+#[test]
+fn confirmations_at_least_asserts_nothing_without_a_recorded_value() {
+    assert_eq!(confirmations_at_least(None, None), Ok(()));
+    assert_eq!(confirmations_at_least(Some(3), None), Ok(()));
+}
+
+#[test]
+fn exact_confirmations_reject_above_and_below() {
+    assert_eq!(confirmations_exact(Some(6), Some(6)), Ok(()));
+    let above = confirmations_exact(Some(6), Some(5)).expect_err("6 is not 5");
+    assert!(
+        above.contains("confirmations") && above.contains('6') && above.contains('5'),
+        "{above}"
+    );
+    assert!(confirmations_exact(Some(4), Some(5)).is_err());
+    assert!(confirmations_exact(None, Some(0)).is_err());
+}
+
+/// A positive outcome with the given `versionId` encodings.
+fn positive(version_id: u64, version_id_string: Option<&str>) -> Outcome {
+    Outcome::Positive {
+        version_id,
+        version_id_string: version_id_string.map(str::to_string),
+        deactivated: false,
+        confirmations: None,
+    }
+}
+
+#[test]
+fn version_id_matches_compares_the_string_encoding() {
+    assert_eq!(version_id_matches(3, &positive(3, Some("3"))), Ok(()));
+}
+
+#[test]
+fn version_id_matches_does_not_coerce_a_string() {
+    // `version_id` 3 is what a numeric read of "03" yields; the string compare
+    // must still refuse it.
+    let err = version_id_matches(3, &positive(3, Some("03"))).expect_err("\"3\" is not \"03\"");
+    assert!(err.contains("\"03\"") && err.contains("\"3\""), "{err}");
+}
+
+#[test]
+fn version_id_matches_keeps_the_number_path() {
+    assert_eq!(version_id_matches(2, &positive(2, None)), Ok(()));
+    assert!(version_id_matches(3, &positive(2, None)).is_err());
+}
+
+#[test]
+fn version_id_matches_refuses_an_error_outcome() {
+    let err = version_id_matches(
+        2,
+        &Outcome::Error {
+            code: "NOT_FOUND".to_string(),
+        },
+    )
+    .expect_err("an expected error never matches a resolved version");
+    assert!(err.contains("NOT_FOUND"), "{err}");
+}
+
+/// A parsed `signals.json` entry for `update`, announced in `txid` at
+/// `block_height`, pushing `bytes`.
+fn parsed_entry(update: u64, duplicate: bool, txid: &str, block_height: u32) -> SignalEntry {
+    let mut json = signal_entry(Some(update), block_height, None);
+    json["txid"] = serde_json::json!(txid);
+    json["duplicate"] = serde_json::json!(duplicate);
+    serde_json::from_value(json).expect("the synthetic entry deserializes")
+}
+
+/// The announcement an entry claims, as the chain would serve it.
+fn announcement_of(entry: &SignalEntry) -> Announcement {
+    Announcement::from(entry)
+}
+
+#[test]
+fn signals_match_accepts_equal_sets_in_any_order() {
+    let first = parsed_entry(1, false, &"a1".repeat(32), 300);
+    let second = parsed_entry(2, false, &"a2".repeat(32), 310);
+    let chain = vec![announcement_of(&second), announcement_of(&first)];
+    assert_eq!(signals_match(&[first, second], &chain), Ok(()));
+}
+
+#[test]
+fn signals_match_accepts_a_flagged_duplicate_matched_on_chain() {
+    let first = parsed_entry(1, false, &"a1".repeat(32), 300);
+    let again = parsed_entry(1, true, &"a9".repeat(32), 326);
+    let chain = vec![announcement_of(&first), announcement_of(&again)];
+    assert_eq!(signals_match(&[first, again], &chain), Ok(()));
+}
+
+#[test]
+fn signals_match_rejects_a_chain_announcement_the_file_lacks() {
+    let first = parsed_entry(1, false, &"a1".repeat(32), 300);
+    let again = parsed_entry(1, true, &"a9".repeat(32), 326);
+    let chain = vec![announcement_of(&first), announcement_of(&again)];
+    let err = signals_match(&[first], &chain).expect_err("the duplicate is unrecorded");
+    assert!(
+        err.contains("signals.json") && err.contains(&"a9".repeat(32)) && err.contains("326"),
+        "the message names the extra announcement: {err}"
+    );
+}
+
+#[test]
+fn signals_match_rejects_an_entry_the_chain_does_not_serve() {
+    let first = parsed_entry(1, false, &"a1".repeat(32), 300);
+    let second = parsed_entry(2, false, &"a2".repeat(32), 310);
+    let chain = vec![announcement_of(&first)];
+    let err = signals_match(&[first, second], &chain).expect_err("entry 2 is not on chain");
+    assert!(
+        err.contains("signals.json") && err.contains(&"a2".repeat(32)),
+        "the message names the missing announcement: {err}"
+    );
+}
+
+#[test]
+fn signals_match_compares_the_block_hash_too() {
+    let entry = parsed_entry(1, false, &"a1".repeat(32), 300);
+    let mut moved = announcement_of(&entry);
+    moved.block_hash = "ff".repeat(32);
+    assert!(signals_match(&[entry], &[moved]).is_err());
+}
+
+#[test]
+fn fixture_announcements_reads_every_address_and_only_signals() {
+    let hash_a = "7a".repeat(32);
+    let hash_b = "7b".repeat(32);
+    let mut unconfirmed = chain_signal_tx_json(&"7c".repeat(32), &"c3".repeat(32), 0, 0);
+    unconfirmed["status"] = serde_json::json!({ "confirmed": false });
+    let mut not_a_signal = chain_signal_tx_json(&hash_a, &"c4".repeat(32), 661, 1_774_015_990);
+    not_a_signal["vout"] = serde_json::json!([
+        { "scriptpubkey": format!("6a20{hash_a}"), "value": 0 },
+        { "scriptpubkey": "0014441b9e2ed446093690fb5cb19cb58932c5b1a3ea", "value": 1000 },
+    ]);
+    let fixture = chain_fixture_envelope(
+        serde_json::json!([]),
+        serde_json::json!({
+            "bcrt1qfirst": [chain_signal_tx_json(&hash_a, &"a1".repeat(32), 660, 1_774_015_945)],
+            "bcrt1qsecond": [
+                chain_signal_tx_json(&hash_b, &"b1".repeat(32), 662, 1_774_016_000),
+                unconfirmed,
+                not_a_signal,
+            ],
+            "bcrt1qempty": [],
+        }),
+    );
+    let got = fixture_announcements(&fixture);
+    assert_eq!(
+        got,
+        vec![
+            Announcement {
+                txid: "a1".repeat(32),
+                block_height: 660,
+                block_hash: "00".repeat(32),
+                signal_bytes: hash_a,
+            },
+            Announcement {
+                txid: "b1".repeat(32),
+                block_height: 662,
+                block_hash: "00".repeat(32),
+                signal_bytes: hash_b,
+            },
+        ],
+        "one announcement per confirmed OP_RETURN-last transaction, across addresses"
+    );
+}
+
+#[test]
+fn fixture_announcements_of_the_options_chain_equal_its_signals_json() {
+    let corpus = Corpus::synthetic("options");
+    let vectors = discover_in(&corpus);
+    let vector = &vectors[0];
+    let fixture = read_chain_fixture_in(&corpus.chain, &vector.id);
+    let announcements = fixture_announcements(&fixture);
+    assert_eq!(
+        announcements.len(),
+        3,
+        "the minted chain announces three updates"
+    );
+    let entries = &vector.signals.as_ref().expect("signals.json").entries;
+    assert_eq!(signals_match(entries, &announcements), Ok(()));
 }

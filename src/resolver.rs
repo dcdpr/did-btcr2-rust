@@ -1120,12 +1120,15 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_vectors::{
-        AssertionKind, ChainFixture, Corpus, DRIVEN_FLOOR, FIXTURES_WITHOUT_SIGNAL_BLOCKS,
-        NUMBER_ENCODED_VERSION_ID, RowKey, SKIP_OVERRIDES, SkipOverride, Vector, VectorIdType,
-        discover_in, expected_driven_with, field_bool, field_hex, field_nonzero_version_id,
-        field_str, field_u64, field_version_id, network_dirs_with_vectors, read_chain_fixture,
-        read_fixture_or_skip, reconcile_driven_with, redundant_overrides, render_minted_summary,
-        render_summary_with, stale_overrides, test_suite_checked_out, unclassified_rows_with,
+        AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR, ERROR_CODE_DIVERGENCES,
+        FIXTURES_WITHOUT_SIGNAL_BLOCKS, NUMBER_ENCODED_VERSION_ID, Outcome, RowKey, SKIP_OVERRIDES,
+        SkipOverride, Vector, VectorIdType, confirmations_at_least, confirmations_exact,
+        discover_in, expected_driven_with, expected_emitted_code, field_hex,
+        field_nonzero_version_id, field_str, field_u64, field_version_id, fixture_announcements,
+        network_dirs_with_vectors, read_chain_fixture, read_chain_fixture_in, read_fixture_or_skip,
+        reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
+        signals_match, stale_overrides, test_suite_checked_out, unclassified_rows_with,
+        unused_divergences, version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -1383,46 +1386,54 @@ mod tests {
     /// `created` are environment-derived and drift, so they are asserted only by
     /// presence/type when present, NEVER by literal value. `confirmations` stays
     /// type-only in the whitelist that runs for EVERY discovered vector, and is
-    /// additionally asserted on a driven ON-CHAIN row — by VALUE against the
-    /// vector's stated number on the frozen regtest chain, and by PROVENANCE
-    /// (derived from the most-recently-applied update's captured block height)
-    /// on the still-mining mutinynet chain, which states none. It is a fixed
-    /// input there rather than a drifting observation because the captured tip
-    /// is pinned into the resolution options. mutinynet vectors omit
-    /// `confirmations` entirely and carry `created: null`; indexing a missing key
-    /// yields `Value::Null`, which the `is_null` guards already tolerate.
-    /// `versionId` carries three separate checks: it is READ through
-    /// `version_id_u64`, which accepts the regtest string encoding and the
-    /// mutinynet number encoding and panics on anything else; its ENCODING is
-    /// pinned to `NUMBER_ENCODED_VERSION_ID`, the explicit set of known-bad
-    /// fixtures, in both directions; and on a driven row the resolved value is
-    /// COMPARED against the vector's stated one. That comparison IS a
-    /// cross-check with independent operands on the seven rows fed from captured
-    /// chain fixtures: their stated version is 2, and the resolver only reaches
-    /// it by applying an update announced by a captured beacon transaction. The
-    /// crate's own emit-a-string / reject-a-number contract is pinned by the
-    /// fixture-independent `DocumentMetadata` round-trip test in `document.rs`.
+    /// additionally asserted on a driven ON-CHAIN row: as AT LEAST the vector's
+    /// stated number where it states one, and by PROVENANCE (derived from the
+    /// most-recently-applied update's captured block height) on the older
+    /// mutinynet vectors, which state none. It is a fixed input rather than a
+    /// drifting observation because the captured tip is pinned into the
+    /// resolution options. `versionId` carries three separate checks: it is
+    /// READ through `version_id_u64`, which accepts the specification's string
+    /// encoding and the known-defective number encoding and panics on anything
+    /// else; its ENCODING is pinned to `NUMBER_ENCODED_VERSION_ID`, the explicit
+    /// set of known-bad fixtures, in both directions; and on a driven row the
+    /// resolved value is COMPARED against the vector's stated one, as a string
+    /// where the vector encodes it as one. The crate's own emit-a-string /
+    /// reject-a-number contract is pinned by the fixture-independent
+    /// `DocumentMetadata` round-trip test in `document.rs`.
     ///
-    /// RESOLUTION OPTIONS ARE ASSEMBLED IN ONE PLACE, from the vector's
-    /// `resolutionOptions.sidecar` object verbatim, matching the capture tool's
-    /// `resolution_options_for`. EXTERNAL (x1) genesis therefore comes from
-    /// `resolve/input.json.resolutionOptions.sidecar.genesisDocument`, which
-    /// `resolve_external` bridges into the initial document itself.
-    /// `other.json.genesisDocument` exists for every external vector and is
-    /// byte-identical where both are present, but reading it would hand the
-    /// resolver a genesis document the vector intends to be fetched from
-    /// content-addressed storage — asserting resolve logic while silently
-    /// bypassing the delivery mechanism and leaving no row to mark the gap.
-    /// Every row that remains driven has a sidecar genesis document; a missing
-    /// one on a driven row is a loud failure, not a fallback. KEY (k1)
-    /// resolution needs no sidecar: the genesis document is generated
-    /// deterministically from the DID's embedded public key.
+    /// A main pair that records an error asserts its CODE, mapped through
+    /// `ERROR_CODE_DIVERGENCES`. Resolution options are assembled in one place,
+    /// [`case_options`], for the main pair and every `resolve/NN/` case alike.
     #[test]
     fn op_vectors_resolve_matches_output() {
         let Some(vectors) = discovered_vectors_or_skip() else {
             return;
         };
-        drive_resolve(&vectors, SKIP_OVERRIDES);
+        drive_resolve_with(&vectors, SKIP_OVERRIDES, ERROR_CODE_DIVERGENCES);
+        assert_divergences_used(&vectors);
+    }
+
+    /// RESOLVE-OPTION driver over the checked-out suite: every `resolve/NN/`
+    /// case the ledger expects driven, one row per case
+    /// ([`drive_resolve_options_with`]).
+    #[test]
+    fn op_vectors_resolve_cases_match_output() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        drive_resolve_options_with(&vectors, SKIP_OVERRIDES, ERROR_CODE_DIVERGENCES);
+        assert_divergences_used(&vectors);
+    }
+
+    /// Every `ERROR_CODE_DIVERGENCES` entry is used by a driven negative row of
+    /// the checked-out suite, so an entry cannot outlive the vector it excused.
+    fn assert_divergences_used(vectors: &[Vector]) {
+        let unused = unused_divergences(vectors, SKIP_OVERRIDES, ERROR_CODE_DIVERGENCES);
+        assert!(
+            unused.is_empty(),
+            "unused ERROR_CODE_DIVERGENCES entries:\n{}",
+            unused.join("\n")
+        );
     }
 
     /// The `versionTime` a replay probe resolves at: one second before the
@@ -1468,36 +1479,325 @@ mod tests {
         .unwrap_or_else(|e| panic!("{id}: the resolved document must round-trip: {e}"))
     }
 
-    /// The RESOLVE driver body, over an explicit override table so the same code
-    /// path can be exercised with a hand-written skip in place.
+    /// The code an error carries: the fragment after `#` of its problem-details
+    /// `type`, e.g. `NOT_FOUND` out of `https://www.w3.org/ns/did#NOT_FOUND`.
+    ///
+    /// An error with no problem details is a failure of the harness or the
+    /// driver, not an answer the specification defines, so it panics rather than
+    /// being compared against an expected code.
+    fn emitted_code<E: ProblemDetails + std::fmt::Display>(err: &E, ctx: &str) -> String {
+        let details = err
+            .details()
+            .unwrap_or_else(|| panic!("{ctx}: `{err}` is a driver error, not a spec error code"));
+        let kind = details["type"].as_str().unwrap_or_else(|| {
+            panic!("{ctx}: the problem details of `{err}` carry no string `type`: {details}")
+        });
+        kind.rsplit_once('#')
+            .map(|(_, code)| code.to_string())
+            .unwrap_or_else(|| panic!("{ctx}: problem-details type `{kind}` has no `#CODE`"))
+    }
+
+    /// The chain snapshot a set's resolves replay, or `None` for a set resolved
+    /// with no signals fed.
+    ///
+    /// A set that carries `signals.json` always replays its capture, even for a
+    /// genesis-state case: `confirmations: 0` needs the recorded tip. Before
+    /// anything is driven, the announcements that capture serves must equal
+    /// `signals.json` exactly ([`signals_match`]), so a replay can never pass on
+    /// a chain other than the one the set records. A set without `signals.json`
+    /// keeps the older rule: it replays a capture only when its main pair
+    /// expects a version past genesis.
+    fn replay_fixture(vector: &Vector) -> Option<ChainFixture> {
+        let id = &vector.id;
+        if let Some(signals) = &vector.signals {
+            let fixture = read_chain_fixture_in(&vector.corpus.chain, id);
+            signals_match(&signals.entries, &fixture_announcements(&fixture)).unwrap_or_else(|e| {
+                panic!(
+                    "{id}: signals.json and the replayed chain disagree — {e}. Re-capture \
+                         the set rather than editing either file"
+                )
+            });
+            return Some(fixture);
+        }
+        vector
+            .expected_version_id()
+            .is_some_and(|version| version > 1)
+            .then(|| read_chain_fixture_in(&vector.corpus.chain, id))
+    }
+
+    /// The resolution options a resolve input asks for: its
+    /// `resolutionOptions.sidecar` verbatim, its target condition (`versionId`,
+    /// `versionTime`) and `minConf`, and the replay tip.
+    ///
+    /// ONE assembly for every vector shape and every case, matching
+    /// `chain_capture::capture::resolution_options_for` line for line.
+    /// `SidecarData::from_json_value` always builds `update_lookup_table` and
+    /// sets `genesis_document` from the wire `genesisDocument` field;
+    /// `resolve_external` bridges that into the initial document itself
+    /// (`document.rs`'s `resolve_external_bridges_genesis_document_from_serde_path`
+    /// proves it, and `SidecarData::initial_document` is documented there as
+    /// the legacy in-memory shortcut). The capture tool assembles options
+    /// exactly this way, and capture and replay MUST match — otherwise the
+    /// refuse-to-write gate can bless a fixture this suite then fails on.
+    ///
+    /// Do NOT reintroduce an `IntermediateDocument` branch for `x1` vectors.
+    /// `other.json.genesisDocument` exists for every external vector and is
+    /// byte-identical where both are present, but reading it would hand the
+    /// resolver a genesis document the vector intends to be fetched from
+    /// content-addressed storage — asserting resolve logic while silently
+    /// bypassing the delivery mechanism and leaving no row to mark the gap.
+    ///
+    /// Some vectors omit `resolutionOptions.sidecar` entirely (of the driven
+    /// rows, `mutinynet/k1/q5puld7y`): a resolve with nothing supplied out of
+    /// band. Indexing yields `Value::Null`, which does not deserialize, so an
+    /// absent sidecar is normalized to `{}` — the same empty `SidecarData`. That
+    /// is a normalization of the INPUT VALUE, not a second assembly. The capture
+    /// tool refuses an absent sidecar instead, because a capture validated
+    /// against zero updates would pass vacuously; a replay has nothing to be
+    /// vacuous about, since its whole expected output is asserted. A replayed
+    /// set must carry the object: its beacon signals announce update hashes
+    /// that are delivered out of band.
+    ///
+    /// Pinning the replay tip is what makes `confirmations` a fixed input
+    /// rather than a moving observation. With no capture there is no tip, as
+    /// before.
+    fn case_options(
+        input: &serde_json::Value,
+        fixture: Option<&ChainFixture>,
+        ctx: &str,
+    ) -> ResolutionOptions {
+        let requested = &input["resolutionOptions"];
+        let sidecar_json = requested["sidecar"].clone();
+        assert!(
+            fixture.is_none() || sidecar_json.is_object(),
+            "{ctx}: a replayed resolve must carry a resolutionOptions.sidecar object — its \
+             beacon signals announce update hashes that are delivered out of band"
+        );
+        let sidecar_json = if sidecar_json.is_null() {
+            serde_json::json!({})
+        } else {
+            sidecar_json
+        };
+        let sidecar = SidecarData::from_json_value(sidecar_json)
+            .unwrap_or_else(|e| panic!("{ctx}: resolutionOptions.sidecar must parse: {e}"));
+
+        let version_id = (!requested["versionId"].is_null()).then(|| {
+            let raw = field_str(input, "resolutionOptions.versionId", ctx);
+            raw.parse::<NonZeroU64>().unwrap_or_else(|e| {
+                panic!("{ctx}: resolutionOptions.versionId {raw:?} is not a positive integer: {e}")
+            })
+        });
+        let version_time = (!requested["versionTime"].is_null()).then(|| {
+            let raw = field_str(input, "resolutionOptions.versionTime", ctx);
+            DateTime::parse_from_rfc3339(raw)
+                .unwrap_or_else(|e| {
+                    panic!("{ctx}: resolutionOptions.versionTime {raw:?} is not RFC 3339: {e}")
+                })
+                .with_timezone(&Utc)
+        });
+        let min_conf = (!requested["minConf"].is_null()).then(|| {
+            let raw = field_u64(input, "resolutionOptions.minConf", ctx);
+            u32::try_from(raw)
+                .ok()
+                .and_then(NonZeroU32::new)
+                .unwrap_or_else(|| {
+                    panic!("{ctx}: resolutionOptions.minConf {raw} is not a positive u32")
+                })
+        });
+
+        ResolutionOptions {
+            sidecar_data: Some(sidecar),
+            chain_tip_height: fixture.map(|f| f.tip_height),
+            version_id,
+            version_time,
+            min_conf,
+            ..test_options()
+        }
+    }
+
+    /// [`resolve_with_no_signals`] surfacing a walk error instead of panicking,
+    /// for a case that expects one.
+    fn try_resolve_with_no_signals(resolver: Resolver) -> Result<ResolutionResult, Error> {
+        let ResolverState::Requests(next_state, _beacons) = resolver.resolve()? else {
+            panic!("expected Requests from Init step");
+        };
+        match next_state.process_responses(HashMap::new()).resolve()? {
+            ResolverState::Resolved(result) => Ok(result),
+            ResolverState::Requests(..) => panic!("expected Resolved with no signals"),
+            ResolverState::BlockRequests(..) => {
+                panic!("unexpected block request: no signal was fed, so no update applied")
+            }
+        }
+    }
+
+    /// Drive one resolve pair — the main `resolve/` pair or one `resolve/NN/`
+    /// case — and assert its expected outcome. Returns the resolved
+    /// `confirmations` (`None` for an expected error), so a caller can assert
+    /// more strictly than the corpus rule does.
+    ///
+    /// AN EXPECTED ERROR asserts the CODE only: the error's problem-details
+    /// type fragment must equal the recorded code mapped through
+    /// `divergences` ([`expected_emitted_code`]). The recorded `errorMessage`
+    /// is another implementation's text and is not compared. A DID that does
+    /// not parse is an outcome too (`INVALID_DID` / `METHOD_NOT_SUPPORTED`), as
+    /// is an error `Document::resolve` raises before any request
+    /// (`INVALID_OPTIONS`).
+    ///
+    /// A RESOLVED DOCUMENT compares four things. `didDocument` in full, on every
+    /// content field and with no masking. `versionId` through
+    /// [`version_id_matches`]: as a string when the output encodes it as one.
+    /// `deactivated` by value. `confirmations` as AT LEAST the recorded number
+    /// ([`confirmations_at_least`]) — a recorded value was taken at the set's
+    /// recorded tip, and a later tip only adds confirmations. A replayed output
+    /// that records no `confirmations` (the older mutinynet layout) is checked
+    /// by PROVENANCE instead: the resolver's value must derive from the
+    /// most-recently-applied update's captured block. That is a consistency
+    /// check on a single-signal row, where there is only one height it could
+    /// have used, and a real "did it pick the LATEST?" test on a multi-signal
+    /// chain.
+    ///
+    /// Observation-dependent `updated` and `created` are never compared by
+    /// value.
+    fn drive_case(
+        vector: &Vector,
+        case_dir: &str,
+        outcome: &Outcome,
+        fixture: Option<&ChainFixture>,
+        divergences: &[CodeDivergence],
+    ) -> Option<u32> {
+        use crate::identifier::Did;
+
+        let id = &vector.id;
+        let ctx = format!("{id} {case_dir}");
+        let input = vector.fixture(&format!("{case_dir}/input.json"));
+        let output = vector.fixture(&format!("{case_dir}/output.json"));
+
+        let result: Result<ResolutionResult, String> =
+            match field_str(&input, "did", &ctx).parse::<Did>() {
+                Err(e) => Err(emitted_code(&Btcr2Error::from(e), &ctx)),
+                Ok(did) => match Document::resolve(&did, case_options(&input, fixture, &ctx)) {
+                    Err(e) => Err(emitted_code(&e, &ctx)),
+                    Ok(resolver) => match fixture {
+                        Some(f) => drive_to_resolved_from_capture(resolver, f, id),
+                        None => try_resolve_with_no_signals(resolver),
+                    }
+                    .map_err(|e| emitted_code(&e, &ctx)),
+                },
+            };
+
+        match outcome {
+            Outcome::Error { code } => {
+                let spec = expected_emitted_code(code, divergences);
+                match result {
+                    Err(emitted) => assert!(
+                        emitted == spec,
+                        "{ctx}: expected error {code} (emit {spec}), got {emitted}"
+                    ),
+                    Ok(resolved) => panic!(
+                        "{ctx}: expected error {code} (emit {spec}), but the resolve succeeded \
+                         at versionId {}",
+                        resolved.document_metadata.version_id
+                    ),
+                }
+                None
+            }
+            Outcome::Positive {
+                deactivated,
+                confirmations,
+                ..
+            } => {
+                // The expected didDocument must parse as a conformant Document.
+                // `mutinynet/x1/qh66uy2s` makes the point: its expected document
+                // carries `service: []` and does not parse, corroborating the
+                // ledger's classification of that row as CAS-delivered and
+                // skipped.
+                Document::from_json_string(&output["didDocument"].to_string()).unwrap_or_else(
+                    |e| panic!("{ctx}/output.json didDocument must parse as a Document: {e}"),
+                );
+                let result = result.unwrap_or_else(|code| {
+                    panic!("{ctx}: expected a resolved document, got error {code}")
+                });
+
+                // Every content field — id, `@context`, verificationMethod,
+                // beacon services and endpoints, the four relationship sets.
+                assert_eq!(
+                    resolved_document_json(&result.document, &ctx),
+                    output["didDocument"],
+                    "{ctx}: resolved didDocument content (incl. @context) must equal \
+                     output.json didDocument"
+                );
+                version_id_matches(result.document_metadata.version_id.get(), outcome)
+                    .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                assert_eq!(
+                    result.document_metadata.deactivated, *deactivated,
+                    "{ctx}: resolved deactivated must equal output.json \
+                     didDocumentMetadata.deactivated"
+                );
+
+                if let Some(f) = fixture {
+                    match confirmations {
+                        Some(_) => confirmations_at_least(
+                            result.document_metadata.confirmations,
+                            *confirmations,
+                        )
+                        .unwrap_or_else(|e| {
+                            panic!("{ctx}: {e} (replayed at tip {})", f.tip_height)
+                        }),
+                        None => {
+                            let signal = f.latest_signal().unwrap_or_else(|| {
+                                panic!("{ctx}: the captured fixture must carry a beacon signal")
+                            });
+                            let derived = f
+                                .tip_height
+                                .saturating_sub(signal.block_height)
+                                .saturating_add(1);
+                            assert_eq!(
+                                result.document_metadata.confirmations,
+                                Some(derived),
+                                "{ctx}: resolved confirmations must derive from the \
+                                 most-recently-applied update's block ({} at tip {})",
+                                signal.block_height,
+                                f.tip_height
+                            );
+                        }
+                    }
+                }
+                result.document_metadata.confirmations
+            }
+        }
+    }
+
+    /// The RESOLVE driver body (the main `resolve/` pair of every set), over
+    /// explicit override and error-code divergence tables so the same code path
+    /// can be exercised with a hand-written skip or a local divergence in place.
     ///
     /// WHAT THE PROBES ON AN ON-CHAIN ROW BUY. The terminal assertion says the
     /// resolver ended up at the vector's expected document; on its own it cannot
-    /// distinguish a resolver that WALKED v1 -> v2 from one that landed on the
-    /// answer without reading the chain. Two probes close that:
+    /// distinguish a resolver that WALKED the chain from one that landed on the
+    /// answer without reading it. Two probes close that, on a positive
+    /// replayed main pair:
     ///
     /// 1. The genesis reference — the same DID, the same options, resolved with
     ///    no signals fed — must DIFFER from the terminal document. A replay in
     ///    which nothing was applied fails here.
     /// 2. A `versionTime` one second before the earliest announcing block's
     ///    `mediantime` must return version 1 and that same genesis document,
-    ///    having issued at least one request against the same capture. This
-    ///    is the versionTime path's first coverage against REAL block times —
-    ///    the unit tests use timestamps we chose — and it is the only
-    ///    stop-where-asked bound observable on these rows. It needs the
-    ///    capture's `/block/{hash}` bodies; a capture taken without them skips
-    ///    the probe by name (`FIXTURES_WITHOUT_SIGNAL_BLOCKS`).
+    ///    having issued at least one request against the same capture. It needs
+    ///    the capture's `/block/{hash}` bodies; a capture taken without them
+    ///    skips the probe by name (`FIXTURES_WITHOUT_SIGNAL_BLOCKS`).
     ///
-    /// THERE IS DELIBERATELY NO `versionId = 1` PROBE, and one must not be
+    /// THERE IS DELIBERATELY NO `versionId = 1` PROBE here, and one must not be
     /// "restored". At `Init` the FSM returns `Resolved` when a `VersionId`
     /// target equals `current_version_id`, which starts at 1 — so `VersionId(1)`
     /// issues zero requests, never touches the capture, and cannot distinguish a
-    /// real walk from a short-circuit. It would restate the genesis reference
-    /// that probe 1 already builds independently. These rows have no other
-    /// non-trivial `version_id` bound either: their expected version is 2, which
-    /// is the terminal state. A mid-walk `version_id` bound is real coverage
-    /// only on a chain with more than two versions.
-    fn drive_resolve(vectors: &[Vector], overrides: &[SkipOverride]) {
+    /// real walk from a short-circuit. Mid-walk target conditions are covered
+    /// where a set records them, as `resolve/NN/` cases
+    /// ([`drive_resolve_options_with`]).
+    fn drive_resolve_with(
+        vectors: &[Vector],
+        overrides: &[SkipOverride],
+        divergences: &[CodeDivergence],
+    ) {
         use crate::identifier::Did;
 
         let mut observed = BTreeSet::new();
@@ -1507,37 +1807,45 @@ mod tests {
             let input = vector.fixture("resolve/input.json");
             let output = vector.fixture("resolve/output.json");
 
-            // Well-formedness whitelist (asserted for every discovered vector,
-            // driven or not: no maintainer decision makes a malformed fixture
-            // acceptable, so none of these belongs below the drive gate).
+            // Well-formedness (asserted for every discovered vector, driven or
+            // not: no maintainer decision makes a malformed fixture acceptable,
+            // so none of these belongs below the drive gate). An expected
+            // error has no document and no metadata to whitelist.
             let metadata = &output["didDocumentMetadata"];
-            if !metadata["versionId"].is_number() {
+            if vector.is_negative() {
                 assert!(
-                    metadata["versionId"].is_string(),
-                    "{id}: versionId must be an ASCII string (the specification's encoding)"
+                    output["didDocument"].is_null(),
+                    "{id}: an expected-error resolve/output.json carries a null didDocument"
                 );
-            }
-            assert!(
-                metadata["deactivated"].is_boolean(),
-                "{id}: deactivated must be a bool"
-            );
-            if !metadata["confirmations"].is_null() {
+            } else {
+                if !metadata["versionId"].is_number() {
+                    assert!(
+                        metadata["versionId"].is_string(),
+                        "{id}: versionId must be an ASCII string (the specification's encoding)"
+                    );
+                }
                 assert!(
-                    metadata["confirmations"].is_number(),
-                    "{id}: confirmations is observation-dependent — assert TYPE only"
+                    metadata["deactivated"].is_boolean(),
+                    "{id}: deactivated must be a bool"
                 );
-            }
-            if !metadata["updated"].is_null() {
-                assert!(
-                    metadata["updated"].is_string(),
-                    "{id}: updated is observation-dependent — assert TYPE only"
-                );
-            }
-            if !metadata["created"].is_null() {
-                assert!(
-                    metadata["created"].is_string(),
-                    "{id}: created is observation-dependent — assert TYPE only"
-                );
+                if !metadata["confirmations"].is_null() {
+                    assert!(
+                        metadata["confirmations"].is_number(),
+                        "{id}: confirmations must be a number"
+                    );
+                }
+                if !metadata["updated"].is_null() {
+                    assert!(
+                        metadata["updated"].is_string(),
+                        "{id}: updated is observation-dependent — assert TYPE only"
+                    );
+                }
+                if !metadata["created"].is_null() {
+                    assert!(
+                        metadata["created"].is_string(),
+                        "{id}: created is observation-dependent — assert TYPE only"
+                    );
+                }
             }
 
             if !vector.should_drive_with(AssertionKind::Resolve, overrides) {
@@ -1550,7 +1858,7 @@ mod tests {
             // only remedies.
             //
             // The specification requires didDocumentMetadata.versionId to be an
-            // ASCII string. Sixteen fixtures encode it as a JSON number, a known
+            // ASCII string. Some fixtures encode it as a JSON number, a known
             // upstream defect pinned to an explicit id set and checked in BOTH
             // directions: an unlisted offender fails as a NEW defect rather than
             // being absorbed by the encoding-tolerant read, and a listed vector
@@ -1558,196 +1866,45 @@ mod tests {
             // this on the network directory instead would auto-forgive a newly
             // added defective vector and would red on a partial upstream
             // conformance fix. The ledger's summary reports the running tally.
-            let known_bad = NUMBER_ENCODED_VERSION_ID.contains(&id.as_str());
-            assert!(
-                metadata["versionId"].is_number() == known_bad,
-                "{id}: {}",
-                if metadata["versionId"].is_number() {
-                    "NEW versionId encoding defect — resolve/output.json encodes versionId as a \
-                     JSON number, but the specification requires an ASCII string. Fix the \
-                     fixture, or add this id to NUMBER_ENCODED_VERSION_ID to record it as \
-                     known-bad."
-                } else {
-                    "versionId is now correctly encoded as an ASCII string — delete this id \
-                     from NUMBER_ENCODED_VERSION_ID."
-                }
+            if !vector.is_negative() {
+                let known_bad = NUMBER_ENCODED_VERSION_ID.contains(&id.as_str());
+                assert!(
+                    metadata["versionId"].is_number() == known_bad,
+                    "{id}: {}",
+                    if metadata["versionId"].is_number() {
+                        "NEW versionId encoding defect — resolve/output.json encodes versionId \
+                         as a JSON number, but the specification requires an ASCII string. Fix \
+                         the fixture, or add this id to NUMBER_ENCODED_VERSION_ID to record it \
+                         as known-bad."
+                    } else {
+                        "versionId is now correctly encoded as an ASCII string — delete this id \
+                         from NUMBER_ENCODED_VERSION_ID."
+                    }
+                );
+            }
+
+            let fixture = replay_fixture(vector);
+            drive_case(
+                vector,
+                "resolve",
+                &vector.outcome,
+                fixture.as_ref(),
+                divergences,
             );
 
-            // The resolved didDocument must parse as a conformant Document.
-            // This sits BELOW the drive gate, not with the metadata whitelist:
-            // it is an assertion about the document a driven row resolves to,
-            // and a skipped row's document is by definition not asserted.
-            // `mutinynet/x1/qh66uy2s` makes the difference concrete — its
-            // expected document carries `service: []` and so does not parse
-            // ("updatable DID document must contain at least one beacon
-            // service"), which is corroborating evidence for the ledger's
-            // classification of that row as CAS-delivered and skipped.
-            let _expected_doc = Document::from_json_string(&output["didDocument"].to_string())
-                .unwrap_or_else(|e| {
-                    panic!("{id}: resolve/output.json.didDocument must parse as a Document: {e}")
+            if let (Some(f), false) = (&fixture, vector.is_negative()) {
+                let did: Did = field_str(&input, "did", id).parse().unwrap_or_else(|e| {
+                    panic!("{id}: resolve/input.json.did must parse as a DID: {e}")
                 });
-
-            let did: Did = field_str(&input, "did", id).parse().unwrap_or_else(|e| {
-                panic!("{id}: resolve/input.json.did must parse as a DID: {e}")
-            });
-
-            // Past genesis means the walk has to be fed real beacon signals, and
-            // they come from this repository's captured chain snapshot for the
-            // row. An absent capture panics by name rather than degrading into a
-            // no-signal resolve that would then fail the versionId assertion for
-            // an unrelated-looking reason.
-            let expected_version_id = vector.expected_version_id().unwrap_or_else(|| {
-                panic!("{id}: a driven resolve row expects a resolved document")
-            });
-            let on_chain = expected_version_id > 1;
-            let fixture = on_chain.then(|| read_chain_fixture(id));
-
-            // ONE assembly for every vector shape, matching
-            // `chain_capture::capture::resolution_options_for` line for line.
-            // `SidecarData::from_json_value` always builds `update_lookup_table`
-            // and sets `genesis_document` from the wire `genesisDocument` field;
-            // `resolve_external` bridges that into the initial document itself
-            // (`document.rs`'s `resolve_external_bridges_genesis_document_from_serde_path`
-            // proves it, and `SidecarData::initial_document` is documented there
-            // as the legacy in-memory shortcut). The capture tool assembles
-            // options exactly this way, and capture and replay MUST match —
-            // otherwise the refuse-to-write gate can bless a fixture this suite
-            // then fails on.
-            //
-            // Do NOT reintroduce an `IntermediateDocument` branch for `x1`
-            // vectors.
-            //
-            // Six vectors omit `resolutionOptions.sidecar` entirely (of the
-            // driven rows, `mutinynet/k1/q5puld7y`): a resolve with nothing
-            // supplied out of band. Indexing yields `Value::Null`, which is not
-            // a JSON object and does not deserialize, so an absent sidecar is
-            // normalized to `{}` — which yields the same empty `SidecarData` the
-            // old default arm produced. That is a normalization of the INPUT
-            // VALUE, not a second assembly: there is still exactly one
-            // `SidecarData::from_json_value` call. The capture tool refuses an
-            // absent sidecar instead, because a capture validated against zero
-            // updates would pass vacuously; a genesis-era replay has nothing to
-            // be vacuous about, since its whole expected document is asserted.
-            let sidecar_json = input["resolutionOptions"]["sidecar"].clone();
-            assert!(
-                !on_chain || sidecar_json.is_object(),
-                "{id}: a past-genesis vector must carry a \
-                 resolve/input.json resolutionOptions.sidecar object — its beacon \
-                 signals announce update hashes that are delivered out of band"
-            );
-            let sidecar_json = if sidecar_json.is_null() {
-                serde_json::json!({})
-            } else {
-                sidecar_json
-            };
-            //
-            // Wrapped in a factory because `Document::resolve` CONSUMES its
-            // options and this row runs three resolutions — the terminal drive
-            // and the two probes below. They must differ ONLY in the target
-            // condition, or a probe would be testing a different resolution;
-            // and a second hand-built assembly here would be exactly the
-            // divergence the single assembly exists to prevent.
-            //
-            // Pinning the captured tip is also what makes `confirmations` a
-            // fixed input rather than a moving observation.
-            let make_options = |version_time: Option<DateTime<Utc>>| {
-                let sidecar =
-                    SidecarData::from_json_value(sidecar_json.clone()).unwrap_or_else(|e| {
-                        panic!("{id}: resolve/input.json resolutionOptions.sidecar must parse: {e}")
-                    });
-                ResolutionOptions {
-                    sidecar_data: Some(sidecar),
-                    chain_tip_height: fixture.as_ref().map(|f| f.tip_height),
-                    version_time,
-                    ..test_options()
-                }
-            };
-
-            let resolver = Document::resolve(&did, make_options(None))
-                .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}"));
-            let result = match &fixture {
-                Some(f) => drive_to_resolved_from_capture(resolver, f, id)
-                    .unwrap_or_else(|e| panic!("{id}: the captured chain must resolve: {e}")),
-                None => resolve_with_no_signals(resolver),
-            };
-
-            // The resolved document and the spec test vector agree on EVERY
-            // content field — id, the top-level `@context`, verificationMethod
-            // (incl. publicKeyMultibase), the SingletonBeacon services +
-            // endpoints, and the four relationship sets. Both the KEY (k1) path
-            // (genesis generated deterministically) and the EXTERNAL (x1) path
-            // (genesis supplied verbatim) emit the spec `@context`
-            // (`www.w3.org/ns/did/v1.1` / `btcr2.dev/context/v1`) and no
-            // top-level `controller`, so the full content matches with no
-            // field masking.
-            let got = resolved_document_json(&result.document, id);
-            let want: serde_json::Value = output["didDocument"].clone();
-            assert_eq!(
-                got, want,
-                "{id}: resolved didDocument content (incl. @context) \
-                 must equal resolve/output.json.didDocument"
-            );
-
-            assert_eq!(
-                result.document_metadata.version_id.get(),
-                expected_version_id,
-                "{id}: resolved versionId must equal \
-                 resolve/output.json.didDocumentMetadata.versionId"
-            );
-            assert_eq!(
-                result.document_metadata.deactivated,
-                field_bool(&output, "didDocumentMetadata.deactivated", id),
-                "{id}: resolved deactivated must equal \
-                 resolve/output.json.didDocumentMetadata.deactivated"
-            );
-
-            if let Some(f) = &fixture {
-                let signal = f.latest_signal().unwrap_or_else(|| {
-                    panic!("{id}: the captured fixture must carry at least one beacon signal")
-                });
-                let derived = f
-                    .tip_height
-                    .saturating_sub(signal.block_height)
-                    .saturating_add(1);
-                match output["didDocumentMetadata"]["confirmations"].as_u64() {
-                    // Frozen chain: the vector states a number, and the captured
-                    // tip must reproduce it. Four vectors check one tip from four
-                    // directions, so a bad tip or bad arithmetic cannot pass.
-                    Some(expected) => assert_eq!(
-                        result.document_metadata.confirmations,
-                        Some(expected as u32),
-                        "{id}: resolved confirmations must equal \
-                         resolve/output.json.didDocumentMetadata.confirmations against the \
-                         captured tip {}",
-                        f.tip_height
-                    ),
-                    // Still-mining chain: the vector states no number, so assert
-                    // PROVENANCE — confirmations must derive from the
-                    // MOST-RECENTLY-APPLIED update's block.
-                    //
-                    // Honest about its strength: on a single-signal row this is a
-                    // consistency check (the resolver used the captured signal's
-                    // height rather than the tip, zero, or None), because there is
-                    // only one height it could have used. It becomes a real "did
-                    // it pick the LATEST?" test on a multi-signal chain, which is
-                    // what a minted scenario supplies.
-                    None => assert_eq!(
-                        result.document_metadata.confirmations,
-                        Some(derived),
-                        "{id}: resolved confirmations must derive from the \
-                         most-recently-applied update's block ({} at tip {})",
-                        signal.block_height,
-                        f.tip_height
-                    ),
-                }
+                let terminal = &output["didDocument"];
 
                 // The walk changed the document. The genesis reference is an
                 // independent producer of the pre-walk state: same DID, same
                 // options, no signals fed, so the resolver applies nothing.
                 let genesis = resolve_with_no_signals(
-                    Document::resolve(&did, make_options(None)).unwrap_or_else(|e| {
-                        panic!("{id}: the resolver must accept the vector: {e}")
-                    }),
+                    Document::resolve(&did, case_options(&input, Some(f), id)).unwrap_or_else(
+                        |e| panic!("{id}: the resolver must accept the vector: {e}"),
+                    ),
                 );
                 let genesis_json = resolved_document_json(&genesis.document, id);
                 assert_eq!(
@@ -1756,7 +1913,7 @@ mod tests {
                     "{id}: a resolve with no signals fed is the genesis state"
                 );
                 assert_ne!(
-                    genesis_json, got,
+                    &genesis_json, terminal,
                     "{id}: the chain-driven walk must change the document; if genesis equals \
                      the terminal state the replay proved nothing"
                 );
@@ -1766,10 +1923,13 @@ mod tests {
                 // before its first update, so the bound — which the FSM cannot
                 // short-circuit — must hold the answer at genesis.
                 if let Some(bound) = version_time_probe_bound(f, id) {
-                    let probe_resolver = Document::resolve(&did, make_options(Some(bound)))
-                        .unwrap_or_else(|e| {
-                            panic!("{id}: the resolver must accept the vector: {e}")
-                        });
+                    let options = ResolutionOptions {
+                        version_time: Some(bound),
+                        ..case_options(&input, Some(f), id)
+                    };
+                    let probe_resolver = Document::resolve(&did, options).unwrap_or_else(|e| {
+                        panic!("{id}: the resolver must accept the vector: {e}")
+                    });
                     let (probe, rounds) = drive_capture_rounds(probe_resolver, f, id);
                     let probe = probe.unwrap_or_else(|e| {
                         panic!("{id}: the versionTime probe must resolve off the capture: {e}")
@@ -1797,6 +1957,342 @@ mod tests {
             observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::Resolve, vectors, &observed, overrides);
+    }
+
+    /// RESOLVE-OPTION driver: every `resolve/NN/` case of every set, over
+    /// explicit override and error-code divergence tables.
+    ///
+    /// One row per case, keyed `{id} resolve/{NN}`. A case is driven exactly
+    /// like the main pair ([`drive_case`]): the main input's options plus the
+    /// case's own `versionId`, `versionTime` or `minConf`, replayed off the
+    /// set's capture, with the same comparison rules. A case inherits its
+    /// set's skip reasons, so a case of a set the resolver cannot replay is
+    /// skipped with the set's reason, not driven.
+    fn drive_resolve_options_with(
+        vectors: &[Vector],
+        overrides: &[SkipOverride],
+        divergences: &[CodeDivergence],
+    ) {
+        let mut observed = BTreeSet::new();
+        for vector in vectors {
+            let cases: Vec<_> = vector
+                .resolve_cases
+                .iter()
+                .filter(|case| {
+                    vector.should_drive_row_with(
+                        AssertionKind::ResolveOption,
+                        Some(&case.name),
+                        overrides,
+                    )
+                })
+                .collect();
+            if cases.is_empty() {
+                continue;
+            }
+            let fixture = replay_fixture(vector);
+            for case in cases {
+                drive_case(
+                    vector,
+                    &format!("resolve/{}", case.name),
+                    &case.outcome,
+                    fixture.as_ref(),
+                    divergences,
+                );
+                observed.insert(RowKey::case(vector.id.clone(), case.name.clone()));
+            }
+        }
+        reconcile_driven_with(AssertionKind::ResolveOption, vectors, &observed, overrides);
+    }
+
+    /// The set of the `options` synthetic corpus: the minted four-version
+    /// mutinynet chain reshaped into the regenerated layout, with eleven
+    /// `resolve/NN/` cases (see `fixtures/layout/README.md`).
+    const OPTIONS_SET: &str = "mutinynet/k1/q5pew2jc";
+
+    /// The `options` corpus, discovered. It lives in this repository, so it
+    /// never skips: an absent or empty corpus is a failure.
+    fn options_vectors() -> Vec<Vector> {
+        let vectors = discover_in(&Corpus::synthetic("options"));
+        assert_eq!(
+            vectors.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            [OPTIONS_SET],
+            "the options corpus holds exactly its one set"
+        );
+        vectors
+    }
+
+    /// Run `f`, which must panic, and return its panic message.
+    fn panic_text(f: impl FnOnce()) -> String {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .expect_err("the drive must fail");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
+    /// The outcome of case `name` of the options set, for mutation.
+    fn case_outcome<'a>(vectors: &'a mut [Vector], name: &str) -> &'a mut Outcome {
+        &mut vectors[0]
+            .resolve_cases
+            .iter_mut()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("the options set has a resolve/{name} case"))
+            .outcome
+    }
+
+    /// The recorded `confirmations` of a positive outcome, for mutation.
+    fn recorded_confirmations(outcome: &mut Outcome) -> &mut Option<u64> {
+        match outcome {
+            Outcome::Positive { confirmations, .. } => confirmations,
+            Outcome::Error { code } => panic!("expected a positive outcome, found error {code}"),
+        }
+    }
+
+    /// The options corpus end to end: derivation, the main resolve pair and all
+    /// eleven option cases driven off the replayed minted chain, and the ledger
+    /// invariants over the corpus.
+    ///
+    /// The genesis-key, update-crypto and end-state drivers are not called: the
+    /// reshaped set carries no minting secret. That those rows are CLASSIFIED
+    /// as driven is asserted here; the drivers themselves run on the checked-out
+    /// suite.
+    #[test]
+    fn synthetic_options_corpus_drives_every_case() {
+        let vectors = options_vectors();
+        drive_derivation(&vectors, &[]);
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        check_ledger_invariants(&vectors, &[]);
+
+        let cases = expected_driven_with(AssertionKind::ResolveOption, &vectors, &[]);
+        assert_eq!(
+            cases.len(),
+            11,
+            "one resolve-option row per case: {cases:?}"
+        );
+        for kind in [
+            AssertionKind::Derivation,
+            AssertionKind::GenesisKey,
+            AssertionKind::Resolve,
+            AssertionKind::UpdateCrypto,
+            AssertionKind::EndState,
+        ] {
+            assert!(
+                expected_driven_with(kind, &vectors, &[]).contains(&RowKey::set(OPTIONS_SET)),
+                "{OPTIONS_SET}: the {kind} row is classified as driven"
+            );
+        }
+    }
+
+    /// Drive the main pair and every positive case of each set and require the
+    /// resolved `confirmations` to EQUAL the recorded value. Returns the
+    /// `(case, recorded)` pairs checked.
+    fn check_exact_confirmations(vectors: &[Vector]) -> Vec<(String, Option<u64>)> {
+        let mut checked = Vec::new();
+        for vector in vectors {
+            let fixture = replay_fixture(vector);
+            let pairs = std::iter::once(("resolve".to_string(), &vector.outcome)).chain(
+                vector
+                    .resolve_cases
+                    .iter()
+                    .map(|case| (format!("resolve/{}", case.name), &case.outcome)),
+            );
+            for (case_dir, outcome) in pairs {
+                let Outcome::Positive { confirmations, .. } = outcome else {
+                    continue;
+                };
+                let resolved = drive_case(
+                    vector,
+                    &case_dir,
+                    outcome,
+                    fixture.as_ref(),
+                    ERROR_CODE_DIVERGENCES,
+                );
+                confirmations_exact(resolved, *confirmations)
+                    .unwrap_or_else(|e| panic!("{} {case_dir}: {e}", vector.id));
+                checked.push((case_dir, *confirmations));
+            }
+        }
+        checked
+    }
+
+    /// On the pinned options set the resolver's `confirmations` EQUAL the
+    /// recorded ones, for the main pair and every positive case.
+    ///
+    /// The corpus rule stays "at least the recorded value", because an upstream
+    /// set's recorded tip may lag the tip its capture is replayed at. Here the
+    /// replay tip is the recorded tip by construction, and the recorded values
+    /// were computed by hand as `tip - height + 1`, so equality is the stronger
+    /// and correct check: it also catches a resolver that over-reports, which
+    /// `>=` cannot.
+    #[test]
+    fn synthetic_options_confirmations_are_exact_at_the_pinned_tip() {
+        let checked = check_exact_confirmations(&options_vectors());
+        let expected: Vec<(String, Option<u64>)> = [
+            ("resolve", 6),
+            ("resolve/01", 0),
+            ("resolve/02", 8),
+            ("resolve/03", 7),
+            ("resolve/05", 0),
+            ("resolve/06", 8),
+            ("resolve/07", 7),
+            ("resolve/09", 0),
+            ("resolve/10", 7),
+        ]
+        .into_iter()
+        .map(|(case, conf)| (case.to_string(), Some(conf)))
+        .collect();
+        assert_eq!(
+            checked, expected,
+            "the main pair and every positive case, with the hand-computed confirmations"
+        );
+    }
+
+    /// A resolver reporting fewer confirmations than recorded fails the row.
+    #[test]
+    fn synthetic_options_fewer_confirmations_than_recorded_fail() {
+        let mut vectors = options_vectors();
+        *recorded_confirmations(&mut vectors[0].outcome) = Some(7);
+        let message = panic_text(|| drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("confirmations") && message.contains('6') && message.contains('7'),
+            "the failure names confirmations and both values: {message}"
+        );
+    }
+
+    /// More confirmations than recorded pass the corpus rule but fail the
+    /// exact check on the pinned set: the two rules are genuinely different.
+    #[test]
+    fn synthetic_options_more_confirmations_than_recorded_fail_only_the_exact_check() {
+        let mut vectors = options_vectors();
+        *recorded_confirmations(&mut vectors[0].outcome) = Some(5);
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        let message = panic_text(|| {
+            check_exact_confirmations(&vectors);
+        });
+        assert!(
+            message.contains("confirmations") && message.contains('5') && message.contains('6'),
+            "the exact check names confirmations and both values: {message}"
+        );
+    }
+
+    /// A negative case asserts the code: a recorded code the resolver does not
+    /// emit fails, naming both.
+    #[test]
+    fn synthetic_options_wrong_error_code_fails() {
+        let mut vectors = options_vectors();
+        *case_outcome(&mut vectors, "04") = Outcome::Error {
+            code: "INVALID_DID".to_string(),
+        };
+        let message =
+            panic_text(|| drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("NOT_FOUND") && message.contains("INVALID_DID"),
+            "the failure names the emitted and the expected code: {message}"
+        );
+    }
+
+    /// A recorded code that diverges from the specification passes only
+    /// through the divergence table passed in, which then asserts the
+    /// specification's code is emitted — and the entry counts as used.
+    #[test]
+    fn synthetic_options_error_code_maps_through_the_divergence_table() {
+        const LOCAL: &[CodeDivergence] = &[CodeDivergence {
+            vector_code: "NOT_FOUND_IN_VECTOR",
+            spec_code: "NOT_FOUND",
+            issue: "stands in for an upstream thread",
+        }];
+        let untouched = options_vectors();
+        assert_eq!(
+            unused_divergences(&untouched, &[], LOCAL).len(),
+            1,
+            "no case records the vector code yet, so the entry is unused"
+        );
+
+        let mut vectors = options_vectors();
+        *case_outcome(&mut vectors, "04") = Outcome::Error {
+            code: "NOT_FOUND_IN_VECTOR".to_string(),
+        };
+        drive_resolve_options_with(&vectors, &[], LOCAL);
+        assert!(unused_divergences(&vectors, &[], LOCAL).is_empty());
+
+        let message =
+            panic_text(|| drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("NOT_FOUND_IN_VECTOR") && message.contains("got NOT_FOUND"),
+            "without the entry the divergent code fails: {message}"
+        );
+    }
+
+    /// A case expecting an error whose resolve succeeds fails, naming the
+    /// version it resolved to.
+    #[test]
+    fn synthetic_options_unexpected_success_fails() {
+        let mut vectors = options_vectors();
+        *case_outcome(&mut vectors, "02") = Outcome::Error {
+            code: "NOT_FOUND".to_string(),
+        };
+        let message =
+            panic_text(|| drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("resolve/02") && message.contains("versionId 2"),
+            "{message}"
+        );
+    }
+
+    /// `versionId` is compared as a string for string-encoded outputs: a
+    /// recorded `"02"` does not match a resolved 2.
+    #[test]
+    fn synthetic_options_version_id_is_compared_as_a_string() {
+        let mut vectors = options_vectors();
+        match case_outcome(&mut vectors, "02") {
+            Outcome::Positive {
+                version_id_string, ..
+            } => *version_id_string = Some("02".to_string()),
+            Outcome::Error { .. } => panic!("resolve/02 is positive"),
+        }
+        let message =
+            panic_text(|| drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(message.contains("\"02\""), "{message}");
+    }
+
+    /// Every replay first checks the capture against `signals.json`: a file
+    /// missing one of the chain's announcements fails both drivers by name.
+    #[test]
+    fn synthetic_options_signals_json_mismatch_fails_the_drive() {
+        let mut vectors = options_vectors();
+        vectors[0]
+            .signals
+            .as_mut()
+            .expect("the options set carries signals.json")
+            .entries
+            .pop();
+        for message in [
+            panic_text(|| drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES)),
+            panic_text(|| drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES)),
+        ] {
+            assert!(message.contains("signals.json"), "{message}");
+        }
+    }
+
+    /// A hand-written skip of one option case keeps the options drivers green
+    /// and removes exactly that row.
+    #[test]
+    fn synthetic_options_skip_override_names_one_case() {
+        const OVERRIDE: &[SkipOverride] = &[SkipOverride {
+            vector: OPTIONS_SET,
+            kind: AssertionKind::ResolveOption,
+            case: Some("07"),
+            reason: "stands in for a hand-written skip",
+        }];
+        let vectors = options_vectors();
+        let driven = expected_driven_with(AssertionKind::ResolveOption, &vectors, OVERRIDE);
+        assert_eq!(driven.len(), 10);
+        assert!(!driven.contains(&RowKey::case(OPTIONS_SET, "07")));
+        drive_resolve_options_with(&vectors, OVERRIDE, ERROR_CODE_DIVERGENCES);
+        check_ledger_invariants(&vectors, OVERRIDE);
     }
 
     /// UPDATE driver: for EVERY vector discovered under `test-suite/` that ships
@@ -2306,7 +2802,8 @@ mod tests {
         // set and the ledger stays valid.
         drive_derivation(&vectors, LIVE_OVERRIDE);
         drive_genesis_key(&vectors, LIVE_OVERRIDE);
-        drive_resolve(&vectors, LIVE_OVERRIDE);
+        drive_resolve_with(&vectors, LIVE_OVERRIDE, ERROR_CODE_DIVERGENCES);
+        drive_resolve_options_with(&vectors, LIVE_OVERRIDE, ERROR_CODE_DIVERGENCES);
         drive_update_crypto(&vectors, LIVE_OVERRIDE);
         drive_end_state(&vectors, LIVE_OVERRIDE);
         check_ledger_invariants(&vectors, LIVE_OVERRIDE);
@@ -2580,21 +3077,7 @@ mod tests {
     /// Drive a resolver to its terminal state with empty beacon-signal
     /// responses (no on-chain signals → resolves to the contemporary document).
     fn resolve_with_no_signals(resolver: Resolver) -> ResolutionResult {
-        let ResolverState::Requests(next_state, _beacons) = resolver
-            .resolve()
-            .expect("Init step yields beacon requests")
-        else {
-            panic!("expected Requests from Init step");
-        };
-        // Feed empty responses: no beacon signals to process.
-        let fsm = next_state.process_responses(HashMap::new());
-        match fsm.resolve().expect("empty-signal step resolves") {
-            ResolverState::Resolved(result) => result,
-            ResolverState::Requests(..) => panic!("expected Resolved with no signals"),
-            ResolverState::BlockRequests(..) => {
-                panic!("unexpected block request: no update in this test carries proof.expires")
-            }
-        }
+        try_resolve_with_no_signals(resolver).expect("an empty-signal resolve succeeds")
     }
 
     /// Build a minimal Singleton-beacon resolver over the regtest k1 qgpakaw4
