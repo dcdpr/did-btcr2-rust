@@ -1529,8 +1529,12 @@ mod tests {
     /// `resolutionOptions.sidecar` verbatim, its target condition (`versionId`,
     /// `versionTime`) and `minConf`, and the replay tip.
     ///
-    /// ONE assembly for every vector shape and every case, matching
-    /// `chain_capture::capture::resolution_options_for` line for line.
+    /// ONE assembly for every vector shape and every case. For the main pair
+    /// it builds the same options `chain_capture::capture::resolution_options_for`
+    /// builds: the capture tool refuses a main input that carries `versionId`,
+    /// `versionTime` or `minConf`, so on every main pair it captures those three
+    /// are absent here too, and only the sidecar and the tip remain. The
+    /// `resolve/NN/` cases carry them; those are replayed, never captured.
     /// `SidecarData::from_json_value` always builds `update_lookup_table` and
     /// sets `genesis_document` from the wire `genesisDocument` field;
     /// `resolve_external` bridges that into the initial document itself
@@ -1551,12 +1555,19 @@ mod tests {
     /// rows, `mutinynet/k1/q5puld7y`): a resolve with nothing supplied out of
     /// band. Indexing yields `Value::Null`, which does not deserialize, so an
     /// absent sidecar is normalized to `{}` — the same empty `SidecarData`. That
-    /// is a normalization of the INPUT VALUE, not a second assembly. The capture
-    /// tool refuses an absent sidecar instead, because a capture validated
-    /// against zero updates would pass vacuously; a replay has nothing to be
-    /// vacuous about, since its whole expected output is asserted. A replayed
-    /// set must carry the object: its beacon signals announce update hashes
-    /// that are delivered out of band.
+    /// is a normalization of the INPUT VALUE, not a second assembly, and the
+    /// capture tool applies the same rule, split the same way on whether the
+    /// set records its signals:
+    ///
+    /// - A set with `signals.json` (`recorded_signals`) may omit the sidecar,
+    ///   replayed or not. The capture tool reads it as `{}` too: for these sets
+    ///   the gate is the signals record, not the sidecar, so an empty sidecar
+    ///   is not vacuous — and a set whose update is withheld on purpose ships
+    ///   none.
+    /// - A replayed set WITHOUT `signals.json` must carry the object. The
+    ///   capture tool refuses an absent sidecar on those sets, because a capture
+    ///   validated against zero updates would pass vacuously, and their beacon
+    ///   signals announce update hashes that are delivered out of band.
     ///
     /// Pinning the replay tip is what makes `confirmations` a fixed input
     /// rather than a moving observation. With no capture there is no tip, as
@@ -1564,14 +1575,16 @@ mod tests {
     fn case_options(
         input: &serde_json::Value,
         fixture: Option<&ChainFixture>,
+        recorded_signals: bool,
         ctx: &str,
     ) -> ResolutionOptions {
         let requested = &input["resolutionOptions"];
         let sidecar_json = requested["sidecar"].clone();
         assert!(
-            fixture.is_none() || sidecar_json.is_object(),
-            "{ctx}: a replayed resolve must carry a resolutionOptions.sidecar object — its \
-             beacon signals announce update hashes that are delivered out of band"
+            fixture.is_none() || recorded_signals || sidecar_json.is_object(),
+            "{ctx}: a replayed resolve of a set without signals.json must carry a \
+             resolutionOptions.sidecar object — its beacon signals announce update hashes \
+             that are delivered out of band"
         );
         let sidecar_json = if sidecar_json.is_null() {
             serde_json::json!({})
@@ -1675,7 +1688,10 @@ mod tests {
         let result: Result<ResolutionResult, String> =
             match field_str(&input, "did", &ctx).parse::<Did>() {
                 Err(e) => Err(emitted_code(&Btcr2Error::from(e), &ctx)),
-                Ok(did) => match Document::resolve(&did, case_options(&input, fixture, &ctx)) {
+                Ok(did) => match Document::resolve(
+                    &did,
+                    case_options(&input, fixture, vector.signals.is_some(), &ctx),
+                ) {
                     Err(e) => Err(emitted_code(&e, &ctx)),
                     Ok(resolver) => match fixture {
                         Some(f) => drive_to_resolved_from_capture(resolver, f, id),
@@ -1902,9 +1918,11 @@ mod tests {
                 // independent producer of the pre-walk state: same DID, same
                 // options, no signals fed, so the resolver applies nothing.
                 let genesis = resolve_with_no_signals(
-                    Document::resolve(&did, case_options(&input, Some(f), id)).unwrap_or_else(
-                        |e| panic!("{id}: the resolver must accept the vector: {e}"),
-                    ),
+                    Document::resolve(
+                        &did,
+                        case_options(&input, Some(f), vector.signals.is_some(), id),
+                    )
+                    .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}")),
                 );
                 let genesis_json = resolved_document_json(&genesis.document, id);
                 assert_eq!(
@@ -1925,7 +1943,7 @@ mod tests {
                 if let Some(bound) = version_time_probe_bound(f, id) {
                     let options = ResolutionOptions {
                         version_time: Some(bound),
-                        ..case_options(&input, Some(f), id)
+                        ..case_options(&input, Some(f), vector.signals.is_some(), id)
                     };
                     let probe_resolver = Document::resolve(&did, options).unwrap_or_else(|e| {
                         panic!("{id}: the resolver must accept the vector: {e}")
@@ -2147,6 +2165,49 @@ mod tests {
         assert_eq!(
             checked, expected,
             "the main pair and every positive case, with the hand-computed confirmations"
+        );
+    }
+
+    /// A replayed main input with no `resolutionOptions.sidecar`, as 20 sets of
+    /// the regenerated suite ship it.
+    fn replayed_input_without_sidecar() -> (serde_json::Value, ChainFixture) {
+        let vectors = options_vectors();
+        let mut input = vectors[0].fixture("resolve/input.json");
+        input["resolutionOptions"]
+            .as_object_mut()
+            .expect("the main input carries resolutionOptions")
+            .remove("sidecar");
+        let fixture = read_chain_fixture_in(&vectors[0].corpus.chain, OPTIONS_SET);
+        (input, fixture)
+    }
+
+    /// A set that records its signals may omit the sidecar on a replayed
+    /// resolve: it reads as `{}`, as the capture tool reads it.
+    #[test]
+    fn case_options_reads_an_absent_sidecar_as_empty_when_signals_are_recorded() {
+        let (input, fixture) = replayed_input_without_sidecar();
+        let options = case_options(&input, Some(&fixture), true, OPTIONS_SET);
+        let sidecar = options
+            .sidecar_data
+            .expect("the sidecar is always supplied");
+        assert!(
+            sidecar.updates.is_empty() && sidecar.genesis_document.is_none(),
+            "an absent sidecar is the empty one"
+        );
+        assert_eq!(options.chain_tip_height, Some(fixture.tip_height));
+    }
+
+    /// A replayed set without `signals.json` still needs the sidecar object,
+    /// as the capture tool requires it of those sets.
+    #[test]
+    fn case_options_refuses_an_absent_sidecar_on_a_replayed_set_without_signals() {
+        let (input, fixture) = replayed_input_without_sidecar();
+        let message = panic_text(|| {
+            case_options(&input, Some(&fixture), false, OPTIONS_SET);
+        });
+        assert!(
+            message.contains("resolutionOptions.sidecar") && message.contains("signals.json"),
+            "the refusal names the missing sidecar and the rule: {message}"
         );
     }
 

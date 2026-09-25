@@ -150,8 +150,13 @@ pub enum CaptureError {
 /// Build the resolution options for a vector from its `resolutionOptions.sidecar`
 /// object, verbatim.
 ///
-/// One assembly, used by capture here and mirrored line-for-line by the replay
-/// driver in the core crate's resolve tests. `SidecarData::from_json_value` is
+/// One assembly, used by capture here; the replay driver in the core crate's
+/// resolve tests builds the same options for every main pair this tool
+/// captures. Two input rules keep the two in step. The target loader refuses a
+/// main input carrying `versionId`, `versionTime` or `minConf`, which replay
+/// would honour and this function does not read. And an absent sidecar reads
+/// as `{}` on both sides for a set with `signals.json`, and is refused on both
+/// sides otherwise. `SidecarData::from_json_value` is
 /// necessary AND sufficient for every vector shape: its manual `Deserialize`
 /// always builds the update lookup table, and it sets `genesisDocument` from the
 /// wire field, which the external-resolve path bridges into the initial document

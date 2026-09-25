@@ -682,6 +682,9 @@ cargo run -q -p chain-capture -- \
   `--network` must name the directory the set is filed under.
 - `--out <dir>` writes the fixture to `<dir>/<net>/<k1|x1>/<id>.json` instead of
   under `fixtures/chain/`. Without it, the fixture lands in the tree.
+- The main `resolve/input.json` may omit `resolutionOptions.sidecar`; it is
+  read as `{}`, as the conformance harness reads it for a set with
+  `signals.json`.
 - signet and testnet4 use their default endpoints, and every session is paced
   (see "Pacing and rate limits"). regtest needs `--esplora-url`.
 
@@ -718,6 +721,7 @@ Every refusal writes nothing for the set.
 | An announcement differs from `signals.json`: an entry with no announcement on chain, an announcement with no entry, or a disagreeing height, block hash or signal bytes. | Check that `--network`, the endpoint and the suite checkout are the ones the set was recorded on, then re-run. If they are, report the set upstream. |
 | `signals.json` repeats an `update` without `duplicate: true` on the later entry. | A malformed set. Report it upstream. |
 | The set declares a CAS or SMT beacon, or an entry belongs to a cohort, including a cohort-only set with no `update/` directory. | Unsupported: the resolver cannot query those beacons yet, so there is nothing to capture. Skip the set. |
+| The main `resolve/input.json` sets `versionId`, `versionTime` or `minConf` under `resolutionOptions`. | The capture resolves the main pair with only its sidecar and the recorded tip, while the conformance harness honours those options, so the two would check different resolves. The suite puts them in numbered `resolve/NN/` cases. Report the set upstream. |
 | The resolve outcome does not match (see above). | Either the chain no longer carries what the set was recorded against, or the resolver disagrees with the set. Establish which before re-running. |
 
 Any other transaction above `recordedTip`, such as someone paying the beacon

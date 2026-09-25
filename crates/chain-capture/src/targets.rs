@@ -455,6 +455,8 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
         source,
     })?;
 
+    refuse_target_options(id, &input_path, &input)?;
+
     // Every drivable vector ships a sidecar object (several non-drivable ones do
     // not — they omit `resolutionOptions.sidecar` entirely). Treating an absent
     // sidecar as an empty one would let a capture validate against zero updates
@@ -512,6 +514,9 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
 ///
 /// Unlike [`load`], a set may carry no sidecar (read as `{}`), a sidecar
 /// without `updates`, and an expected error rather than a resolved document.
+/// The core crate's replay reads an absent sidecar on a set with
+/// `signals.json` as `{}` too. Like [`load`], a main input carrying
+/// `versionId`, `versionTime` or `minConf` is refused.
 pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
     check_vector_id(id)?;
     let network_dir = id
@@ -553,6 +558,8 @@ pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError>
         did: did_str.to_string(),
         source,
     })?;
+
+    refuse_target_options(id, &input_path, &input)?;
 
     // A set whose update is delivered some other way, or withheld on purpose,
     // carries no sidecar or one without `updates`; the gate for these sets is
@@ -818,6 +825,40 @@ fn malformed(vector: &str, path: &Path, detail: &str) -> TargetError {
         vector: vector.to_string(),
         path: path.display().to_string(),
         detail: detail.to_string(),
+    }
+}
+
+/// The resolution options a main resolve input may not carry here: a target
+/// condition and a confirmation depth.
+const TARGET_OPTIONS: [&str; 3] = ["versionId", "versionTime", "minConf"];
+
+/// Refuse a main resolve input that asks for a target condition or a
+/// confirmation depth.
+///
+/// Capture resolves the main pair with its sidecar and the pinned tip and
+/// nothing else ([`crate::capture::resolution_options_for`]). The core crate's
+/// replay honours `versionId`, `versionTime` and `minConf` wherever an input
+/// carries them, so a main input carrying one would have capture validate a
+/// different resolve from the one replay runs, and the refuse-to-write gate
+/// could refuse a valid set or bless a recording of another walk. The test
+/// suite puts those options in the numbered `resolve/NN/` cases, which are
+/// replayed off the main pair's capture and never captured themselves.
+fn refuse_target_options(vector: &str, path: &Path, input: &Value) -> Result<(), TargetError> {
+    match TARGET_OPTIONS
+        .into_iter()
+        .find(|option| !input["resolutionOptions"][*option].is_null())
+    {
+        None => Ok(()),
+        Some(option) => Err(malformed(
+            vector,
+            path,
+            &format!(
+                "the main resolve input sets `resolutionOptions.{option}`; this tool captures \
+                 the main resolve with only its sidecar and the recorded tip, so a capture \
+                 would validate a different resolve from the one the suite replays — a \
+                 target condition or depth belongs in a numbered `resolve/NN/` case"
+            ),
+        )),
     }
 }
 
@@ -1982,6 +2023,70 @@ mod tests {
             Some(310),
             "a vector that ships signals.json carries its record"
         );
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    /// Add `resolutionOptions.{option}` to the main input of `root/id`.
+    fn set_main_option(root: &Path, id: &str, option: &str, value: Value) {
+        let path = root.join(id).join("resolve/input.json");
+        let mut input: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("the main input was written"),
+        )
+        .expect("the main input is JSON");
+        input["resolutionOptions"][option] = value;
+        std::fs::write(&path, input.to_string()).expect("the main input is writable");
+    }
+
+    #[test]
+    fn both_loaders_refuse_a_target_condition_or_depth_on_the_main_input() {
+        let root = scratch_suite("target-options");
+        for (n, (option, value)) in [
+            ("versionId", serde_json::json!("2")),
+            ("versionTime", serde_json::json!("2026-09-21T07:07:00Z")),
+            ("minConf", serde_json::json!(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let set = format!("regtest/k1/qoption{n}");
+            write_set(
+                &root,
+                &set,
+                Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+                Some(serde_json::json!({})),
+                positive_output(),
+                None,
+            );
+            load_in(&root, &set).expect("the set loads before the option is added");
+            set_main_option(&root, &set, option, value.clone());
+            match load_in(&root, &set) {
+                Err(TargetError::MalformedFixture { detail, .. }) => assert!(
+                    detail.contains(&format!("resolutionOptions.{option}"))
+                        && detail.contains("resolve/NN/"),
+                    "the refusal names the option and where it belongs: {detail}"
+                ),
+                other => panic!("{option}: expected a refusal, got {other:?}"),
+            }
+
+            let allow_listed = "regtest/k1/qgppexmy";
+            write_set(
+                &root,
+                allow_listed,
+                None,
+                Some(serde_json::json!({ "updates": [] })),
+                positive_output(),
+                None,
+            );
+            set_main_option(&root, allow_listed, option, value);
+            assert!(
+                matches!(
+                    load_from(&root, allow_listed),
+                    Err(TargetError::MalformedFixture { ref detail, .. })
+                        if detail.contains(&format!("resolutionOptions.{option}"))
+                ),
+                "{option}: the allow-listed loader refuses it too"
+            );
+        }
         std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
     }
 
