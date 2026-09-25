@@ -1120,15 +1120,15 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::test_vectors::{
-        AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR, ERROR_CODE_DIVERGENCES,
-        FIXTURES_WITHOUT_SIGNAL_BLOCKS, NUMBER_ENCODED_VERSION_ID, Outcome, RowKey, SKIP_OVERRIDES,
-        SkipOverride, Vector, VectorIdType, confirmations_at_least, confirmations_exact,
-        discover_in, expected_driven_with, expected_emitted_code, field_hex,
-        field_nonzero_version_id, field_str, field_u64, field_version_id, fixture_announcements,
-        network_dirs_with_vectors, read_chain_fixture, read_chain_fixture_in, read_fixture_or_skip,
-        reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
-        signals_match, stale_overrides, test_suite_checked_out, unclassified_rows_with,
-        unused_divergences, version_id_matches,
+        AnnouncementDelivery, AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR,
+        ERROR_CODE_DIVERGENCES, FIXTURES_WITHOUT_SIGNAL_BLOCKS, NUMBER_ENCODED_VERSION_ID, Outcome,
+        RowKey, SKIP_OVERRIDES, SkipOverride, SkipReason, Vector, VectorIdType,
+        confirmations_at_least, confirmations_exact, discover_in, expected_driven_with,
+        expected_emitted_code, field_hex, field_nonzero_version_id, field_str, field_u64,
+        field_version_id, fixture_announcements, network_dirs_with_vectors, read_chain_fixture,
+        read_chain_fixture_in, read_fixture_or_skip, reconcile_driven_with, redundant_overrides,
+        render_minted_summary, render_summary_with, signals_match, stale_overrides,
+        test_suite_checked_out, unclassified_rows_with, unused_divergences, version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -2293,6 +2293,185 @@ mod tests {
         assert!(!driven.contains(&RowKey::case(OPTIONS_SET, "07")));
         drive_resolve_options_with(&vectors, OVERRIDE, ERROR_CODE_DIVERGENCES);
         check_ledger_invariants(&vectors, OVERRIDE);
+    }
+
+    /// The set of the `late-code` and `withheld` synthetic corpora: the minted
+    /// regtest late-publishing fork reshaped into the regenerated layout (see
+    /// `fixtures/layout/README.md`).
+    const FORK_SET: &str = "regtest/k1/qgph42l3";
+
+    /// A local divergence table mapping the test suite's late-publishing code
+    /// to the specification's. The production table stays empty until a
+    /// checked-out vector records the divergent code.
+    const REHEARSAL_DIVERGENCE: &[CodeDivergence] = &[CodeDivergence {
+        vector_code: "LATE_PUBLISHING_ERROR",
+        spec_code: "LATE_PUBLISHING",
+        issue: "rehearsal: the regenerated test suite records the late-publishing error under a \
+                different code than the specification",
+    }];
+
+    /// A negative synthetic corpus, discovered fresh: exactly the fork set.
+    fn fork_vectors(corpus: &str) -> Vec<Vector> {
+        let vectors = discover_in(&Corpus::synthetic(corpus));
+        assert_eq!(
+            vectors.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            [FORK_SET],
+            "the {corpus} corpus holds exactly its one set"
+        );
+        vectors
+    }
+
+    /// The late-code set records `LATE_PUBLISHING_ERROR`. Through the
+    /// divergence entry its Resolve row is driven off the replayed fork and
+    /// asserts the resolver emits `LATE_PUBLISHING`, and the entry counts as
+    /// used.
+    ///
+    /// The genesis-key, update-crypto and end-state drivers are not called on
+    /// synthetic corpora: the reshaped sets carry no signing key, and those
+    /// rows are driven on the checked-out suite.
+    #[test]
+    fn synthetic_late_code_asserts_the_specification_code() {
+        let vectors = fork_vectors("late-code");
+        assert!(vectors[0].is_negative());
+        drive_derivation(&vectors, &[]);
+        drive_resolve_with(&vectors, &[], REHEARSAL_DIVERGENCE);
+        check_ledger_invariants(&vectors, &[]);
+        assert!(
+            unused_divergences(&vectors, &[], REHEARSAL_DIVERGENCE).is_empty(),
+            "the late-code Resolve row uses the entry"
+        );
+    }
+
+    /// Without the divergence entry the late-code row fails, naming the
+    /// recorded code and the one the resolver emitted: the mapping is
+    /// load-bearing, not decorative.
+    #[test]
+    fn synthetic_late_code_fails_without_its_divergence() {
+        let vectors = fork_vectors("late-code");
+        let message = panic_text(|| drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("expected error LATE_PUBLISHING_ERROR")
+                && message.contains("got LATE_PUBLISHING"),
+            "the failure names both codes: {message}"
+        );
+    }
+
+    /// On both negative sets the update-crypto and end-state rows skip as
+    /// expected-error, and nothing else; derivation, genesis-key and resolve
+    /// stay classified as driven. The genesis-key row is classification only:
+    /// the set carries no signing key.
+    #[test]
+    fn synthetic_negative_sets_skip_update_rows_as_expected_error() {
+        for corpus in ["late-code", "withheld"] {
+            let vectors = fork_vectors(corpus);
+            for kind in [AssertionKind::UpdateCrypto, AssertionKind::EndState] {
+                assert_eq!(
+                    vectors[0].skip_reasons_with(kind, &[]),
+                    BTreeSet::from([SkipReason::ExpectedError]),
+                    "{corpus}: the {kind} row skips as an expected error"
+                );
+                assert!(
+                    expected_driven_with(kind, &vectors, &[]).is_empty(),
+                    "{corpus}: no {kind} row is driven"
+                );
+            }
+            for kind in [
+                AssertionKind::Derivation,
+                AssertionKind::GenesisKey,
+                AssertionKind::Resolve,
+            ] {
+                assert!(
+                    expected_driven_with(kind, &vectors, &[]).contains(&RowKey::set(FORK_SET)),
+                    "{corpus}: the {kind} row is classified as driven"
+                );
+            }
+            assert!(
+                expected_driven_with(AssertionKind::ResolveOption, &vectors, &[]).is_empty(),
+                "{corpus}: the set has no resolve cases"
+            );
+        }
+    }
+
+    /// The withheld set has the files of a CAS-announced update set — update
+    /// steps and a sidecar without `updates` — but its expected error makes it
+    /// negative, so it is not read as CAS. Its Resolve row is driven and the
+    /// resolver emits `MISSING_UPDATE_DATA` off the replayed fork, with the
+    /// production divergence table.
+    #[test]
+    fn synthetic_withheld_update_is_negative_not_cas() {
+        let vectors = fork_vectors("withheld");
+        let delivery = vectors[0].delivery;
+        assert!(
+            delivery.negative,
+            "an expected error makes the set negative"
+        );
+        assert_ne!(
+            delivery.announcement,
+            Some(AnnouncementDelivery::Cas),
+            "a negative set is never read as CAS-announced"
+        );
+        assert!(
+            vectors[0]
+                .skip_reasons_with(AssertionKind::Resolve, &[])
+                .is_empty(),
+            "the withheld Resolve row carries no skip reason"
+        );
+        drive_derivation(&vectors, &[]);
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        check_ledger_invariants(&vectors, &[]);
+
+        // The same drive fails if the resolver's code is not the recorded one.
+        let mut wrong = fork_vectors("withheld");
+        wrong[0].outcome = Outcome::Error {
+            code: "LATE_PUBLISHING".to_string(),
+        };
+        let message = panic_text(|| drive_resolve_with(&wrong, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("got MISSING_UPDATE_DATA"),
+            "the failure names the emitted code: {message}"
+        );
+    }
+
+    /// A divergence entry that no driven negative case records is reported by
+    /// the guard: the options corpus records no `LATE_PUBLISHING_ERROR`.
+    #[test]
+    fn synthetic_unused_divergence_is_reported() {
+        let unused = unused_divergences(&options_vectors(), &[], REHEARSAL_DIVERGENCE);
+        assert_eq!(unused.len(), 1, "{unused:?}");
+        assert!(unused[0].contains("LATE_PUBLISHING_ERROR"), "{unused:?}");
+    }
+
+    /// A hand-written skip of one negative resolve case removes exactly that
+    /// row: the drivers and the ledger checks stay green, ten cases stay
+    /// driven, and the coverage summary counts the skipped row and prints its
+    /// reason.
+    #[test]
+    fn a_skip_override_on_one_resolve_case_keeps_the_drivers_green() {
+        const REASON: &str = "stands in for a hand-written skip of one resolve case";
+        const OVERRIDE: &[SkipOverride] = &[SkipOverride {
+            vector: OPTIONS_SET,
+            kind: AssertionKind::ResolveOption,
+            case: Some("04"),
+            reason: REASON,
+        }];
+        let vectors = options_vectors();
+
+        let driven = expected_driven_with(AssertionKind::ResolveOption, &vectors, OVERRIDE);
+        assert_eq!(driven.len(), 10, "{driven:?}");
+        assert!(!driven.contains(&RowKey::case(OPTIONS_SET, "04")));
+        drive_resolve_with(&vectors, OVERRIDE, ERROR_CODE_DIVERGENCES);
+        drive_resolve_options_with(&vectors, OVERRIDE, ERROR_CODE_DIVERGENCES);
+        check_ledger_invariants(&vectors, OVERRIDE);
+
+        let summary = render_summary_with(&vectors, OVERRIDE);
+        let row: Vec<&str> = summary
+            .lines()
+            .find(|line| line.trim_start().starts_with("resolve-option "))
+            .unwrap_or_else(|| panic!("the summary has a resolve-option row:\n{summary}"))
+            .split_whitespace()
+            .collect();
+        assert_eq!(row, ["resolve-option", "10", "1"], "{summary}");
+        assert!(summary.contains(REASON), "{summary}");
     }
 
     /// UPDATE driver: for EVERY vector discovered under `test-suite/` that ships
