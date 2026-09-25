@@ -1121,14 +1121,15 @@ mod tests {
     use crate::document::Document;
     use crate::test_vectors::{
         AnnouncementDelivery, AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR,
-        ERROR_CODE_DIVERGENCES, FIXTURES_WITHOUT_SIGNAL_BLOCKS, NUMBER_ENCODED_VERSION_ID, Outcome,
-        RowKey, SKIP_OVERRIDES, SkipOverride, SkipReason, Vector, VectorIdType,
-        confirmations_at_least, confirmations_exact, discover_in, expected_driven_with,
-        expected_emitted_code, field_hex, field_nonzero_version_id, field_str, field_u64,
-        field_version_id, fixture_announcements, network_dirs_with_vectors, read_chain_fixture,
-        read_chain_fixture_in, read_fixture_or_skip, reconcile_driven_with, redundant_overrides,
-        render_minted_summary, render_summary_with, signals_match, stale_overrides,
-        test_suite_checked_out, unclassified_rows_with, unused_divergences, version_id_matches,
+        ERROR_CODE_DIVERGENCES, FIXTURES_WITHOUT_SIGNAL_BLOCKS, GenesisDelivery,
+        NUMBER_ENCODED_VERSION_ID, Outcome, RowKey, SKIP_OVERRIDES, SkipOverride, SkipReason,
+        Vector, VectorIdType, confirmations_at_least, confirmations_exact, discover_in,
+        expected_driven_with, expected_emitted_code, field_hex, field_nonzero_version_id,
+        field_str, field_u64, field_version_id, fixture_announcements, network_dirs_with_vectors,
+        read_chain_fixture, read_chain_fixture_in, read_fixture_or_skip, reconcile_driven_with,
+        redundant_overrides, render_minted_summary, render_summary_with, signals_match,
+        stale_overrides, test_suite_checked_out, unclassified_rows_with, unused_divergences,
+        version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -2544,6 +2545,62 @@ mod tests {
             message.contains("got MISSING_UPDATE_DATA"),
             "the failure names the emitted code: {message}"
         );
+    }
+
+    /// The set of the `withheld-genesis` synthetic corpus: an external set with
+    /// no sidecar `genesisDocument`, expecting `NOT_FOUND`.
+    const WITHHELD_GENESIS_SET: &str = "mutinynet/x1/qh66uy2s";
+
+    /// An external set that withholds its genesis document on purpose has the
+    /// files of a CAS-genesis set; only its expected error tells them apart.
+    /// Its Resolve row is classified negative, driven with no genesis source,
+    /// and asserts the resolver's `NOT_FOUND` — it is not left unclassified.
+    #[test]
+    fn synthetic_withheld_genesis_is_driven_not_unclassified() {
+        let vectors = discover_in(&Corpus::synthetic("withheld-genesis"));
+        assert_eq!(
+            vectors.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            [WITHHELD_GENESIS_SET],
+            "the withheld-genesis corpus holds exactly its one set"
+        );
+        let vector = &vectors[0];
+        assert!(vector.is_negative() && !vector.has_sidecar_genesis_document);
+        assert_eq!(vector.delivery.genesis, GenesisDelivery::Sidecar);
+        assert!(
+            vector.is_drivable(AssertionKind::Resolve)
+                && vector
+                    .skip_reasons_with(AssertionKind::Resolve, &[])
+                    .is_empty(),
+            "the Resolve row is drivable and carries no skip reason"
+        );
+        drive_derivation(&vectors, &[]);
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        check_ledger_invariants(&vectors, &[]);
+
+        // The drive asserts the code: a different recorded code fails.
+        let mut wrong = vectors.clone();
+        wrong[0].outcome = Outcome::Error {
+            code: "INVALID_DID".to_string(),
+        };
+        let message = panic_text(|| drive_resolve_with(&wrong, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("got NOT_FOUND"),
+            "the failure names the emitted code: {message}"
+        );
+    }
+
+    /// A positive external set with no sidecar `genesisDocument` still needs
+    /// one to be driven: its genesis is CAS-delivered.
+    #[test]
+    fn a_positive_external_set_without_a_sidecar_genesis_is_not_drivable() {
+        let shapes = discover_in(&Corpus::synthetic("shapes"));
+        let cas_genesis = shapes
+            .iter()
+            .find(|v| v.id == WITHHELD_GENESIS_SET)
+            .expect("the shapes corpus holds the CAS-genesis set");
+        assert!(!cas_genesis.is_negative() && !cas_genesis.has_sidecar_genesis_document);
+        assert!(!cas_genesis.is_drivable(AssertionKind::Resolve));
+        assert!(!cas_genesis.is_drivable(AssertionKind::ResolveOption));
     }
 
     /// A divergence entry that no driven negative case records is reported by

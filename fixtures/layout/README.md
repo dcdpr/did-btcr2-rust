@@ -219,3 +219,19 @@ in `late-code`.
 
 Neither set carries a minting secret, so as with `options` their genesis-key,
 update-crypto and end-state rows are asserted through classification only.
+
+## `withheld-genesis`
+
+Passes discovery, and its Resolve row is driven with no chain. One set,
+`mutinynet/x1/qh66uy2s`, scenario id `reshaped-withheld-genesis`: the `shapes`
+corpus's CAS-genesis set (itself reshaped from
+`test-suite/mutinynet/x1/qh66uy2s`) with its `create/`, `resolve/input.json`
+and `other.json` copied, `scenarioId` renamed.
+
+Chosen: `resolve/output.json` expects `NOT_FOUND`, with a null `didDocument`
+and an empty `didDocumentMetadata`. The resolve input carries no sidecar, so
+there is no `genesisDocument` to resolve from, and the specification names
+that outcome `NOT_FOUND`. The files are those of a CAS-genesis set; only the
+expected error marks the genesis as withheld. It pins that such a set is
+driven and asserts its code, rather than being left neither driven nor
+skipped. No `signals.json`, no `update/`, no `resolve/NN/` cases.

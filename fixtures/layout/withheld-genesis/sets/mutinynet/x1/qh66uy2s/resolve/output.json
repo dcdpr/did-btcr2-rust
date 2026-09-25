@@ -1,0 +1,8 @@
+{
+    "didDocument": null,
+    "didDocumentMetadata": {},
+    "didResolutionMetadata": {
+        "error": "NOT_FOUND",
+        "errorMessage": "The genesis document is not in the sidecar"
+    }
+}

@@ -300,6 +300,7 @@ every set's provenance and what was copied, derived or hand-written.
 | `late-code` | `regtest/k1/qgph42l3` | a negative set recording `LATE_PUBLISHING_ERROR`: passes only with a `LATE_PUBLISHING_ERROR → LATE_PUBLISHING` entry in the divergence table it is given, fails without one | `synthetic_late_code_*`, `synthetic_unused_divergence_is_reported` |
 | `withheld` | `regtest/k1/qgph42l3` | update steps present, sidecar without them, expected `MISSING_UPDATE_DATA`: classified negative, not CAS | `synthetic_withheld_update_is_negative_not_cas`, `synthetic_negative_sets_skip_update_rows_as_expected_error` |
 | `below-min-conf` | `mutinynet/k1/q5pew2jc` | a positive set with `signals.json` whose main pair expects v1 (every signal below the default `minConf` at its recorded tip): its capture is replayed and cross-checked, and the walk probes, which need a version past genesis, do not run | `synthetic_signals_below_min_conf_resolve_at_genesis`, `walk_probes_apply_only_past_genesis` |
+| `withheld-genesis` | `mutinynet/x1/qh66uy2s` | an external set with no sidecar `genesisDocument` expecting `NOT_FOUND`: classified negative, its Resolve row driven with no genesis source, not left unclassified | `synthetic_withheld_genesis_is_driven_not_unclassified`, `a_positive_external_set_without_a_sidecar_genesis_is_not_drivable` |
 | `shapes` | four sets | classification from files alone: a CAS genesis, a CAS-announced update, and a two-member cohort, one member cohort-only with no `update/` | `shapes_corpus_classifies_from_files` |
 | `shapes-unknown-resolve-child` | one set | an unknown `resolve/` child fails discovery | `shapes_unknown_resolve_child_fails_discovery` |
 | `shapes-malformed-signals` | one set | a `signals.json` that is an object, not a bare array, fails discovery | `shapes_malformed_signals_fail_discovery` |
@@ -307,8 +308,8 @@ every set's provenance and what was copied, derived or hand-written.
 
 `options`, `late-code`, `withheld` and `below-min-conf` were reshaped from the
 two minted captures (`minted/clean-rotating-beacons`,
-`minted/late-publishing-fork`); the `shapes` sets from checked-out
-`test-suite/` sets. Nothing was minted for them.
+`minted/late-publishing-fork`); the `shapes` and `withheld-genesis` sets from
+checked-out `test-suite/` sets. Nothing was minted for them.
 `synthetic_chain_copies_equal_their_minted_source` holds each chain copy equal
 to its minted source on every chain field, and
 `synthetic_signals_record_the_capture_tip` holds the `options` set's

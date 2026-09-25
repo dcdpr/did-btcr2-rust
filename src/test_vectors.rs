@@ -2609,13 +2609,22 @@ impl Vector {
             // asserting resolve logic while bypassing the delivery mechanism
             // and leaving no row marking the gap.
             //
+            // A NEGATIVE set needs no genesis source: it asserts an error,
+            // and a withheld genesis document is itself one (the resolver
+            // answers `NOT_FOUND` without it). This is the precedence
+            // `derive_delivery` applies — an expected error is read before
+            // any file-shape CAS inference — so such a set carries no CAS
+            // reason and must be driven, not left unclassified.
+            //
             // The captured fixture is NOT a drivability condition. Every
             // anchored past-genesis vector on disk has one, and an absent
             // capture for a row this says is drivable is a bug that
             // `read_chain_fixture` raises by name — not a reason to quietly
             // drop the row.
             AssertionKind::Resolve | AssertionKind::ResolveOption => {
-                self.id_type != VectorIdType::External || self.has_sidecar_genesis_document
+                self.is_negative()
+                    || self.id_type != VectorIdType::External
+                    || self.has_sidecar_genesis_document
             }
             AssertionKind::UpdateCrypto | AssertionKind::EndState => {
                 self.update_layout != UpdateLayout::None
