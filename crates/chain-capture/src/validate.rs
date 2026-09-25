@@ -467,13 +467,6 @@ struct OnChainSignal {
 /// purpose).
 ///
 /// Returns the proved announcements sorted by block height, then txid.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the capture session does not route a set carrying signals.json through this gate yet"
-    )
-)]
 pub fn validate_signals(
     target: &VectorTarget,
     signals: &CaptureSignals,

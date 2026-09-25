@@ -14,19 +14,19 @@
 use chrono::Utc;
 use did_btcr2::document::{ResolutionOptions, ResolutionResult, SidecarData};
 use did_btcr2::identifier::Network;
-use did_btcr2_client::{Client, UreqTransport};
+use did_btcr2_client::{BtcTransport, Client, TransportError, UreqTransport};
 use error_iter::ErrorIter as _;
 use onlyerror::Error;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::fixture::{self, ChainFixture};
-use crate::pace::{PacePolicy, PaceState, PacedTransport, SystemClock};
+use crate::pace::{Clock, PacePolicy, PaceState, PacedTransport, SystemClock};
 use crate::record::{self, Recording, RecordingTransport};
-use crate::targets::{self, ExpectedOutcome, VectorTarget};
+use crate::targets::{self, CaptureSignals, ExpectedOutcome, VectorTarget};
 use crate::validate;
 
 /// Capture-layer failures. Every message names the vector it is about, because a
@@ -109,6 +109,19 @@ pub enum CaptureError {
     NoTip {
         /// The vector being captured.
         vector: String,
+    },
+
+    /// The indexer's tip is below the tip the set was recorded against.
+    #[error(
+        "{vector}: the indexer's tip is {live_tip}, below the recordedTip {recorded_tip} the set was recorded against — the indexer is behind the chain the set was recorded on, so wait for it to catch up or use another endpoint; nothing was written"
+    )]
+    TipBelowRecorded {
+        /// The set being captured.
+        vector: String,
+        /// The tip the indexer reported.
+        live_tip: u32,
+        /// The set's `recordedTip`.
+        recorded_tip: u32,
     },
 
     /// The chain has no vector this tool captures.
@@ -210,7 +223,7 @@ pub struct CaptureOutcome {
     pub path: PathBuf,
 }
 
-/// Validate a recording and, only if it passes, write the fixture.
+/// Validate a recording and, only if it passes, write the fixture under `root`.
 ///
 /// The gate and the write are ONE function so no caller can reorder them. A
 /// failure returns before the write, so an existing fixture is left
@@ -220,35 +233,14 @@ pub struct CaptureOutcome {
 /// `endpoint` records the base URL only and must never carry a credential;
 /// neither endpoint this tool contacts uses authentication, and no header, token
 /// or query string is recorded.
-pub fn emit(
-    target: &VectorTarget,
-    endpoint: &str,
-    tip_height: u32,
-    addresses: &BTreeMap<String, Vec<Value>>,
-    blocks: &BTreeMap<String, Value>,
-    observed_confirmations: Option<u32>,
-) -> Result<CaptureOutcome, CaptureError> {
-    emit_to(
-        &fixture::fixture_root(),
-        target,
-        endpoint,
-        tip_height,
-        addresses,
-        blocks,
-        observed_confirmations,
-    )
-}
-
-/// [`emit`] against an explicit destination root.
 ///
-/// The gate and the write stay one function; only where the file lands is a
-/// parameter. Without it, testing the write semantics meant writing into this
-/// repository's committed fixture tree and deleting the file afterwards — which
-/// a failing assertion in between would skip, leaving a stray file no
-/// committed-fixture check would catch, because that ledger is an explicit list
-/// rather than a directory scan.
+/// The destination is a parameter. Without it, testing the write semantics
+/// meant writing into this repository's committed fixture tree and deleting the
+/// file afterwards — which a failing assertion in between would skip, leaving a
+/// stray file no committed-fixture check would catch, because that ledger is an
+/// explicit list rather than a directory scan.
 pub fn emit_to(
-    root: &std::path::Path,
+    root: &Path,
     target: &VectorTarget,
     endpoint: &str,
     tip_height: u32,
@@ -291,9 +283,97 @@ pub fn emit_to(
     })
 }
 
+/// [`emit_to`] for a set that carries `signals.json`: the gate is the exact
+/// match with that record, and the fixture pins the set's `recordedTip`.
+///
+/// The ordering checks of [`validate::validate`] are not run: the record is
+/// the oracle for such a set, and a legitimate duplicate above a later update,
+/// or an announcement deliberately below the current height, would fail them.
+pub fn emit_signals_to(
+    root: &Path,
+    target: &VectorTarget,
+    signals: &CaptureSignals,
+    endpoint: &str,
+    addresses: &BTreeMap<String, Vec<Value>>,
+    blocks: &BTreeMap<String, Value>,
+    observed_confirmations: Option<u32>,
+) -> Result<CaptureOutcome, CaptureError> {
+    let proved = validate::validate_signals(target, signals, addresses)?;
+    let tip_height = signals.recorded_tip;
+    let fixture = ChainFixture {
+        captured_at: Utc::now().to_rfc3339(),
+        endpoint: endpoint.to_string(),
+        network: target.network_dir.clone(),
+        vector: target.id.clone(),
+        did: target.did.encode().to_string(),
+        tip_height,
+        signals: proved,
+        addresses: addresses.clone(),
+        blocks: blocks.clone(),
+        // The set's sidecar and expectations stay in the set's own tree.
+        sidecar: None,
+        expected: None,
+    };
+    let path = fixture::write_atomic_in(root, &fixture)?;
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(CaptureOutcome {
+        addresses: addresses.len(),
+        empty_addresses: addresses.values().filter(|txs| txs.is_empty()).count(),
+        signals: fixture.signals.len(),
+        tip_height,
+        confirmations: ConfirmationsCheck {
+            expected: target.expected.confirmations(),
+            observed: observed_confirmations,
+        },
+        path,
+    })
+}
+
+/// Ask the indexer for its current tip, outside the recording.
+///
+/// Built by hand because the client's own tip request is not reachable from
+/// here. The answer decides whether the capture may proceed; it is not fixture
+/// data, since a set carrying `signals.json` replays against its `recordedTip`.
+fn live_tip<T: BtcTransport>(
+    transport: &T,
+    base_url: &str,
+    vector: &str,
+) -> Result<u32, CaptureError> {
+    let no_tip = || CaptureError::NoTip {
+        vector: vector.to_string(),
+    };
+    let failed = |source: TransportError| CaptureError::ResolveFailed {
+        vector: vector.to_string(),
+        source: source.into(),
+    };
+    let request = http::Request::builder()
+        .method("GET")
+        .uri(format!("{base_url}/blocks/tip/height"))
+        .body(Vec::new())
+        .map_err(|e| failed(TransportError::Io(std::io::Error::other(e.to_string()))))?;
+    let response = transport.execute(request).map_err(failed)?;
+    if !response.status().is_success() {
+        return Err(no_tip());
+    }
+    std::str::from_utf8(response.body())
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .ok_or_else(no_tip)
+}
+
 /// Capture one vector: resolve it against the chain through the recorder, prove
-/// the result, then emit.
-fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, CaptureError> {
+/// the result, then emit into `out_root`.
+///
+/// The transport and the clock are parameters so a whole session — pacing,
+/// rate-limit retries, the tip check and the write — runs against a scripted
+/// indexer in tests exactly as it runs against a hosted one.
+pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
+    target: &VectorTarget,
+    base_url: &str,
+    transport: T,
+    clock: C,
+    out_root: &Path,
+) -> Result<CaptureOutcome, CaptureError> {
     // The vector's directory and its DID must name the same chain before a single
     // request goes out: capturing a mutinynet DID's transactions into a regtest
     // row would record the wrong chain under this vector's name.
@@ -306,33 +386,50 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
         });
     }
 
-    // One recording, one agent, two handles over both: the client consumes
-    // its transport by value and never gives it back, and the announcements'
-    // blocks are fetched after the resolve through the second handle.
+    // One recording, one pace state, and handles over both: the client consumes
+    // its transport by value and never gives it back, so the tip check before
+    // the resolve and the block fetches after it go through handles of their
+    // own. The pace state is shared by every handle so the whole session is
+    // spaced as one stream against a hosted indexer. The pacer sits below the
+    // recorder because the recorder refuses a non-2xx answer: a rate-limited
+    // reply is retried here and never reaches the fixture.
     let recording = Rc::new(RefCell::new(Recording::default()));
-    let transport = UreqTransport::new();
-    // One pace state for the session, so the resolve traffic and the block
-    // fetches are spaced as one stream against a hosted indexer. The pacer sits
-    // below the recorder because the recorder refuses a non-2xx answer: a
-    // rate-limited reply is retried here and never reaches the fixture.
     let pace = Rc::new(RefCell::new(PaceState::default()));
     let policy = if target.network == Network::Regtest {
         PacePolicy::unpaced()
     } else {
         PacePolicy::public_indexer()
     };
+    let paced =
+        || PacedTransport::sharing(transport.clone(), clock.clone(), policy, Rc::clone(&pace));
+
+    // A set carrying `signals.json` states its expected confirmations against
+    // its `recordedTip`, so the capture resolves at that tip and the replay
+    // reads it back from the fixture. A live tip below it means the indexer is
+    // behind the chain the set was recorded on, and nothing it serves can
+    // reproduce the set.
+    let pinned_tip = match &target.signals {
+        Some(signals) => {
+            let live = live_tip(&paced(), base_url, &target.id)?;
+            if live < signals.recorded_tip {
+                return Err(CaptureError::TipBelowRecorded {
+                    vector: target.id.clone(),
+                    live_tip: live,
+                    recorded_tip: signals.recorded_tip,
+                });
+            }
+            Some(signals.recorded_tip)
+        }
+        // Without a record, the client fetches `/blocks/tip/height` itself and
+        // the recorder captures that value as the tip the fixture will pin.
+        None => None,
+    };
+
     let client = Client::new(
         base_url.to_string(),
-        RecordingTransport::sharing(
-            PacedTransport::sharing(transport.clone(), SystemClock, policy, Rc::clone(&pace)),
-            Rc::clone(&recording),
-        ),
+        RecordingTransport::sharing(paced(), Rc::clone(&recording)),
     );
-
-    // `chain_tip_height` is None on purpose: the client fetches
-    // `/blocks/tip/height` and defaults it, and the recorder captures that value
-    // as the tip the fixture will pin.
-    let options = resolution_options_for(&target.sidecar, None)?;
+    let options = resolution_options_for(&target.sidecar, pinned_tip)?;
     let resolved = client.resolve(&target.did, options);
 
     // The expected-output check. This is where a real chain is contacted on every
@@ -341,15 +438,13 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     // partial body set cannot pass. `None` means the set expects an error and
     // the resolve failed with one; its recording is still the fixture.
     let result = check_outcome(target, resolved)?;
+    let observed_confirmations = result.and_then(|r| r.document_metadata.confirmations);
 
     // The confirming block of every announcement, whether or not the resolve
     // asked for it: a replay under a `versionTime` bound reads its
     // `mediantime`, and a capture without it cannot host that probe.
     let addresses = recording.borrow().addresses.clone();
-    let blocks_transport = RecordingTransport::sharing(
-        PacedTransport::sharing(transport, SystemClock, policy, Rc::clone(&pace)),
-        Rc::clone(&recording),
-    );
+    let blocks_transport = RecordingTransport::sharing(paced(), Rc::clone(&recording));
     record::capture_announcement_blocks(&blocks_transport, base_url, &addresses).map_err(
         |source| CaptureError::ResolveFailed {
             vector: target.id.clone(),
@@ -358,16 +453,30 @@ fn capture_one(target: &VectorTarget, base_url: &str) -> Result<CaptureOutcome, 
     )?;
 
     let recorded = recording.borrow();
+    if let Some(signals) = &target.signals {
+        // The pinned resolve never fetches the tip, so the recorder holds none;
+        // the fixture pins the set's own.
+        return emit_signals_to(
+            out_root,
+            target,
+            signals,
+            base_url,
+            &recorded.addresses,
+            &recorded.blocks,
+            observed_confirmations,
+        );
+    }
     let tip = recorded.tip.ok_or_else(|| CaptureError::NoTip {
         vector: target.id.clone(),
     })?;
-    emit(
+    emit_to(
+        out_root,
         target,
         base_url,
         tip,
         &recorded.addresses,
         &recorded.blocks,
-        result.and_then(|r| r.document_metadata.confirmations),
+        observed_confirmations,
     )
 }
 
@@ -532,7 +641,18 @@ pub fn run(
 
     let rows: Vec<(String, Result<CaptureOutcome, CaptureError>)> = selected
         .iter()
-        .map(|target| (target.id.clone(), capture_one(target, &base_url)))
+        .map(|target| {
+            (
+                target.id.clone(),
+                capture_one_with(
+                    target,
+                    &base_url,
+                    UreqTransport::new(),
+                    SystemClock,
+                    &fixture::fixture_root(),
+                ),
+            )
+        })
         .collect();
 
     // The session's own report goes to stderr, so a shell pipeline reading
@@ -1019,9 +1139,9 @@ mod tests {
     fn emit_defaults_to_the_repositorys_fixture_tree() {
         // `emit_to` takes the destination so the write is testable, and
         // `emit_writes_a_fixture_when_validation_passes` proves that root is a
-        // real parameter. What is left unguarded by that is the DEFAULT: `emit`
-        // must still target the tree a capture session writes into, and nothing
-        // else does.
+        // real parameter. What is left unguarded by that is the DEFAULT: the
+        // root a capture session writes into when no output root is given must
+        // still be the repository's own tree, and nothing else.
         //
         // Compared against an independently built literal, never against a
         // second call to the same function. Two identical calls agree for ANY
@@ -1509,5 +1629,862 @@ mod tests {
             client_error_code(&did_btcr2_client::Error::Identifier(method)).as_deref(),
             Some("METHOD_NOT_SUPPORTED")
         );
+    }
+
+    /// End-to-end captures of sets carrying `signals.json`, driven through a
+    /// scripted indexer and a fake clock: real key, real signed update, real
+    /// resolver, and the written fixture replayed offline.
+    mod signals_sets {
+        use super::*;
+        use crate::targets::TargetError;
+        use std::collections::VecDeque;
+        use std::num::NonZeroU64;
+        use std::time::{Duration, Instant};
+
+        const BASE: &str = "https://indexer.test";
+
+        /// A fixed test key, used only to build scratch sets in memory.
+        const TEST_KEY_HEX: &str =
+            "3a8e5c1f9b20d47e6f13c95a0b7d28e4f16a3c9d05b8e7f21c4d6a9b30e5f718";
+
+        /// Where the one update of every scratch set is announced.
+        const ANNOUNCED_AT: u32 = 300;
+        /// The tip every scratch set records its expectations against.
+        const RECORDED_TIP: u32 = 310;
+        /// The tip the scripted indexer reports unless a test says otherwise.
+        const LIVE_TIP: u32 = 320;
+
+        /// A clock that never waits: `sleep` advances `now`.
+        #[derive(Clone)]
+        struct FakeClock(Rc<RefCell<(Instant, Duration)>>);
+
+        impl FakeClock {
+            fn new() -> Self {
+                Self(Rc::new(RefCell::new((Instant::now(), Duration::ZERO))))
+            }
+        }
+
+        impl Clock for FakeClock {
+            fn now(&self) -> Instant {
+                let (base, offset) = *self.0.borrow();
+                base + offset
+            }
+
+            fn sleep(&self, duration: Duration) {
+                self.0.borrow_mut().1 += duration;
+            }
+        }
+
+        /// Queued `(status, body)` replies per request path.
+        type Replies = Rc<RefCell<BTreeMap<String, VecDeque<(u16, String)>>>>;
+
+        /// An in-memory Esplora. Scripted paths answer from their queue (the
+        /// last reply repeats); a continuation page answers `[]`; a block
+        /// header is generated from its hash unless the indexer is strict.
+        /// Every request is logged with the fake clock's time.
+        #[derive(Clone)]
+        struct FakeIndexer {
+            replies: Replies,
+            log: Rc<RefCell<Vec<(Instant, String)>>>,
+            clock: FakeClock,
+            strict: bool,
+        }
+
+        impl FakeIndexer {
+            fn new(clock: &FakeClock, strict: bool) -> Self {
+                Self {
+                    replies: Rc::default(),
+                    log: Rc::default(),
+                    clock: clock.clone(),
+                    strict,
+                }
+            }
+
+            /// Replace `path`'s queue with `replies`.
+            fn script(&self, path: &str, replies: Vec<(u16, String)>) {
+                self.replies
+                    .borrow_mut()
+                    .insert(path.to_string(), replies.into_iter().collect());
+            }
+
+            fn history(&self, address: &str, txs: Vec<Value>) {
+                self.script(
+                    &format!("/address/{address}/txs"),
+                    vec![(200, Value::Array(txs).to_string())],
+                );
+            }
+
+            fn tip(&self, height: u32) {
+                self.script("/blocks/tip/height", vec![(200, format!("{height}\n"))]);
+            }
+
+            fn log(&self) -> Vec<(Instant, String)> {
+                self.log.borrow().clone()
+            }
+        }
+
+        impl BtcTransport for FakeIndexer {
+            fn execute(
+                &self,
+                req: http::Request<Vec<u8>>,
+            ) -> Result<http::Response<Vec<u8>>, TransportError> {
+                let path = req.uri().path().to_string();
+                self.log.borrow_mut().push((self.clock.now(), path.clone()));
+                let scripted = self.replies.borrow_mut().get_mut(&path).map(|queue| {
+                    if queue.len() > 1 {
+                        queue.pop_front().expect("a non-empty queue")
+                    } else {
+                        queue.front().cloned().expect("a non-empty queue")
+                    }
+                });
+                let (status, body) = match scripted {
+                    Some(reply) => reply,
+                    None if path.contains("/txs/chain/") => (200, "[]".to_string()),
+                    None if !self.strict && path.starts_with("/block/") => {
+                        let hash = &path["/block/".len()..];
+                        let height = u32::from_str_radix(hash, 16).unwrap_or_default();
+                        (200, block_header(hash, height).to_string())
+                    }
+                    None => (404, format!("nothing at `{path}`")),
+                };
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(body.into_bytes())
+                    .expect("a valid status and body build a response"))
+            }
+        }
+
+        /// The hash of the block at `height` on the scripted chain.
+        fn block_hash(height: u32) -> String {
+            format!("{height:064x}")
+        }
+
+        fn block_header(hash: &str, height: u32) -> Value {
+            json!({
+                "id": hash,
+                "height": height,
+                "timestamp": 1_700_000_000i64 + i64::from(height),
+                "mediantime": 1_699_996_400i64 + i64::from(height),
+            })
+        }
+
+        /// An Esplora body for a transaction confirmed at `height` whose last
+        /// output is `last_script`.
+        fn tx(txid: &str, last_script: String, height: u32) -> Value {
+            json!({
+                "txid": txid,
+                "version": 2,
+                "locktime": 0,
+                "vin": [],
+                "vout": [
+                    { "scriptpubkey": "0014abababababababababababababababababababab", "value": 1_000 },
+                    { "scriptpubkey": last_script, "value": 0 },
+                ],
+                "size": 0,
+                "weight": 0,
+                "fee": 0,
+                "status": {
+                    "confirmed": true,
+                    "block_height": height,
+                    "block_hash": block_hash(height),
+                    "block_time": 1_700_000_000i64 + i64::from(height),
+                },
+            })
+        }
+
+        fn op_return(bytes: [u8; 32]) -> String {
+            format!("6a20{}", hex::encode(bytes))
+        }
+
+        /// A txid for the `n`th scripted transaction.
+        fn txid(n: u8) -> String {
+            format!("{n:02x}").repeat(32)
+        }
+
+        /// A scratch set in the regenerated layout, with the indexer that
+        /// serves its chain.
+        struct ScratchSet {
+            suite_root: PathBuf,
+            out_root: PathBuf,
+            id: String,
+            did: Did,
+            beacon: String,
+            update_hash: [u8; 32],
+            sidecar: Value,
+            genesis_document: Value,
+            expected_document: Value,
+            clock: FakeClock,
+            indexer: FakeIndexer,
+        }
+
+        impl ScratchSet {
+            /// A k1 DID on `network` with one signed update announced at
+            /// [`ANNOUNCED_AT`] on its P2WPKH genesis beacon, recorded against
+            /// [`RECORDED_TIP`]; the indexer reports [`LIVE_TIP`].
+            fn new(network: Network, network_dir: &str, tag: &str) -> Self {
+                let clock = FakeClock::new();
+                let indexer = FakeIndexer::new(&clock, false);
+
+                let mut key = [0u8; 32];
+                hex::decode_to_slice(TEST_KEY_HEX, &mut key).expect("the test key is hex");
+                let secret = secp256k1::SecretKey::from_slice(&key).expect("a valid scalar");
+                let public_key = secret.public_key(&secp256k1::Secp256k1::new());
+                let genesis = Client::new(BASE.to_string(), indexer.clone())
+                    .create(&public_key, network)
+                    .expect("a key DID is created offline");
+                let did_str = genesis.as_ref()["id"]
+                    .as_str()
+                    .expect("the created document names its DID")
+                    .to_string();
+                let did = Did::from_str(&did_str).expect("the created DID parses");
+
+                let patch_json = json!([{
+                    "op": "add",
+                    "path": "/service/-",
+                    "value": {
+                        "id": format!("{did_str}#dwn"),
+                        "type": "DecentralizedWebNode",
+                        "serviceEndpoint": "http://example.com/dwn",
+                    },
+                }]);
+                let patch: did_btcr2_client::Patch =
+                    serde_json::from_value(patch_json).expect("a static RFC-6902 patch");
+                let mut expected_document = genesis.as_ref().clone();
+                json_patch::patch(&mut expected_document, &patch).expect("the patch applies");
+                let update = genesis
+                    .construct_signed_update(
+                        patch,
+                        NonZeroU64::new(2).expect("version 2 is above zero"),
+                        &format!("{did_str}#initialKey"),
+                        did_btcr2::key::SecretKey::try_from(key).expect("a valid scalar"),
+                    )
+                    .expect("the update signs offline");
+                let update_json = update.as_ref().clone();
+                let sidecar = json!({ "updates": [update_json] });
+                let update_hash = update_hashes(&did_str, &sidecar).expect("the sidecar hashes")[0];
+
+                let beacons: Vec<(String, String)> = genesis
+                    .beacons()
+                    .map(|b| (b.id().to_string(), b.address().to_string()))
+                    .collect();
+                let beacon = beacons
+                    .iter()
+                    .find(|(id, _)| id.ends_with("#initialP2WPKH"))
+                    .map(|(_, address)| address.clone())
+                    .expect("a k1 DID has a P2WPKH genesis beacon");
+                for (_, address) in &beacons {
+                    indexer.history(address, Vec::new());
+                }
+                indexer.history(
+                    &beacon,
+                    vec![tx(&txid(1), op_return(update_hash), ANNOUNCED_AT)],
+                );
+                indexer.tip(LIVE_TIP);
+
+                let short: String = did_str
+                    .trim_start_matches("did:btcr2:k1")
+                    .chars()
+                    .take(8)
+                    .collect();
+                let id = format!("{network_dir}/k1/{short}");
+                let suite_root = scratch_root(&format!("{tag}-suite"));
+                let set_dir = suite_root.join(&id);
+                let write = |relative: &str, value: &Value| {
+                    let path = set_dir.join(relative);
+                    std::fs::create_dir_all(path.parent().expect("a file has a parent"))
+                        .expect("the set tree is creatable");
+                    std::fs::write(&path, serde_json::to_string_pretty(value).expect("JSON"))
+                        .expect("the set file is writable");
+                };
+                write(
+                    "create/input.json",
+                    &json!({ "idType": "KEY", "network": network_dir }),
+                );
+                write(
+                    "create/output.json",
+                    &json!({ "did": did_str, "genesisDocument": genesis.as_ref() }),
+                );
+                write(
+                    "update/01/input.json",
+                    &json!({ "sourceDocument": genesis.as_ref(), "patch": patch_json_of(&update_json) }),
+                );
+                write(
+                    "update/01/output.json",
+                    &json!({ "signedUpdate": update_json }),
+                );
+                write(
+                    "resolve/input.json",
+                    &json!({ "did": did_str, "resolutionOptions": { "sidecar": sidecar } }),
+                );
+                write(
+                    "resolve/output.json",
+                    &json!({
+                        "didDocument": expected_document,
+                        "didDocumentMetadata": {
+                            "versionId": "2",
+                            "deactivated": false,
+                            "confirmations": RECORDED_TIP - ANNOUNCED_AT + 1,
+                        },
+                        "didResolutionMetadata": { "contentType": "application/did" },
+                    }),
+                );
+                write(
+                    "other.json",
+                    &json!({ "scenarioId": format!("{tag}-scenario") }),
+                );
+
+                let set = Self {
+                    suite_root,
+                    out_root: scratch_root(&format!("{tag}-out")),
+                    id,
+                    did,
+                    beacon,
+                    update_hash,
+                    sidecar,
+                    genesis_document: genesis.as_ref().clone(),
+                    expected_document,
+                    clock,
+                    indexer,
+                };
+                set.write_signals(vec![set.entry(Some(1), false, &txid(1), ANNOUNCED_AT)]);
+                set
+            }
+
+            /// One `signals.json` entry announcing this set's update.
+            fn entry(
+                &self,
+                update: Option<u64>,
+                duplicate: bool,
+                txid: &str,
+                height: u32,
+            ) -> Value {
+                let mut entry = json!({
+                    "beaconId": format!("{}#initialP2WPKH", self.did.encode()),
+                    "address": self.beacon,
+                    "txid": txid,
+                    "blockHeight": height,
+                    "blockHash": block_hash(height),
+                    "signalBytes": hex::encode(self.update_hash),
+                    "recordedTip": RECORDED_TIP,
+                });
+                if let Some(update) = update {
+                    entry["update"] = json!(update);
+                }
+                if duplicate {
+                    entry["duplicate"] = json!(true);
+                }
+                entry
+            }
+
+            fn write_signals(&self, entries: Vec<Value>) {
+                std::fs::write(
+                    self.suite_root.join(&self.id).join("signals.json"),
+                    Value::Array(entries).to_string(),
+                )
+                .expect("signals.json is writable");
+            }
+
+            /// Rewrite `resolve/` as a negative set: no sidecar updates, and an
+            /// expected MISSING_UPDATE_DATA.
+            fn make_negative(&self) {
+                let resolve = self.suite_root.join(&self.id).join("resolve");
+                std::fs::write(
+                    resolve.join("input.json"),
+                    json!({ "did": self.did.encode().to_string(), "resolutionOptions": { "sidecar": {} } })
+                        .to_string(),
+                )
+                .expect("input.json is writable");
+                std::fs::write(
+                    resolve.join("output.json"),
+                    json!({
+                        "didDocument": null,
+                        "didResolutionMetadata": {
+                            "error": "MISSING_UPDATE_DATA",
+                            "errorMessage": "the update was withheld",
+                        },
+                    })
+                    .to_string(),
+                )
+                .expect("output.json is writable");
+            }
+
+            fn target(&self) -> VectorTarget {
+                targets::load_in(&self.suite_root, &self.id).expect("the scratch set loads")
+            }
+
+            fn capture(&self) -> Result<CaptureOutcome, CaptureError> {
+                capture_one_with(
+                    &self.target(),
+                    BASE,
+                    self.indexer.clone(),
+                    self.clock.clone(),
+                    &self.out_root,
+                )
+            }
+
+            /// The fixture the capture wrote, parsed.
+            fn written(&self) -> Value {
+                let path = fixture::fixture_path_in(&self.out_root, &self.id)
+                    .expect("the set id is a safe fixture path");
+                serde_json::from_str(
+                    &std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("{}: not written ({e})", path.display())),
+                )
+                .expect("the fixture is JSON")
+            }
+
+            /// Every file under the output root.
+            fn files_written(&self) -> Vec<PathBuf> {
+                fn walk(dir: &Path, into: &mut Vec<PathBuf>) {
+                    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            walk(&path, into);
+                        } else {
+                            into.push(path);
+                        }
+                    }
+                }
+                let mut files = Vec::new();
+                walk(&self.out_root, &mut files);
+                files
+            }
+
+            /// Resolve the set again from nothing but the written fixture: a
+            /// strict indexer serving only its bodies, at its pinned tip.
+            fn replay(&self) -> ResolutionResult {
+                let fixture = self.written();
+                let clock = FakeClock::new();
+                let replay = FakeIndexer::new(&clock, true);
+                for (address, txs) in fixture["addresses"]
+                    .as_object()
+                    .expect("the fixture records addresses")
+                {
+                    replay.history(address, txs.as_array().expect("a body is a list").clone());
+                }
+                for (hash, body) in fixture["blocks"].as_object().expect("blocks") {
+                    replay.script(&format!("/block/{hash}"), vec![(200, body.to_string())]);
+                }
+                let tip = u32::try_from(fixture["tip_height"].as_u64().expect("a pinned tip"))
+                    .expect("a block height");
+                Client::new(BASE.to_string(), replay)
+                    .resolve(
+                        &self.did,
+                        resolution_options_for(&self.sidecar, Some(tip))
+                            .expect("the sidecar is valid"),
+                    )
+                    .expect("the fixture replays offline")
+            }
+
+            fn cleanup(self) {
+                std::fs::remove_dir_all(&self.suite_root).expect("scratch suite is removable");
+                std::fs::remove_dir_all(&self.out_root).expect("scratch output is removable");
+            }
+        }
+
+        /// The patch an update carries, for the set's `update/01/input.json`.
+        fn patch_json_of(update: &Value) -> Value {
+            update["patch"].clone()
+        }
+
+        /// Capture `network` end to end and check what was written.
+        fn captures_and_replays(network: Network, network_dir: &str) {
+            let set = ScratchSet::new(network, network_dir, network_dir);
+            assert_eq!(set.did.components().network(), network);
+
+            let outcome = set.capture().expect("the set captures");
+            assert_eq!(outcome.tip_height, RECORDED_TIP);
+            assert_eq!(outcome.signals, 1);
+            assert_eq!(
+                outcome.confirmations,
+                ConfirmationsCheck {
+                    expected: Some(11),
+                    observed: Some(11),
+                }
+            );
+            let expected_path = std::fs::canonicalize(&set.out_root)
+                .expect("the output root resolves")
+                .join(format!("{}.json", set.id));
+            assert_eq!(
+                outcome.path, expected_path,
+                "filed by set id under the output root"
+            );
+            assert!(
+                set.id.starts_with(&format!("{network_dir}/k1/")),
+                "{}",
+                set.id
+            );
+
+            let written = set.written();
+            assert_eq!(written["network"], json!(network_dir));
+            assert_eq!(written["vector"], json!(set.id));
+            assert_eq!(written["did"], json!(set.did.encode().to_string()));
+            assert_eq!(
+                written["tip_height"],
+                json!(RECORDED_TIP),
+                "the fixture pins the recorded tip, not the live one"
+            );
+            assert_eq!(written["signals"].as_array().map(Vec::len), Some(1));
+            assert_eq!(written["signals"][0]["txid"], json!(txid(1)));
+            assert_eq!(written["signals"][0]["block_height"], json!(ANNOUNCED_AT));
+            assert_eq!(
+                written["addresses"][&set.beacon].as_array().map(Vec::len),
+                Some(1),
+                "the beacon's body is recorded"
+            );
+            assert_eq!(
+                written["addresses"].as_object().map(|a| a.len()),
+                Some(3),
+                "every genesis beacon the resolver asked about is recorded"
+            );
+            assert!(
+                written["blocks"].get(block_hash(ANNOUNCED_AT)).is_some(),
+                "the announcement's block is recorded: {}",
+                written["blocks"]
+            );
+
+            let replayed = set.replay();
+            assert_eq!(replayed.document.as_ref(), &set.expected_document);
+            assert_eq!(replayed.document_metadata.version_id.get(), 2);
+            assert_eq!(replayed.document_metadata.confirmations, Some(11));
+            assert!(!replayed.document_metadata.deactivated);
+            set.cleanup();
+        }
+
+        #[test]
+        fn captures_a_signet_set_against_its_recorded_tip_and_replays_it() {
+            captures_and_replays(Network::Signet, "signet");
+        }
+
+        #[test]
+        fn captures_a_testnet4_set_against_its_recorded_tip_and_replays_it() {
+            captures_and_replays(Network::TestnetV4, "testnet4");
+        }
+
+        #[test]
+        fn paced_capture_spaces_every_request_across_both_handles() {
+            let set = ScratchSet::new(Network::Signet, "signet", "paced");
+            set.capture().expect("the set captures");
+
+            let log = set.indexer.log();
+            assert_eq!(
+                log.first().map(|(_, path)| path.as_str()),
+                Some("/blocks/tip/height"),
+                "the live tip is asked for first: {log:?}"
+            );
+            assert!(
+                log.iter().any(|(_, path)| path.starts_with("/block/")),
+                "the block fetch after the resolve is part of the session: {log:?}"
+            );
+            for pair in log.windows(2) {
+                let gap = pair[1].0 - pair[0].0;
+                assert!(
+                    gap >= Duration::from_millis(500),
+                    "{} started {gap:?} after {}",
+                    pair[1].1,
+                    pair[0].1
+                );
+            }
+            set.cleanup();
+        }
+
+        #[test]
+        fn paced_capture_retries_a_rate_limited_answer_and_records_the_success() {
+            let set = ScratchSet::new(Network::Signet, "signet", "retry");
+            let body = vec![tx(&txid(1), op_return(set.update_hash), ANNOUNCED_AT)];
+            set.indexer.script(
+                &format!("/address/{}/txs", set.beacon),
+                vec![
+                    (429, "slow down".to_string()),
+                    (200, Value::Array(body.clone()).to_string()),
+                ],
+            );
+
+            set.capture().expect("a 429 is retried, not fatal");
+            assert_eq!(
+                set.written()["addresses"][&set.beacon],
+                Value::Array(body),
+                "the fixture holds the 2xx body"
+            );
+            let asked = set
+                .indexer
+                .log()
+                .iter()
+                .filter(|(_, path)| *path == format!("/address/{}/txs", set.beacon))
+                .count();
+            assert!(
+                asked >= 2,
+                "the rate-limited request was sent again: {asked}"
+            );
+            set.cleanup();
+        }
+
+        #[test]
+        fn refuses_a_live_tip_below_the_recorded_tip() {
+            let set = ScratchSet::new(Network::Signet, "signet", "behind");
+            set.indexer.tip(305);
+
+            let error = set
+                .capture()
+                .expect_err("an indexer behind the set cannot capture it");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::TipBelowRecorded {
+                        live_tip: 305,
+                        recorded_tip: RECORDED_TIP,
+                        ..
+                    }
+                ),
+                "got: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("305") && message.contains("310"),
+                "{message}"
+            );
+            assert!(set.files_written().is_empty(), "nothing is written");
+            assert_eq!(
+                set.indexer.log().len(),
+                1,
+                "the refusal comes before the resolve: {:?}",
+                set.indexer.log()
+            );
+            set.cleanup();
+        }
+
+        #[test]
+        fn refuses_an_unreadable_live_tip() {
+            let set = ScratchSet::new(Network::Signet, "signet", "no-tip");
+            set.indexer.script(
+                "/blocks/tip/height",
+                vec![(200, "not a height".to_string())],
+            );
+            let error = set
+                .capture()
+                .expect_err("an unreadable tip refuses the capture");
+            assert!(matches!(error, CaptureError::NoTip { .. }), "got: {error}");
+
+            set.indexer
+                .script("/blocks/tip/height", vec![(503, "unavailable".to_string())]);
+            let error = set
+                .capture()
+                .expect_err("a failed tip request refuses the capture");
+            assert!(matches!(error, CaptureError::NoTip { .. }), "got: {error}");
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        /// The set's history with the same update announced again at 308.
+        fn with_repeat(set: &ScratchSet) {
+            set.indexer.history(
+                &set.beacon,
+                vec![
+                    tx(&txid(1), op_return(set.update_hash), ANNOUNCED_AT),
+                    tx(&txid(2), op_return(set.update_hash), 308),
+                ],
+            );
+        }
+
+        #[test]
+        fn captures_a_repeated_signal_recorded_as_a_duplicate() {
+            let set = ScratchSet::new(Network::Signet, "signet", "dup-ok");
+            with_repeat(&set);
+            set.write_signals(vec![
+                set.entry(Some(1), false, &txid(1), ANNOUNCED_AT),
+                set.entry(Some(1), true, &txid(2), 308),
+            ]);
+
+            let outcome = set.capture().expect("a recorded duplicate captures");
+            assert_eq!(outcome.signals, 2);
+            let heights: Vec<Value> = set.written()["signals"]
+                .as_array()
+                .expect("signals")
+                .iter()
+                .map(|s| s["block_height"].clone())
+                .collect();
+            assert_eq!(heights, vec![json!(ANNOUNCED_AT), json!(308)]);
+            let replayed = set.replay();
+            assert_eq!(replayed.document_metadata.version_id.get(), 2);
+            assert_eq!(replayed.document_metadata.confirmations, Some(11));
+            set.cleanup();
+        }
+
+        #[test]
+        fn refuses_a_repeated_signal_recorded_without_the_duplicate_flag() {
+            let set = ScratchSet::new(Network::Signet, "signet", "dup-unflagged");
+            with_repeat(&set);
+            set.write_signals(vec![
+                set.entry(Some(1), false, &txid(1), ANNOUNCED_AT),
+                set.entry(Some(1), false, &txid(2), 308),
+            ]);
+
+            let error = targets::load_in(&set.suite_root, &set.id)
+                .expect_err("a repeat without the flag is a malformed record");
+            assert!(
+                matches!(error, TargetError::MalformedFixture { ref detail, .. } if detail.contains("duplicate")),
+                "got: {error}"
+            );
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        #[test]
+        fn refuses_a_repeated_signal_the_record_omits() {
+            let set = ScratchSet::new(Network::Signet, "signet", "dup-unrecorded");
+            with_repeat(&set);
+
+            let error = set.capture().expect_err("an unrecorded repeat is refused");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::Validation(ValidateError::UnrecordedSignal { txid: ref found, height: 308, .. })
+                        if *found == txid(2)
+                ),
+                "got: {error}"
+            );
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        #[test]
+        fn refuses_an_announcement_above_the_recorded_tip() {
+            let set = ScratchSet::new(Network::Signet, "signet", "above");
+            set.indexer.history(
+                &set.beacon,
+                vec![
+                    tx(&txid(1), op_return(set.update_hash), ANNOUNCED_AT),
+                    tx(&txid(3), op_return([0x77; 32]), 315),
+                ],
+            );
+
+            let error = set
+                .capture()
+                .expect_err("an announcement past the recorded tip is refused");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::Validation(ValidateError::AnnouncementAboveRecordedTip {
+                        height: 315,
+                        recorded_tip: RECORDED_TIP,
+                        ..
+                    })
+                ),
+                "got: {error}"
+            );
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        #[test]
+        fn captures_a_signet_set_with_dust_above_the_recorded_tip() {
+            let set = ScratchSet::new(Network::Signet, "signet", "dust");
+            let mut dust = tx(
+                &txid(4),
+                "0014cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd".to_string(),
+                315,
+            );
+            dust["vout"] = json!([{
+                "scriptpubkey": "0014cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+                "value": 546,
+            }]);
+            set.indexer.history(
+                &set.beacon,
+                vec![
+                    tx(&txid(1), op_return(set.update_hash), ANNOUNCED_AT),
+                    dust.clone(),
+                ],
+            );
+
+            let outcome = set
+                .capture()
+                .expect("dust above the tip does not block a capture");
+            assert_eq!(outcome.tip_height, RECORDED_TIP);
+            assert_eq!(outcome.signals, 1);
+            let written = set.written();
+            assert_eq!(written["tip_height"], json!(RECORDED_TIP));
+            assert!(
+                written["addresses"][&set.beacon]
+                    .as_array()
+                    .expect("the beacon body")
+                    .contains(&dust),
+                "the dust transaction is recorded as the chain served it"
+            );
+            let replayed = set.replay();
+            assert_eq!(replayed.document_metadata.version_id.get(), 2);
+            assert_eq!(replayed.document_metadata.confirmations, Some(11));
+            set.cleanup();
+        }
+
+        #[test]
+        fn captures_a_negative_set_whose_resolve_fails_with_a_coded_error() {
+            let set = ScratchSet::new(Network::Signet, "signet", "negative");
+            set.make_negative();
+            assert!(matches!(
+                set.target().expected,
+                ExpectedOutcome::Error { .. }
+            ));
+
+            let outcome = set
+                .capture()
+                .expect("a coded failure captures a negative set");
+            assert_eq!(outcome.tip_height, RECORDED_TIP);
+            assert_eq!(outcome.signals, 1);
+            assert_eq!(outcome.confirmations.observed, None);
+            let written = set.written();
+            assert_eq!(written["tip_height"], json!(RECORDED_TIP));
+            assert!(written.get("expected").is_none() && written.get("sidecar").is_none());
+            set.cleanup();
+        }
+
+        #[test]
+        fn captures_a_set_without_signals_through_the_sidecar_gate_at_the_live_tip() {
+            let set = ScratchSet::new(Network::Signet, "signet", "no-signals");
+            let mut target = set.target();
+            target.signals = None;
+            target.expected = ExpectedOutcome::Resolved {
+                document: set.expected_document.clone(),
+                version_id: 2,
+                deactivated: false,
+                confirmations: Some(u64::from(LIVE_TIP - ANNOUNCED_AT + 1)),
+            };
+
+            let outcome = capture_one_with(
+                &target,
+                BASE,
+                set.indexer.clone(),
+                set.clock.clone(),
+                &set.out_root,
+            )
+            .expect("a set without a record captures through the sidecar gate");
+            assert_eq!(outcome.tip_height, LIVE_TIP, "the recorder's tip is pinned");
+            assert_eq!(set.written()["tip_height"], json!(LIVE_TIP));
+
+            // The sidecar gate, not the record, judges this row: a sidecar
+            // update the chain never announced is refused as a missing signal.
+            set.indexer.history(&set.beacon, Vec::new());
+            target.expected = ExpectedOutcome::Resolved {
+                document: set.genesis_document.clone(),
+                version_id: 1,
+                deactivated: false,
+                confirmations: None,
+            };
+            let error = capture_one_with(
+                &target,
+                BASE,
+                set.indexer.clone(),
+                set.clock.clone(),
+                &set.out_root,
+            )
+            .expect_err("an unannounced sidecar update is refused");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::Validation(ValidateError::MissingSignal { .. })
+                ),
+                "got: {error}"
+            );
+            set.cleanup();
+        }
     }
 }

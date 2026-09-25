@@ -312,13 +312,6 @@ pub struct VectorTarget {
     /// What `resolve/output.json` says the resolve produces.
     pub expected: ExpectedOutcome,
     /// The set's `signals.json`, when it ships one.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the capture session does not route a set carrying signals.json through the signals gate yet"
-        )
-    )]
     pub signals: Option<CaptureSignals>,
 }
 
