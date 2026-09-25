@@ -102,11 +102,23 @@ pub(crate) const ALL_CHAIN_FIXTURES: &[&str] = &[
 /// fails by name. The source column is what keeps the copy honest — the copy
 /// must equal its source on everything the chain says, so no chain data in a
 /// synthetic corpus is invented.
-pub(crate) const SYNTHETIC_CHAIN_FIXTURES: &[(&str, &str, &str)] = &[(
-    "options",
-    "mutinynet/k1/q5pew2jc",
-    "minted/clean-rotating-beacons",
-)];
+pub(crate) const SYNTHETIC_CHAIN_FIXTURES: &[(&str, &str, &str)] = &[
+    (
+        "options",
+        "mutinynet/k1/q5pew2jc",
+        "minted/clean-rotating-beacons",
+    ),
+    (
+        "late-code",
+        "regtest/k1/qgph42l3",
+        "minted/late-publishing-fork",
+    ),
+    (
+        "withheld",
+        "regtest/k1/qgph42l3",
+        "minted/late-publishing-fork",
+    ),
+];
 
 /// Captures taken before the capture tool recorded the confirming blocks of
 /// the announcements it found. A `versionTime` bound compares against the

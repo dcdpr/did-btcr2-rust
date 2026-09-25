@@ -1,0 +1,8 @@
+{
+    "didDocument": null,
+    "didDocumentMetadata": {},
+    "didResolutionMetadata": {
+        "error": "MISSING_UPDATE_DATA",
+        "errorMessage": "The update announced at block 771 is not in the sidecar"
+    }
+}

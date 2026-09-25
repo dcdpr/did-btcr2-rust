@@ -138,3 +138,57 @@ Recipe, for a re-mint of the source capture: generate v1 through the create
 path for the capture's DID, apply the sidecar patches in `targetVersionId`
 order with `json-patch`, check the result against `expected.didDocument`, then
 write the files above from the capture and those documents.
+
+## `late-code`
+
+Passes discovery, and its Resolve row is driven off a real chain. One set,
+`regtest/k1/qgph42l3`, scenario id `reshaped-late-publishing-fork`, reshaped
+from the minted capture `fixtures/chain/minted/late-publishing-fork.json`: two
+different updates, both `targetVersionId` 2, announced on the `initialP2WPKH`
+beacon at blocks 771 and 773; tip 778.
+
+Copied verbatim from the capture:
+
+- `chain/regtest/k1/qgph42l3.json` is the capture with `vector` renamed and
+  `sidecar` and `expected` removed; a test holds the copy equal to its source
+  on every chain field.
+- The two sidecar updates, as `update/01` and `update/02` (`signedUpdate` in
+  `output.json`) and as `resolutionOptions.sidecar.updates` in
+  `resolve/input.json`. Each update is paired with the signal announcing its
+  JSON Document Hash: `update/01` is announced at 771, `update/02`, the
+  conflicting one, at 773.
+- `signals.json`, built as for `options`, with `recordedTip` 778.
+
+Derived: the v1 document in each `update/NN/input.json` is the create path's
+deterministic genesis document for the DID; its JCS hash equals both updates'
+`sourceHash`. No `resolve/NN/` cases.
+
+Chosen: `resolve/output.json` records the error as `LATE_PUBLISHING_ERROR`,
+the code the regenerated test suite uses, not the specification's
+`LATE_PUBLISHING` (which the capture's own `expected` records and the resolver
+emits). The set rehearses the error-code divergence table: it passes only with
+a `LATE_PUBLISHING_ERROR -> LATE_PUBLISHING` entry in the table the drive is
+given, and fails without one.
+
+The main input passes no `minConf`. The conflicting signal at 773 has exactly
+6 confirmations at the recorded tip 778 (`778 - 773 + 1`), which is exactly
+the resolver's default `minConf` of 6, so the late-publishing conflict is only
+reached at that default; a change to the default changes this set's expected
+result.
+
+## `withheld`
+
+Passes discovery, and its Resolve row is driven off a real chain. The same set
+and chain copy as `late-code` (a separate corpus because the set directory is
+named for the DID), scenario id `reshaped-withheld-update`.
+
+Chosen: `resolve/input.json` carries an empty sidecar object — the two
+updates were dropped, and it has no `genesisDocument` either — while
+`update/` still ships both steps. That is the file shape of a CAS-announced
+update set; only the expected error, `MISSING_UPDATE_DATA`, marks it as
+withheld data. It pins that an expected error classifies a set as negative
+before any file-shape CAS inference. The main input passes no `minConf`, as
+in `late-code`.
+
+Neither set carries a minting secret, so as with `options` their genesis-key,
+update-crypto and end-state rows are asserted through classification only.

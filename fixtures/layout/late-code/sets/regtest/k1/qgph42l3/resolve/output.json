@@ -1,0 +1,8 @@
+{
+    "didDocument": null,
+    "didDocumentMetadata": {},
+    "didResolutionMetadata": {
+        "error": "LATE_PUBLISHING_ERROR",
+        "errorMessage": "Conflicting update announced for version 2"
+    }
+}
