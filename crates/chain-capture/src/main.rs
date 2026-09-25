@@ -55,6 +55,13 @@ enum Command {
         /// Capture a single vector (e.g. `regtest/k1/qgppexmy`) instead of every
         /// drivable one.
         vector: Option<String>,
+        /// A suite root holding `{network}/{k1|x1}/{id}/` sets that carry
+        /// `signals.json`, such as a test-suite checkout outside this
+        /// repository. Captures the one set `vector` names.
+        suite_root: Option<PathBuf>,
+        /// The output root that receives `{network}/{k1|x1}/{id}.json`; the
+        /// repository's `fixtures/chain/` when absent.
+        out: Option<PathBuf>,
     },
     /// Publish a scenario onto a chain, then record it.
     Mint {
@@ -174,6 +181,11 @@ const HELP_TEXT: &str = concat!(
     "                                for a chain with no public endpoint (regtest).\n",
     "    --vector <id>               Capture one vector (e.g. regtest/k1/qgppexmy)\n",
     "                                instead of every drivable one.\n",
+    "    --suite-root <dir>          Read the set named by --vector (required with\n",
+    "                                this flag) from <dir>/<network>/<k1|x1>/<id>/,\n",
+    "                                which must carry signals.json.\n",
+    "    --out <dir>                 Write fixtures under <dir> instead of\n",
+    "                                fixtures/chain/.\n",
     "\n",
     "  mint                         Publish a scenario onto a chain so there is real\n",
     "                               chain data to capture.\n",
@@ -267,11 +279,15 @@ fn parse_capture(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command
     let mut network: Option<String> = None;
     let mut esplora_url: Option<String> = None;
     let mut vector: Option<String> = None;
+    let mut suite_root: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
     while let Some(arg) = sub_args.next() {
         match arg.to_str() {
             Some(p @ "--network") => network = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--esplora-url") => esplora_url = Some(sub_args.next().parse_str(p)?),
             Some(p @ "--vector") => vector = Some(sub_args.next().parse_str(p)?),
+            Some(p @ "--suite-root") => set_once(&mut suite_root, p, sub_args.next())?,
+            Some(p @ "--out") => set_once(&mut out, p, sub_args.next())?,
             // `chain-capture capture --help` is what an operator reaches for; the
             // global scan above only sees a leading `--help`, so each subcommand
             // answers it too rather than reporting an unknown argument.
@@ -279,11 +295,39 @@ fn parse_capture(mut sub_args: impl Iterator<Item = OsString>) -> Result<Command
             _ => return Err(CliError::Unknown(arg)),
         }
     }
+    let network = require_network(network)?;
+    if suite_root.is_some() && vector.is_none() {
+        return Err(CliError::MissingRequired(String::from(
+            "--suite-root captures one set; pass --vector <network>/<k1|x1>/<id>",
+        )));
+    }
     Ok(Command::Capture {
-        network: require_network(network)?,
+        network,
         esplora_url,
         vector,
+        suite_root,
+        out,
     })
+}
+
+/// Set a path flag that may be given only once.
+///
+/// A second `--suite-root` or `--out` is refused rather than letting the last
+/// one win: the two name where a capture reads and writes, and an operator who
+/// passed two should learn which would have been used.
+fn set_once(
+    slot: &mut Option<PathBuf>,
+    flag: &str,
+    value: Option<OsString>,
+) -> Result<(), CliError> {
+    let path = value.parse_path(flag)?;
+    if slot.is_some() {
+        return Err(CliError::MissingRequired(format!(
+            "{flag} <dir> exactly once; it was given twice"
+        )));
+    }
+    *slot = Some(path);
+    Ok(())
 }
 
 /// The absolute fee, in satoshis, used for an announcement when `--fee` is
@@ -350,10 +394,19 @@ fn describe(command: &Command) -> String {
             network,
             esplora_url,
             vector,
+            suite_root,
+            out,
         } => format!(
-            "capture (network={network}, esplora-url={}, vector={})",
+            "capture (network={network}, esplora-url={}, vector={}, suite-root={}, out={})",
             esplora_url.as_deref().unwrap_or("<default>"),
             vector.as_deref().unwrap_or("<all>"),
+            suite_root
+                .as_ref()
+                .map_or_else(|| "<test-suite>".to_string(), |p| p.display().to_string()),
+            out.as_ref().map_or_else(
+                || "<fixtures/chain>".to_string(),
+                |p| p.display().to_string()
+            ),
         ),
         Command::Mint {
             scenario,
@@ -444,7 +497,15 @@ fn run() -> Result<(), CaptureRunError> {
             network,
             esplora_url,
             vector,
-        } => Ok(capture::run(&network, esplora_url, vector)?),
+            suite_root,
+            out,
+        } => Ok(capture::run(
+            &network,
+            esplora_url,
+            vector,
+            suite_root,
+            out,
+        )?),
         Command::Mint {
             scenario,
             network,
@@ -506,6 +567,8 @@ mod tests {
             network,
             esplora_url,
             vector,
+            suite_root,
+            out,
         } = parsed.command
         else {
             panic!("expected Capture");
@@ -513,6 +576,149 @@ mod tests {
         assert_eq!(network, "regtest");
         assert_eq!(esplora_url, Some("http://localhost:3000".to_string()));
         assert_eq!(vector, None);
+        assert_eq!(suite_root, None);
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn test_parse_capture_from_a_suite_root_into_an_output_root() {
+        let parsed = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "signet",
+            "--suite-root",
+            "/tmp/s",
+            "--vector",
+            "signet/k1/abc",
+            "--out",
+            "/tmp/o",
+        ]))
+        .expect("a suite-root capture of one set parses");
+        let Command::Capture {
+            network,
+            esplora_url,
+            vector,
+            suite_root,
+            out,
+        } = parsed.command
+        else {
+            panic!("expected Capture");
+        };
+        assert_eq!(network, "signet");
+        assert_eq!(esplora_url, None);
+        assert_eq!(vector, Some("signet/k1/abc".to_string()));
+        assert_eq!(suite_root, Some(PathBuf::from("/tmp/s")));
+        assert_eq!(out, Some(PathBuf::from("/tmp/o")));
+    }
+
+    #[test]
+    fn test_suite_root_without_a_vector_is_an_error() {
+        let error = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "signet",
+            "--suite-root",
+            "/tmp/s",
+        ]))
+        .expect_err("a suite root captures one named set");
+        assert!(
+            matches!(
+                error,
+                CliError::MissingRequired(ref m) if m.contains("--suite-root") && m.contains("--vector")
+            ),
+            "the error names both flags: {error}"
+        );
+    }
+
+    #[test]
+    fn test_out_alone_redirects_the_default_capture() {
+        let parsed = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "mutinynet",
+            "--out",
+            "/tmp/o",
+        ]))
+        .expect("an output root needs no suite root");
+        let Command::Capture {
+            vector,
+            suite_root,
+            out,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected Capture");
+        };
+        assert_eq!(vector, None);
+        assert_eq!(suite_root, None);
+        assert_eq!(out, Some(PathBuf::from("/tmp/o")));
+    }
+
+    #[test]
+    fn test_suite_root_given_twice_is_an_error() {
+        let error = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "signet",
+            "--suite-root",
+            "/tmp/a",
+            "--suite-root",
+            "/tmp/b",
+            "--vector",
+            "signet/k1/abc",
+        ]))
+        .expect_err("two suite roots are ambiguous");
+        assert!(
+            matches!(error, CliError::MissingRequired(ref m) if m.contains("--suite-root") && m.contains("twice")),
+            "{error}"
+        );
+
+        let error = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "signet",
+            "--out",
+            "/tmp/a",
+            "--out",
+            "/tmp/b",
+        ]))
+        .expect_err("two output roots are ambiguous");
+        assert!(
+            matches!(error, CliError::MissingRequired(ref m) if m.contains("--out") && m.contains("twice")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_suite_root_without_a_value_is_an_error() {
+        let error = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "signet",
+            "--suite-root",
+        ]))
+        .expect_err("the flag needs a directory");
+        assert!(
+            matches!(error, CliError::MissingValue(ref flag) if flag == "--suite-root"),
+            "{error}"
+        );
+        let error = Args::parse(args_from_strings(&[
+            "capture",
+            "--network",
+            "signet",
+            "--out",
+        ]))
+        .expect_err("the flag needs a directory");
+        assert!(
+            matches!(error, CliError::MissingValue(ref flag) if flag == "--out"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_the_help_text_documents_the_suite_and_output_roots() {
+        assert!(HELP_TEXT.contains("--suite-root <dir>"), "{HELP_TEXT}");
+        assert!(HELP_TEXT.contains("--out <dir>"), "{HELP_TEXT}");
     }
 
     #[test]

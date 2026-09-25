@@ -512,13 +512,6 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
 ///
 /// Unlike [`load`], a set may carry no sidecar (read as `{}`), a sidecar
 /// without `updates`, and an expected error rather than a resolved document.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the capture session does not take a suite root yet; until it does, only the tests load through this path"
-    )
-)]
 pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
     check_vector_id(id)?;
     let network_dir = id

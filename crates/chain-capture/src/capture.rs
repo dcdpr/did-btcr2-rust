@@ -611,10 +611,17 @@ fn pretty(value: &Value) -> String {
 ///
 /// The endpoint is resolved first, so an operator who forgot `--esplora-url` on a
 /// chain with no hosted endpoint is told so before anything else happens.
+///
+/// With `suite_root`, the one set `vector` names is read from that root rather
+/// than from the allow-listed test-suite tree, and it must carry
+/// `signals.json`. `out` redirects every fixture of the session; without it they
+/// land in the repository's own fixture tree.
 pub fn run(
     network_dir: &str,
     esplora_url: Option<String>,
     vector: Option<String>,
+    suite_root: Option<PathBuf>,
+    out: Option<PathBuf>,
 ) -> Result<(), CaptureError> {
     let base_url = targets::endpoint(network_dir, esplora_url)?;
 
@@ -628,7 +635,10 @@ pub fn run(
                     filed_under: filed_under.to_string(),
                 });
             }
-            vec![targets::load(&id)?]
+            match &suite_root {
+                Some(root) => vec![targets::load_in(root, &id)?],
+                None => vec![targets::load(&id)?],
+            }
         }
         None => targets::load_all(network_dir)?,
     };
@@ -639,6 +649,7 @@ pub fn run(
         });
     }
 
+    let out_root = out.unwrap_or_else(fixture::fixture_root);
     let rows: Vec<(String, Result<CaptureOutcome, CaptureError>)> = selected
         .iter()
         .map(|target| {
@@ -649,7 +660,7 @@ pub fn run(
                     &base_url,
                     UreqTransport::new(),
                     SystemClock,
-                    &fixture::fixture_root(),
+                    &out_root,
                 ),
             )
         })
@@ -1169,8 +1180,14 @@ mod tests {
     fn run_rejects_a_vector_filed_under_another_network_before_any_request() {
         // mutinynet resolves its own endpoint, so this gets past the endpoint rule
         // and is refused on the mismatch — with no socket opened either way.
-        let error = run("mutinynet", None, Some("regtest/k1/qgppexmy".to_string()))
-            .expect_err("a vector may only be captured from its own chain");
+        let error = run(
+            "mutinynet",
+            None,
+            Some("regtest/k1/qgppexmy".to_string()),
+            None,
+            None,
+        )
+        .expect_err("a vector may only be captured from its own chain");
         assert!(
             matches!(
                 error,
@@ -1190,7 +1207,8 @@ mod tests {
 
     #[test]
     fn run_refuses_a_chain_with_no_endpoint_before_anything_else() {
-        let error = run("regtest", None, None).expect_err("regtest has no hosted Esplora endpoint");
+        let error = run("regtest", None, None, None, None)
+            .expect_err("regtest has no hosted Esplora endpoint");
         assert!(matches!(error, CaptureError::Target(_)), "got: {error}");
         let message = error_line(&error);
         assert!(
@@ -1201,7 +1219,8 @@ mod tests {
 
     #[test]
     fn run_refuses_a_chain_this_tool_captures_nothing_on() {
-        let error = run("signet", None, None).expect_err("no vector is filed under signet");
+        let error =
+            run("signet", None, None, None, None).expect_err("no vector is filed under signet");
         assert!(
             matches!(error, CaptureError::NoTargets { .. }),
             "got: {error}"
@@ -1212,6 +1231,78 @@ mod tests {
                 "the message lists what IS drivable, missing {id}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn run_with_a_suite_root_loads_the_set_from_it() {
+        // An empty root: the set is looked for there, not in the test-suite
+        // tree, and a set without signals.json is refused before any request.
+        let root = scratch_root("run-suite-root");
+        let out = scratch_root("run-suite-out");
+        let error = run(
+            "signet",
+            None,
+            Some("signet/k1/qabc".to_string()),
+            Some(root.clone()),
+            Some(out.clone()),
+        )
+        .expect_err("a set without signals.json is not captured from a suite root");
+        assert!(
+            matches!(
+                error,
+                CaptureError::Target(targets::TargetError::NoSignals { ref vector })
+                    if vector == "signet/k1/qabc"
+            ),
+            "got: {error}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&out)
+                .expect("the output root exists")
+                .count(),
+            0,
+            "nothing is written"
+        );
+        std::fs::remove_dir_all(&root).expect("scratch root is removable");
+        std::fs::remove_dir_all(&out).expect("scratch root is removable");
+    }
+
+    #[test]
+    fn run_with_a_suite_root_still_refuses_a_set_filed_under_another_network() {
+        let root = scratch_root("run-suite-mismatch");
+        let error = run(
+            "signet",
+            None,
+            Some("testnet4/k1/qabc".to_string()),
+            Some(root.clone()),
+            None,
+        )
+        .expect_err("a set may only be captured from its own chain");
+        assert!(
+            matches!(error, CaptureError::NetworkMismatch { ref filed_under, .. } if filed_under == "testnet4"),
+            "got: {error}"
+        );
+        std::fs::remove_dir_all(&root).expect("scratch root is removable");
+    }
+
+    #[test]
+    fn run_with_a_suite_root_refuses_a_malformed_set_id() {
+        let root = scratch_root("run-suite-bad-id");
+        let error = run(
+            "signet",
+            None,
+            Some("signet/../../etc".to_string()),
+            Some(root.clone()),
+            None,
+        )
+        .expect_err("a set id is shape-checked before any path is built");
+        assert!(
+            matches!(
+                error,
+                CaptureError::Target(targets::TargetError::InvalidVectorId { .. })
+            ),
+            "got: {error}"
+        );
+        std::fs::remove_dir_all(&root).expect("scratch root is removable");
     }
 
     /// An outcome as a captured row produces it, filed at the fixture path that
