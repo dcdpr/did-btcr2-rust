@@ -847,33 +847,40 @@ fn announced_bytes(tx: &Transaction) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes.as_bytes()).ok()
 }
 
-/// Every announcement the replayed chain serves: one per confirmed transaction,
-/// across every captured address, whose last output is `OP_RETURN <32 bytes>`.
-/// An unconfirmed announcement is left out, as the resolver leaves it out. The
-/// result is sorted.
+/// Every announcement the replayed chain serves: one per confirmed transaction
+/// whose last output is `OP_RETURN <32 bytes>`, counted once however many
+/// captured addresses list it. An unconfirmed announcement is left out, as the
+/// resolver leaves it out. The result is sorted.
+///
+/// Keyed by txid, as the capture tool's signals gate keys it: a transaction
+/// that spends from one beacon and pays change to another sits in both address
+/// histories, and it is still one announcement with one `signals.json` entry.
+/// Counting it per address would make this cross-check reject a capture the
+/// gate accepted, and a re-capture would reproduce the same fixture.
 pub(crate) fn fixture_announcements(fixture: &ChainFixture) -> Vec<Announcement> {
-    let mut announcements: Vec<Announcement> = fixture
-        .addresses
-        .values()
-        .flatten()
-        .filter_map(|tx| {
-            let bytes = announced_bytes(tx)?;
-            let Status::Confirmed {
-                block_height,
-                block_hash,
-                ..
-            } = &tx.status
-            else {
-                return None;
-            };
-            Some(Announcement {
+    let mut by_txid: BTreeMap<String, Announcement> = BTreeMap::new();
+    for tx in fixture.addresses.values().flatten() {
+        let Some(bytes) = announced_bytes(tx) else {
+            continue;
+        };
+        let Status::Confirmed {
+            block_height,
+            block_hash,
+            ..
+        } = &tx.status
+        else {
+            continue;
+        };
+        by_txid
+            .entry(tx.txid.to_string())
+            .or_insert_with(|| Announcement {
                 txid: tx.txid.to_string(),
                 block_height: *block_height,
                 block_hash: block_hash.to_string(),
                 signal_bytes: hex::encode(bytes),
-            })
-        })
-        .collect();
+            });
+    }
+    let mut announcements: Vec<Announcement> = by_txid.into_values().collect();
     announcements.sort();
     announcements
 }
@@ -6862,6 +6869,76 @@ fn fixture_announcements_reads_every_address_and_only_signals() {
             },
         ],
         "one announcement per confirmed OP_RETURN-last transaction, across addresses"
+    );
+}
+
+/// The capture tool's written shape for one announcing transaction that sits in
+/// two captured address histories — it spends from one beacon and pays change
+/// to another: the transaction body under both addresses, and one `signals`
+/// record naming the address `signals.json` names. The capture tool is a
+/// binary crate, so its writer cannot be called from here; this builds the same
+/// envelope and reads it through the replay's own deserializer.
+fn fixture_with_one_tx_at_two_addresses(extra: Option<serde_json::Value>) -> ChainFixture {
+    let hash = "7d".repeat(32);
+    let txid = "d1".repeat(32);
+    let tx = chain_signal_tx_json(&hash, &txid, 660, 1_774_015_945);
+    let mut change_history = vec![tx.clone()];
+    change_history.extend(extra);
+    chain_fixture_envelope(
+        serde_json::json!([{
+            "address": "bcrt1qbeacon",
+            "txid": txid,
+            "block_height": 660,
+            "block_time": 1_774_015_945,
+            "update_hash": hash,
+        }]),
+        serde_json::json!({
+            "bcrt1qbeacon": [tx],
+            "bcrt1qchange": change_history,
+        }),
+    )
+}
+
+/// The `signals.json` entry recording the announcement of
+/// [`fixture_with_one_tx_at_two_addresses`].
+fn entry_for_one_tx_at_two_addresses() -> SignalEntry {
+    let mut json = signal_entry(Some(1), 660, None);
+    json["address"] = serde_json::json!("bcrt1qbeacon");
+    json["txid"] = serde_json::json!("d1".repeat(32));
+    json["blockHash"] = serde_json::json!("00".repeat(32));
+    json["signalBytes"] = serde_json::json!("7d".repeat(32));
+    serde_json::from_value(json).expect("the synthetic entry deserializes")
+}
+
+#[test]
+fn fixture_announcements_count_one_transaction_seen_at_two_addresses_once() {
+    let fixture = fixture_with_one_tx_at_two_addresses(None);
+    assert_signals_consistent(&fixture, "regtest/k1/synthetic");
+    let announcements = fixture_announcements(&fixture);
+    assert_eq!(
+        announcements.len(),
+        1,
+        "one transaction is one announcement, however many histories list it: \
+         {announcements:?}"
+    );
+    assert_eq!(
+        signals_match(&[entry_for_one_tx_at_two_addresses()], &announcements),
+        Ok(()),
+        "the one signals.json entry the capture gate accepted must match the replay too"
+    );
+}
+
+#[test]
+fn fixture_announcements_still_count_a_second_transaction_at_a_shared_address() {
+    let second = chain_signal_tx_json(&"7e".repeat(32), &"d2".repeat(32), 661, 1_774_016_000);
+    let fixture = fixture_with_one_tx_at_two_addresses(Some(second));
+    let announcements = fixture_announcements(&fixture);
+    assert_eq!(announcements.len(), 2, "{announcements:?}");
+    let err = signals_match(&[entry_for_one_tx_at_two_addresses()], &announcements)
+        .expect_err("the second transaction is unrecorded");
+    assert!(
+        err.contains(&"d2".repeat(32)) && err.contains("661"),
+        "the message names the unrecorded announcement: {err}"
     );
 }
 
