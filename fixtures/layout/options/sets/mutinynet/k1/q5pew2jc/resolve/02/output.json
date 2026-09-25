@@ -1,0 +1,59 @@
+{
+    "didDocument": {
+        "@context": [
+            "https://www.w3.org/ns/did/v1.1",
+            "https://btcr2.dev/context/v1"
+        ],
+        "assertionMethod": [
+            "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialKey"
+        ],
+        "authentication": [
+            "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialKey"
+        ],
+        "capabilityDelegation": [
+            "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialKey"
+        ],
+        "capabilityInvocation": [
+            "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialKey"
+        ],
+        "id": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk",
+        "service": [
+            {
+                "id": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialP2PKH",
+                "serviceEndpoint": "bitcoin:mmj5L2Lscg8kiWigEfcSg4NtWXDW4EuhmP",
+                "type": "SingletonBeacon"
+            },
+            {
+                "id": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialP2WPKH",
+                "serviceEndpoint": "bitcoin:tb1qgsdeutk5gcyndy8mtjceedvfxtzmrgl2wn3zm4",
+                "type": "SingletonBeacon"
+            },
+            {
+                "id": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialP2TR",
+                "serviceEndpoint": "bitcoin:tb1p3jf5qpdnjkvykck625astvxamc4wjsvjx4xd3clvtqvjntvz5evqve9u98",
+                "type": "SingletonBeacon"
+            },
+            {
+                "id": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#rotatedP2WPKH",
+                "serviceEndpoint": "bitcoin:tb1qy35te8sk60dnrvxu7u6uerwhnsd37a5mdnjagg",
+                "type": "SingletonBeacon"
+            }
+        ],
+        "verificationMethod": [
+            {
+                "controller": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk",
+                "id": "did:btcr2:k1q5pew2jcfvr5v9x6vhkz67gfuyfs4ggtqxuq5hlm8wg7ydy26205evgxxrhdk#initialKey",
+                "publicKeyMultibase": "zQ3shppC94ES3CSSdSTNBtNWZhqQkCApN9ikjHdvACU4qqFAG",
+                "type": "Multikey"
+            }
+        ]
+    },
+    "didDocumentMetadata": {
+        "versionId": "2",
+        "deactivated": false,
+        "confirmations": 8
+    },
+    "didResolutionMetadata": {
+        "contentType": "application/did"
+    }
+}

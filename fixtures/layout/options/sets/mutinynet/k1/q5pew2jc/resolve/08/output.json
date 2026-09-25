@@ -1,0 +1,8 @@
+{
+    "didDocument": null,
+    "didDocumentMetadata": {},
+    "didResolutionMetadata": {
+        "error": "INVALID_OPTIONS",
+        "errorMessage": "versionId and versionTime are mutually exclusive"
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "didDocument": null,
+    "didDocumentMetadata": {},
+    "didResolutionMetadata": {
+        "error": "NOT_FOUND",
+        "errorMessage": "versionId 9 is beyond the DID history"
+    }
+}

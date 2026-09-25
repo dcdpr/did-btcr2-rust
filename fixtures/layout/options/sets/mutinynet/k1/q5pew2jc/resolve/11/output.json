@@ -1,0 +1,8 @@
+{
+    "didDocument": null,
+    "didDocumentMetadata": {},
+    "didResolutionMetadata": {
+        "error": "NOT_FOUND",
+        "errorMessage": "versionId 5 is past the deactivation at version 4"
+    }
+}

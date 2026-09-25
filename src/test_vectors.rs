@@ -94,6 +94,20 @@ pub(crate) const ALL_CHAIN_FIXTURES: &[&str] = &[
     "minted/late-publishing-fork",
 ];
 
+/// Every captured chain fixture of a synthetic corpus, as `(corpus, set id,
+/// source capture)`: the corpus under `fixtures/layout/`, the set whose chain
+/// snapshot it is, and the [`ALL_CHAIN_FIXTURES`] capture it was copied from.
+///
+/// Written down for the same reason as [`ALL_CHAIN_FIXTURES`]: a deletion
+/// fails by name. The source column is what keeps the copy honest — the copy
+/// must equal its source on everything the chain says, so no chain data in a
+/// synthetic corpus is invented.
+pub(crate) const SYNTHETIC_CHAIN_FIXTURES: &[(&str, &str, &str)] = &[(
+    "options",
+    "mutinynet/k1/q5pew2jc",
+    "minted/clean-rotating-beacons",
+)];
+
 /// Captures taken before the capture tool recorded the confirming blocks of
 /// the announcements it found. A `versionTime` bound compares against the
 /// block's `mediantime`, which only a `/block/{hash}` body carries, so the
@@ -730,7 +744,14 @@ fn assert_version_and_height_agree(fixture: &ChainFixture, vector_id: &str, reru
 /// repository: a missing one for a row the ledger says is driven is a bug, and
 /// skipping would let on-chain coverage vanish while the suite stayed green.
 pub(crate) fn read_chain_fixture(vector_id: &str) -> ChainFixture {
-    let path = chain_fixture_path(vector_id);
+    read_chain_fixture_in(&chain_fixture_root(), vector_id)
+}
+
+/// [`read_chain_fixture`] under an explicit chain-fixture root: a corpus's
+/// [`Corpus::chain`] directory, so a synthetic corpus replays its own captures.
+/// The same checks run on read.
+pub(crate) fn read_chain_fixture_in(chain_root: &Path, vector_id: &str) -> ChainFixture {
+    let path = chain_root.join(format!("{vector_id}.json"));
     let rerun = chain_capture_command(vector_id);
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
@@ -4803,6 +4824,85 @@ fn chain_fixture_every_committed_capture_is_self_consistent() {
         // fixture that no longer re-derives fails here, named.
         let fixture = read_chain_fixture(id);
         assert_ne!(fixture.tip_height, 0, "{id}: every capture pins a real tip");
+    }
+}
+
+/// Every synthetic chain snapshot is its source capture, field for field, on
+/// everything the chain says: the tip, the address histories, the block bodies,
+/// the derived signals and the DID. Only the envelope differs — the vector name,
+/// and no sidecar or expected result, because the set's own files carry those.
+/// A copy that drifted from its source, or a hand-edited transaction, fails here
+/// by name, so no chain data in a synthetic corpus can be invented.
+#[test]
+fn synthetic_chain_copies_equal_their_minted_source() {
+    assert!(
+        !SYNTHETIC_CHAIN_FIXTURES.is_empty(),
+        "the synthetic chain list must name at least the options corpus"
+    );
+    let raw = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{} must be JSON: {e}", path.display()))
+    };
+    for (corpus, id, source) in SYNTHETIC_CHAIN_FIXTURES {
+        assert!(
+            ALL_CHAIN_FIXTURES.contains(source),
+            "{corpus}/{id}: its source {source} is not a committed capture"
+        );
+        let chain_root = Corpus::synthetic(corpus).chain;
+        // Parsed through the replay's own reader, so the copy also passes the
+        // on-read signal checks.
+        let copy = read_chain_fixture_in(&chain_root, id);
+        assert!(
+            copy.sidecar.is_none() && copy.expected.is_none(),
+            "{corpus}/{id}: a synthetic chain copy carries no sidecar or expected result; the \
+             set's own files carry those"
+        );
+
+        let copy_raw = raw(&chain_root.join(format!("{id}.json")));
+        let source_raw = raw(&chain_fixture_path(source));
+        for field in [
+            "tip_height",
+            "addresses",
+            "blocks",
+            "signals",
+            "did",
+            "network",
+        ] {
+            assert_eq!(
+                copy_raw[field], source_raw[field],
+                "{corpus}/{id}: `{field}` must equal the source capture {source}"
+            );
+        }
+        assert_eq!(
+            copy_raw["vector"], *id,
+            "{corpus}/{id}: the copy is named for its set"
+        );
+    }
+}
+
+/// The options corpus's `signals.json` records the tip its expected outputs
+/// were computed against, and that tip is the tip its chain copy was read at.
+/// If they differed, every recorded `confirmations` would be measured against
+/// a chain the replay does not serve.
+#[test]
+fn synthetic_signals_record_the_capture_tip() {
+    let corpus = Corpus::synthetic("options");
+    let vectors = discover_in(&corpus);
+    assert_eq!(vectors.len(), 1, "the options corpus holds one set");
+    for vector in &vectors {
+        let signals = vector
+            .signals
+            .as_ref()
+            .unwrap_or_else(|| panic!("{}: the options set carries signals.json", vector.id));
+        let fixture = read_chain_fixture_in(&corpus.chain, &vector.id);
+        assert_eq!(
+            signals.recorded_tip, fixture.tip_height,
+            "{}: signals.json recordedTip must equal the chain copy's tip_height",
+            vector.id
+        );
     }
 }
 
