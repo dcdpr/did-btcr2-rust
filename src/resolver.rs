@@ -1662,9 +1662,11 @@ mod tests {
     /// [`version_id_matches`]: as a string when the output encodes it as one.
     /// `deactivated` by value. `confirmations` as AT LEAST the recorded number
     /// ([`confirmations_at_least`]) — a recorded value was taken at the set's
-    /// recorded tip, and a later tip only adds confirmations. A replayed output
-    /// that records no `confirmations` (the older mutinynet layout) is checked
-    /// by PROVENANCE instead: the resolver's value must derive from the
+    /// recorded tip, and a later tip only adds confirmations. A replayed MAIN
+    /// PAIR that records no `confirmations` (the older mutinynet layout) is
+    /// checked by PROVENANCE instead; a positive `resolve/NN/` case must record
+    /// the number, since a case stopping mid-walk did not apply the latest
+    /// signal: the resolver's value must derive from the
     /// most-recently-applied update's captured block. That is a consistency
     /// check on a single-signal row, where there is only one height it could
     /// have used, and a real "did it pick the LATEST?" test on a multi-signal
@@ -1761,6 +1763,16 @@ mod tests {
                             panic!("{ctx}: {e} (replayed at tip {})", f.tip_height)
                         }),
                         None => {
+                            // Provenance names the latest signal, which is the
+                            // applied one only for the main pair's full walk; a
+                            // case stopping mid-walk would be checked against
+                            // the wrong block.
+                            assert!(
+                                case_dir == "resolve",
+                                "{ctx}: a positive resolve/NN case must record \
+                                 didDocumentMetadata.confirmations — only the main pair can \
+                                 be checked by provenance from the latest captured signal"
+                            );
                             let signal = f.latest_signal().unwrap_or_else(|| {
                                 panic!("{ctx}: the captured fixture must carry a beacon signal")
                             });
@@ -2291,6 +2303,32 @@ mod tests {
             message.contains("confirmations") && message.contains('5') && message.contains('6'),
             "the exact check names confirmations and both values: {message}"
         );
+    }
+
+    /// A positive `resolve/NN` case that records no `confirmations` fails by
+    /// name: provenance from the latest signal fits only the main pair, and
+    /// case `02` stops at v2, two updates before it.
+    #[test]
+    fn synthetic_options_case_without_confirmations_fails_by_name() {
+        let mut vectors = options_vectors();
+        *recorded_confirmations(case_outcome(&mut vectors, "02")) = None;
+        let message =
+            panic_text(|| drive_resolve_options_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains("resolve/02")
+                && message.contains("must record didDocumentMetadata.confirmations"),
+            "the failure names the case and the missing member, rather than a \
+             provenance mismatch against the wrong block: {message}"
+        );
+    }
+
+    /// The main pair with no recorded `confirmations` is still checked by
+    /// provenance, against the latest captured signal.
+    #[test]
+    fn synthetic_options_main_pair_without_confirmations_checks_provenance() {
+        let mut vectors = options_vectors();
+        *recorded_confirmations(&mut vectors[0].outcome) = None;
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
     }
 
     /// A negative case asserts the code: a recorded code the resolver does not

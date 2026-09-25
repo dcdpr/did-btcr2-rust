@@ -525,7 +525,10 @@ vendor rows replay from their files regardless of what any live chain does. Re-c
 The three mutinynet captures share tip 3307267 and all announce at height
 3190760. Mutinynet vector outputs state no `confirmations`, so those rows assert
 confirmations by provenance — derived from the most-recently-applied update's
-captured block — rather than against a stated number.
+captured block — rather than against a stated number. Only a main pair is
+checked that way: the latest captured signal is the applied one only for the
+full walk, so a positive `resolve/NN` case that records no `confirmations`
+fails by name.
 
 ### `versionTime` probes need the announcements' blocks
 
