@@ -120,6 +120,21 @@ pub(crate) const SYNTHETIC_CHAIN_FIXTURES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Chain copies of a synthetic corpus read at an EARLIER tip than their source,
+/// as `(corpus, set id, source capture, tip)`.
+///
+/// Such a copy is what a capture pinned to `recordedTip = tip` would have
+/// written, provided every transaction the source recorded confirmed at or
+/// below `tip`: the address histories, blocks and signals are then the same,
+/// and only `tip_height` differs. A test holds each copy to exactly that, and
+/// its set's `signals.json` to `recordedTip = tip`.
+pub(crate) const SYNTHETIC_CHAIN_FIXTURES_AT_EARLIER_TIP: &[(&str, &str, &str, u32)] = &[(
+    "below-min-conf",
+    "mutinynet/k1/q5pew2jc",
+    "minted/clean-rotating-beacons",
+    3_443_748,
+)];
+
 /// Captures taken before the capture tool recorded the confirming blocks of
 /// the announcements it found. A `versionTime` bound compares against the
 /// block's `mediantime`, which only a `/block/{hash}` body carries, so the
@@ -5099,6 +5114,72 @@ fn synthetic_chain_copies_equal_their_minted_source() {
         assert_eq!(
             copy_raw["vector"], *id,
             "{corpus}/{id}: the copy is named for its set"
+        );
+    }
+}
+
+/// A chain copy at an earlier tip equals its source on every chain field but
+/// `tip_height`, holds no transaction above that tip, and its set's
+/// `signals.json` records that tip.
+#[test]
+fn synthetic_chain_copies_at_an_earlier_tip_equal_their_source_below_it() {
+    let raw = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{} must be JSON: {e}", path.display()))
+    };
+    for (corpus, id, source, tip) in SYNTHETIC_CHAIN_FIXTURES_AT_EARLIER_TIP {
+        assert!(
+            ALL_CHAIN_FIXTURES.contains(source),
+            "{corpus}/{id}: its source {source} is not a committed capture"
+        );
+        let synthetic = Corpus::synthetic(corpus);
+        let copy = read_chain_fixture_in(&synthetic.chain, id);
+        assert!(copy.sidecar.is_none() && copy.expected.is_none());
+        assert_eq!(copy.tip_height, *tip, "{corpus}/{id}: the copy's tip");
+
+        let source_fixture = read_chain_fixture(source);
+        assert!(
+            *tip < source_fixture.tip_height,
+            "{corpus}/{id}: {tip} is not earlier than the source's {}",
+            source_fixture.tip_height
+        );
+        for tx in source_fixture.addresses.values().flatten() {
+            let Status::Confirmed { block_height, .. } = &tx.status else {
+                panic!(
+                    "{corpus}/{id}: source transaction {} is unconfirmed",
+                    tx.txid
+                );
+            };
+            assert!(
+                block_height <= tip,
+                "{corpus}/{id}: source transaction {} confirmed at {block_height}, above the \
+                 copy's tip {tip}, so a capture at that tip would not hold it as recorded",
+                tx.txid
+            );
+        }
+
+        let copy_raw = raw(&synthetic.chain.join(format!("{id}.json")));
+        let source_raw = raw(&chain_fixture_path(source));
+        for field in ["addresses", "blocks", "signals", "did", "network"] {
+            assert_eq!(
+                copy_raw[field], source_raw[field],
+                "{corpus}/{id}: `{field}` must equal the source capture {source}"
+            );
+        }
+        assert_eq!(copy_raw["vector"], *id);
+
+        let vectors = discover_in(&synthetic);
+        let vector = vectors
+            .iter()
+            .find(|v| v.id == *id)
+            .unwrap_or_else(|| panic!("{corpus}: the set {id} is discovered"));
+        let signals = vector.signals.as_ref().expect("the set ships signals.json");
+        assert_eq!(
+            signals.recorded_tip, *tip,
+            "{corpus}/{id}: signals.json records the copy's tip"
         );
     }
 }

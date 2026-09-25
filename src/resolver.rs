@@ -1790,8 +1790,8 @@ mod tests {
     /// WHAT THE PROBES ON AN ON-CHAIN ROW BUY. The terminal assertion says the
     /// resolver ended up at the vector's expected document; on its own it cannot
     /// distinguish a resolver that WALKED the chain from one that landed on the
-    /// answer without reading it. Two probes close that, on a positive
-    /// replayed main pair:
+    /// answer without reading it. Two probes close that, on a replayed main
+    /// pair that expects a version past genesis ([`walk_probes_apply`]):
     ///
     /// 1. The genesis reference — the same DID, the same options, resolved with
     ///    no signals fed — must DIFFER from the terminal document. A replay in
@@ -1908,7 +1908,7 @@ mod tests {
                 divergences,
             );
 
-            if let (Some(f), false) = (&fixture, vector.is_negative()) {
+            if let (Some(f), true) = (&fixture, walk_probes_apply(vector)) {
                 let did: Did = field_str(&input, "did", id).parse().unwrap_or_else(|e| {
                     panic!("{id}: resolve/input.json.did must parse as a DID: {e}")
                 });
@@ -1975,6 +1975,21 @@ mod tests {
             observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::Resolve, vectors, &observed, overrides);
+    }
+
+    /// Whether the two walk probes of [`drive_resolve_with`] apply to a set's
+    /// replayed main pair: only when it expects a version past genesis.
+    ///
+    /// A set with `signals.json` replays its capture even when its main pair
+    /// expects version 1 — its signals may sit below the default `minConf` at
+    /// the recorded tip, or on a beacon a later update removed. The genesis
+    /// reference would then rightly equal the terminal document, and there is
+    /// no first update for a `versionTime` probe to stop before. A negative
+    /// set expects no version at all.
+    fn walk_probes_apply(vector: &Vector) -> bool {
+        vector
+            .expected_version_id()
+            .is_some_and(|version| version > 1)
     }
 
     /// RESOLVE-OPTION driver: every `resolve/NN/` case of every set, over
@@ -2166,6 +2181,44 @@ mod tests {
             checked, expected,
             "the main pair and every positive case, with the hand-computed confirmations"
         );
+    }
+
+    /// The set of the `below-min-conf` synthetic corpus: the options set's
+    /// chain copied at an earlier tip, where every signal sits below the
+    /// default `minConf` (see `fixtures/layout/README.md`).
+    const BELOW_MIN_CONF_SET: &str = "mutinynet/k1/q5pew2jc";
+
+    /// A positive set with `signals.json` whose main pair expects version 1
+    /// replays its capture, and its Resolve row passes: the walk probes, which
+    /// need a version past genesis, do not run on it.
+    #[test]
+    fn synthetic_signals_below_min_conf_resolve_at_genesis() {
+        let vectors = discover_in(&Corpus::synthetic("below-min-conf"));
+        assert_eq!(
+            vectors.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            [BELOW_MIN_CONF_SET],
+            "the below-min-conf corpus holds exactly its one set"
+        );
+        let vector = &vectors[0];
+        assert!(!vector.is_negative() && vector.signals.is_some());
+        assert_eq!(vector.expected_version_id(), Some(1));
+        assert!(
+            replay_fixture(vector).is_some(),
+            "a set with signals.json replays its capture even at genesis"
+        );
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        check_ledger_invariants(&vectors, &[]);
+    }
+
+    /// The walk probes run on a set expecting a version past genesis and on no
+    /// other: not at genesis, and not on an expected error.
+    #[test]
+    fn walk_probes_apply_only_past_genesis() {
+        assert!(walk_probes_apply(&options_vectors()[0]));
+        assert!(!walk_probes_apply(
+            &discover_in(&Corpus::synthetic("below-min-conf"))[0]
+        ));
+        assert!(!walk_probes_apply(&fork_vectors("withheld")[0]));
     }
 
     /// A replayed main input with no `resolutionOptions.sidecar`, as 20 sets of

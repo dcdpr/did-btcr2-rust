@@ -139,6 +139,33 @@ path for the capture's DID, apply the sidecar patches in `targetVersionId`
 order with `json-patch`, check the result against `expected.didDocument`, then
 write the files above from the capture and those documents.
 
+## `below-min-conf`
+
+Passes discovery, and its Resolve row is driven off a real chain. One set,
+`mutinynet/k1/q5pew2jc`, scenario id `reshaped-signals-below-min-conf`: the
+`options` set as a capture pinned to `recordedTip` 3443748 would have recorded
+it, three blocks below the source capture's tip 3443751.
+
+Copied verbatim from `options` (and so from
+`fixtures/chain/minted/clean-rotating-beacons.json`):
+
+- `create/`, `update/` and `resolve/input.json`.
+- `chain/mutinynet/k1/q5pew2jc.json`, with `tip_height` 3443748 and every
+  other field unchanged. Every transaction in the source's address histories
+  confirmed at or below 3443746, so a capture at 3443748 holds exactly the
+  same histories; a test holds the copy to that.
+- `signals.json`, with `recordedTip` 3443748.
+- `resolve/output.json` is the `options` set's `resolve/01/output.json`: the
+  v1 document, `versionId "1"`, 0 confirmations.
+
+Derived: at tip 3443748 the three announcements (3443744, 3443745, 3443746)
+have 5, 4 and 3 confirmations, all below the resolver's default `minConf` of
+6, which the main input does not override. None applies, so the main pair
+resolves to v1 while `signals.json` records three signals. The set pins that
+a positive set with `signals.json` expecting v1 replays and cross-checks its
+capture, and that the walk probes, which need a version past genesis, do not
+run on it. No `resolve/NN/` cases.
+
 ## `late-code`
 
 Passes discovery, and its Resolve row is driven off a real chain. One set,
