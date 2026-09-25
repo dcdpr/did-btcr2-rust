@@ -840,6 +840,16 @@ impl fmt::Display for Announcement {
     }
 }
 
+/// One announcement the replayed chain serves, with every captured address
+/// whose history lists its transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChainAnnouncement {
+    /// The announcement, as the multiset balance compares it.
+    pub(crate) announcement: Announcement,
+    /// Every captured address whose history lists the transaction.
+    pub(crate) addresses: BTreeSet<String>,
+}
+
 impl From<&SignalEntry> for Announcement {
     fn from(entry: &SignalEntry) -> Self {
         Self {
@@ -874,73 +884,113 @@ fn announced_bytes(tx: &Transaction) -> Option<[u8; 32]> {
 
 /// Every announcement the replayed chain serves: one per confirmed transaction
 /// whose last output is `OP_RETURN <32 bytes>`, counted once however many
-/// captured addresses list it. An unconfirmed announcement is left out, as the
-/// resolver leaves it out. The result is sorted.
+/// captured addresses list it, and carrying the set of those addresses. An
+/// unconfirmed announcement is left out, as the resolver leaves it out. The
+/// result is sorted by announcement.
 ///
 /// Keyed by txid, as the capture tool's signals gate keys it: a transaction
 /// that spends from one beacon and pays change to another sits in both address
 /// histories, and it is still one announcement with one `signals.json` entry.
 /// Counting it per address would make this cross-check reject a capture the
 /// gate accepted, and a re-capture would reproduce the same fixture.
-pub(crate) fn fixture_announcements(fixture: &ChainFixture) -> Vec<Announcement> {
-    let mut by_txid: BTreeMap<String, Announcement> = BTreeMap::new();
-    for tx in fixture.addresses.values().flatten() {
-        let Some(bytes) = announced_bytes(tx) else {
-            continue;
-        };
-        let Status::Confirmed {
-            block_height,
-            block_hash,
-            ..
-        } = &tx.status
-        else {
-            continue;
-        };
-        by_txid
-            .entry(tx.txid.to_string())
-            .or_insert_with(|| Announcement {
-                txid: tx.txid.to_string(),
-                block_height: *block_height,
-                block_hash: block_hash.to_string(),
-                signal_bytes: hex::encode(bytes),
-            });
+pub(crate) fn fixture_announcements(fixture: &ChainFixture) -> Vec<ChainAnnouncement> {
+    let mut by_txid: BTreeMap<String, ChainAnnouncement> = BTreeMap::new();
+    for (address, txs) in &fixture.addresses {
+        for tx in txs {
+            let Some(bytes) = announced_bytes(tx) else {
+                continue;
+            };
+            let Status::Confirmed {
+                block_height,
+                block_hash,
+                ..
+            } = &tx.status
+            else {
+                continue;
+            };
+            by_txid
+                .entry(tx.txid.to_string())
+                .or_insert_with(|| ChainAnnouncement {
+                    announcement: Announcement {
+                        txid: tx.txid.to_string(),
+                        block_height: *block_height,
+                        block_hash: block_hash.to_string(),
+                        signal_bytes: hex::encode(bytes),
+                    },
+                    addresses: BTreeSet::new(),
+                })
+                .addresses
+                .insert(address.clone());
+        }
     }
-    let mut announcements: Vec<Announcement> = by_txid.into_values().collect();
-    announcements.sort();
+    let mut announcements: Vec<ChainAnnouncement> = by_txid.into_values().collect();
+    announcements.sort_by(|a, b| a.announcement.cmp(&b.announcement));
     announcements
 }
 
 /// `signals.json` and the replayed chain agree exactly: the same announcements,
 /// counted with multiplicity, on `txid`, `blockHeight`, `blockHash` and
-/// `signalBytes`.
+/// `signalBytes`; and each entry's `address` is one whose captured history
+/// carries its transaction (a transaction that spends from one beacon and pays
+/// change to another is carried by both).
 ///
 /// Multiset equality is what makes a flagged duplicate — a second entry for an
 /// update already announced — a real claim: it must be matched by a second
 /// announcement on chain, and a chain holding only the first fails. `Err` names
-/// the first announcement one side has and the other lacks.
+/// the first announcement one side has and the other lacks, or the first entry
+/// whose address does not carry its transaction together with the addresses
+/// that do.
 pub(crate) fn signals_match(
     entries: &[SignalEntry],
-    announcements: &[Announcement],
+    on_chain: &[ChainAnnouncement],
 ) -> Result<(), String> {
     let mut balance: BTreeMap<Announcement, i64> = BTreeMap::new();
     for entry in entries {
         *balance.entry(Announcement::from(entry)).or_default() += 1;
     }
-    for announcement in announcements {
-        *balance.entry(announcement.clone()).or_default() -= 1;
+    for chain in on_chain {
+        *balance.entry(chain.announcement.clone()).or_default() -= 1;
     }
     match balance.into_iter().find(|(_, count)| *count != 0) {
-        None => Ok(()),
-        Some((announcement, count)) if count > 0 => Err(format!(
-            "signals.json records {announcement}, which the replayed chain does not serve \
-             ({count} more in signals.json than on chain)"
-        )),
-        Some((announcement, count)) => Err(format!(
-            "the replayed chain serves {announcement}, which signals.json does not record \
-             ({} more on chain than in signals.json)",
-            -count
-        )),
+        None => {}
+        Some((announcement, count)) if count > 0 => {
+            return Err(format!(
+                "signals.json records {announcement}, which the replayed chain does not serve \
+                 ({count} more in signals.json than on chain)"
+            ));
+        }
+        Some((announcement, count)) => {
+            return Err(format!(
+                "the replayed chain serves {announcement}, which signals.json does not record \
+                 ({} more on chain than in signals.json)",
+                -count
+            ));
+        }
     }
+
+    let carriers: BTreeMap<&str, &BTreeSet<String>> = on_chain
+        .iter()
+        .map(|chain| (chain.announcement.txid.as_str(), &chain.addresses))
+        .collect();
+    for entry in entries {
+        let addresses = carriers
+            .get(entry.txid.as_str())
+            .expect("the balance above matched every entry's txid to an announcement");
+        if !addresses.contains(&entry.address) {
+            return Err(format!(
+                "signals.json names address {} for transaction {}, but the replayed chain \
+                 carries that transaction only at {}",
+                entry.address,
+                entry.txid,
+                addresses
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A resolved `confirmations` is at least the recorded one.
@@ -6904,9 +6954,13 @@ fn parsed_entry(update: u64, duplicate: bool, txid: &str, block_height: u32) -> 
     serde_json::from_value(json).expect("the synthetic entry deserializes")
 }
 
-/// The announcement an entry claims, as the chain would serve it.
-fn announcement_of(entry: &SignalEntry) -> Announcement {
-    Announcement::from(entry)
+/// The announcement an entry claims, as the chain would serve it at the
+/// address the entry names.
+fn announcement_of(entry: &SignalEntry) -> ChainAnnouncement {
+    ChainAnnouncement {
+        announcement: Announcement::from(entry),
+        addresses: BTreeSet::from([entry.address.clone()]),
+    }
 }
 
 #[test]
@@ -6953,7 +7007,7 @@ fn signals_match_rejects_an_entry_the_chain_does_not_serve() {
 fn signals_match_compares_the_block_hash_too() {
     let entry = parsed_entry(1, false, &"a1".repeat(32), 300);
     let mut moved = announcement_of(&entry);
-    moved.block_hash = "ff".repeat(32);
+    moved.announcement.block_hash = "ff".repeat(32);
     assert!(signals_match(&[entry], &[moved]).is_err());
 }
 
@@ -6984,17 +7038,23 @@ fn fixture_announcements_reads_every_address_and_only_signals() {
     assert_eq!(
         got,
         vec![
-            Announcement {
-                txid: "a1".repeat(32),
-                block_height: 660,
-                block_hash: "00".repeat(32),
-                signal_bytes: hash_a,
+            ChainAnnouncement {
+                announcement: Announcement {
+                    txid: "a1".repeat(32),
+                    block_height: 660,
+                    block_hash: "00".repeat(32),
+                    signal_bytes: hash_a,
+                },
+                addresses: BTreeSet::from(["bcrt1qfirst".to_string()]),
             },
-            Announcement {
-                txid: "b1".repeat(32),
-                block_height: 662,
-                block_hash: "00".repeat(32),
-                signal_bytes: hash_b,
+            ChainAnnouncement {
+                announcement: Announcement {
+                    txid: "b1".repeat(32),
+                    block_height: 662,
+                    block_hash: "00".repeat(32),
+                    signal_bytes: hash_b,
+                },
+                addresses: BTreeSet::from(["bcrt1qsecond".to_string()]),
             },
         ],
         "one announcement per confirmed OP_RETURN-last transaction, across addresses"
@@ -7055,6 +7115,38 @@ fn fixture_announcements_count_one_transaction_seen_at_two_addresses_once() {
         Ok(()),
         "the one signals.json entry the capture gate accepted must match the replay too"
     );
+}
+
+#[test]
+fn signals_match_accepts_an_entry_naming_the_change_address() {
+    let fixture = fixture_with_one_tx_at_two_addresses(None);
+    let announcements = fixture_announcements(&fixture);
+    assert_eq!(
+        announcements[0].addresses,
+        BTreeSet::from(["bcrt1qbeacon".to_string(), "bcrt1qchange".to_string()]),
+        "both histories that list the transaction are carried"
+    );
+    let mut entry = entry_for_one_tx_at_two_addresses();
+    entry.address = "bcrt1qchange".to_string();
+    assert_eq!(signals_match(&[entry], &announcements), Ok(()));
+}
+
+#[test]
+fn signals_match_rejects_an_entry_naming_an_address_that_does_not_carry_it() {
+    let fixture = fixture_with_one_tx_at_two_addresses(None);
+    let announcements = fixture_announcements(&fixture);
+    let mut entry = entry_for_one_tx_at_two_addresses();
+    entry.address = "bcrt1qelsewhere".to_string();
+    let err = signals_match(&[entry], &announcements)
+        .expect_err("the named address does not carry the transaction");
+    for part in [
+        "bcrt1qelsewhere",
+        "bcrt1qbeacon",
+        "bcrt1qchange",
+        "d1".repeat(32).as_str(),
+    ] {
+        assert!(err.contains(part), "the message must carry {part}: {err}");
+    }
 }
 
 #[test]

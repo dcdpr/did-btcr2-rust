@@ -708,7 +708,9 @@ since.
 - **The signals.** The announcements found at the captured beacon addresses
   must equal `signals.json` exactly: the same transactions, each with the
   recorded `blockHeight`, `blockHash` and `signalBytes`, no more and no fewer.
-  This replaces the ordering checks that apply to a set without `signals.json`.
+  Each entry's `address` must be one of the captured addresses whose history
+  carries its transaction; a transaction that spends from that beacon and pays
+  change to another carries both, so either matches. This replaces the ordering checks that apply to a set without `signals.json`.
 
 ### Refusals, and what to do
 
@@ -718,7 +720,7 @@ Every refusal writes nothing for the set.
 |---|---|
 | The live tip is below `recordedTip`. | The indexer is behind the chain the set was recorded on. Wait for it to catch up, or name another endpoint with `--esplora-url`. |
 | An announcement (a transaction whose last output is `OP_RETURN` plus 32 bytes) is confirmed above `recordedTip`, or is unconfirmed. | The beacon has seen activity since the set was recorded, so the chain no longer matches the record. Report it upstream; there is nothing to retry. |
-| An announcement differs from `signals.json`: an entry with no announcement on chain, an announcement with no entry, or a disagreeing height, block hash or signal bytes. | Check that `--network`, the endpoint and the suite checkout are the ones the set was recorded on, then re-run. If they are, report the set upstream. |
+| An announcement differs from `signals.json`: an entry with no announcement on chain, an announcement with no entry, a disagreeing height, block hash or signal bytes, or an entry naming an address whose history does not carry its transaction. | Check that `--network`, the endpoint and the suite checkout are the ones the set was recorded on, then re-run. If they are, report the set upstream. |
 | `signals.json` repeats an `update` without `duplicate: true` on the later entry, or records one `txid` in two entries. | A malformed set. Report it upstream. |
 | The set declares a CAS or SMT beacon, or an entry belongs to a cohort, including a cohort-only set with no `update/` directory. | Unsupported: the resolver cannot query those beacons yet, so there is nothing to capture. Skip the set. |
 | The main `resolve/input.json` sets `versionId`, `versionTime` or `minConf` under `resolutionOptions`. | The capture resolves the main pair with only its sidecar and the recorded tip, while the conformance harness honours those options, so the two would check different resolves. The suite puts them in numbered `resolve/NN/` cases. Report the set upstream. |

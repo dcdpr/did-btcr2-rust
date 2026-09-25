@@ -82,7 +82,8 @@ is the generating implementation's text). A positive output is asserted on
 number-encoded vectors below), `deactivated`, and `confirmations` compared as
 **at least** the recorded value. A set that carries `signals.json` is replayed
 only after the chain fixture's announcements equal that file exactly (txid,
-block height, block hash, signal bytes). An unknown child under `resolve/`
+block height, block hash, signal bytes, and an address whose captured history
+carries the transaction). An unknown child under `resolve/`
 (neither the main pair nor a numbered case) fails discovery loudly.
 
 A `resolve-option` row inherits its set's `resolve` skip reasons: a case of a

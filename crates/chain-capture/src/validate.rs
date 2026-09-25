@@ -141,7 +141,9 @@ pub enum ValidateError {
         vector: String,
         /// The transaction whose record disagrees.
         txid: String,
-        /// The member that disagrees: `blockHeight`, `blockHash` or `signalBytes`.
+        /// The member that disagrees: `blockHeight`, `blockHash`, `signalBytes`
+        /// or `address`. For `address`, the on-chain side lists every captured
+        /// address whose history carries the transaction.
         field: &'static str,
         /// What signals.json records.
         recorded: String,
@@ -528,8 +530,10 @@ pub fn validate_signals(
 
     // 3. The confirmed announcements and the entries are the same multiset:
     //    each entry consumes the announcement with its txid, which must agree
-    //    on height, block hash and bytes; an announcement no entry consumed is
-    //    unrecorded.
+    //    on height, block hash and bytes, and the entry must name an address
+    //    whose captured history carries the transaction (a transaction that
+    //    spends from that beacon and pays change to another is carried by
+    //    both); an announcement no entry consumed is unrecorded.
     //
     // 4. There is no separate repeat check. Every announcement must match an
     //    entry, and the loader has already enforced the `update`-keyed
@@ -573,13 +577,15 @@ pub fn validate_signals(
                 hex::encode(found.bytes),
             ));
         }
-        let address = if found.addresses.contains(&entry.address) {
-            entry.address.clone()
-        } else {
-            found.addresses[0].clone()
-        };
+        if !found.addresses.contains(&entry.address) {
+            return Err(mismatch(
+                "address",
+                entry.address.clone(),
+                found.addresses.join(", "),
+            ));
+        }
         proved.push(CapturedSignal {
-            address,
+            address: entry.address.clone(),
             txid: entry.txid.clone(),
             block_height: found.block_height,
             block_time: found.block_time,
@@ -1650,5 +1656,72 @@ mod tests {
             proved[0].address, "tb1qbeacon",
             "the address the record names is kept"
         );
+    }
+
+    #[test]
+    fn signals_gate_keeps_a_record_that_names_the_change_address() {
+        // The same spend-with-change transaction, recorded under the beacon
+        // that received the change: that history carries it too, so it matches.
+        let mut entry = record(1, 0xa1, 300, U1, 310);
+        entry.address = "tb1qchange".to_string();
+        let record = signals(310, vec![entry]);
+        let addresses = bodies(&[
+            ("tb1qbeacon", vec![announce(0xa1, 300, U1)]),
+            ("tb1qchange", vec![announce(0xa1, 300, U1)]),
+        ]);
+
+        let proved = validate_signals(&set_target(), &record, &addresses)
+            .expect("the named address carries the transaction");
+        assert_eq!(proved.len(), 1);
+        assert_eq!(proved[0].address, "tb1qchange");
+    }
+
+    #[test]
+    fn signals_gate_refuses_a_record_naming_an_address_that_does_not_carry_it() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[("tb1qother", vec![announce(0xa1, 300, U1)])]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("an address that does not carry the transaction is refused");
+        assert!(
+            matches!(
+                error,
+                ValidateError::SignalMismatch {
+                    field: "address",
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+        let message = error.to_string();
+        for part in ["address", "tb1qbeacon", "tb1qother", txid(0xa1).as_str()] {
+            assert!(
+                message.contains(part),
+                "message must carry {part}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn signals_gate_address_refusal_lists_every_carrying_address() {
+        let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
+        let addresses = bodies(&[
+            ("tb1qother", vec![announce(0xa1, 300, U1)]),
+            ("tb1qthird", vec![announce(0xa1, 300, U1)]),
+        ]);
+
+        let error = validate_signals(&set_target(), &record, &addresses)
+            .expect_err("neither carrying address is the recorded one");
+        let ValidateError::SignalMismatch {
+            field: "address",
+            ref recorded,
+            ref on_chain,
+            ..
+        } = error
+        else {
+            panic!("got: {error}");
+        };
+        assert_eq!(recorded, "tb1qbeacon");
+        assert_eq!(on_chain, "tb1qother, tb1qthird");
     }
 }
