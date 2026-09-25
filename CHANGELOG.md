@@ -35,6 +35,15 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   the name table.
 - testnet4 has a default Esplora endpoint
   (`https://mempool.space/testnet4/api`) and `--network testnet4` is accepted.
+- `chain-capture` paces its requests to a hosted indexer at least 500 ms
+  apart across a session and retries HTTP 429 (up to 5 attempts, backing off
+  1/2/4/8 s); regtest is unpaced.
+- `chain-capture capture --suite-root <dir> --vector <id> [--out <dir>]`
+  captures a set that carries `signals.json` from any test-suite checkout
+  into any output root, with the chain tip pinned to the set's `recordedTip`
+  and the write gated on an exact match between the announcements on chain
+  and the recorded signals. A negative set is captured when its resolve fails
+  with a specification error code.
 
 ### Changed
 

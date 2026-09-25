@@ -56,6 +56,11 @@ of free disk for the unpacked regtest chain.
 4. **Part 4** — tear the stack down, delete the unpacked chain, check what
    landed.
 
+**Part 5** — capturing a set that carries `signals.json`, from any checkout of
+the test suite into any output directory — is independent of the four parts
+above and of Polar. It includes the live smoke recipe, which writes only to a
+scratch directory.
+
 The four vendor regtest captures were taken against the export's untouched tip
 (758), and every committed capture replays from its own file — nothing in the
 test suite reads a live chain. Part 1 comes before Part 3 when both are done in
@@ -65,6 +70,25 @@ measured against 758 and stop reproducing once the tip has moved. Those four
 vectors are being regenerated upstream; when that regeneration is absorbed,
 their captures are replaced, and Part 1 is re-run against whatever chain they
 were minted on.
+
+---
+
+## Pacing and rate limits
+
+Every `capture` session against a hosted indexer (mutinynet, signet,
+testnet4) paces itself. Request starts are at least **500 ms** apart
+across the whole session: the resolve, the tip check and the block fetches
+share one clock, so a session never bursts. A regtest session is unpaced; the
+indexer is your own container.
+
+An HTTP 429 (rate limited) answer is retried, up to **5 attempts** in all, after
+waiting 1, 2, 4 and 8 seconds. `Retry-After` is not read. The retry sits below
+the recorder, so a 429 body never lands in a fixture. Any other non-2xx answer
+and any network error are not retried; they fail the row as before.
+
+A session that is still rate limited after the last attempt fails the row with
+`HTTP 429 from <url> after 5 attempts` in its cause chain and writes nothing for
+it. Wait a few minutes and re-run the same command; the capture is idempotent.
 
 ---
 
@@ -585,7 +609,9 @@ What changes:
 - **Endpoints.** `mutinynet`, `signet` and `testnet4` have default Esplora
   endpoints (`https://mutinynet.com/api`, `https://mempool.space/signet/api`,
   `https://mempool.space/testnet4/api`); `--esplora-url <url>` still overrides
-  them.
+  them. `regtest` has no default and always needs `--esplora-url`.
+- **Pacing.** Requests to a hosted indexer are spaced and a rate-limited
+  answer is retried; see "Pacing and rate limits".
 
 What does not change: fresh keys, new DIDs, the fixtures regenerated wholesale,
 and **no test edit**. The replay reads the DID, the heights and the block times
@@ -634,3 +660,96 @@ Re-capturing the vendor **regtest** vectors after Part 3 fails the confirmations
 check, because Part 3 moved the tip the vectors' `confirmations` were measured
 against. Unpack the zip again into a clean directory and redo Part 1 from step 1
 on the untouched export.
+
+---
+
+## Part 5 — sets that carry signals.json
+
+The regenerated test suite ships a `signals.json` in each set: a bare array of
+the beacon signals the set was recorded against, every entry carrying the same
+`recordedTip`. Such a set is captured from an explicit suite root:
+
+```sh
+cargo run -q -p chain-capture -- \
+  capture --network <net> --suite-root <dir> --vector <net>/<k1|x1>/<id> [--out <dir>]
+```
+
+- `--suite-root <dir>` is a checkout of the test suite. The set is read from
+  `<dir>/<net>/<k1|x1>/<id>/` and must carry `signals.json`; a set without one
+  is refused, and is captured through the default `test-suite/` tree instead.
+- `--vector` is required with `--suite-root`, and the id must have the form
+  `<network>/<k1|x1>/<id>` with lowercase letters and digits in the last part.
+  `--network` must name the directory the set is filed under.
+- `--out <dir>` writes the fixture to `<dir>/<net>/<k1|x1>/<id>.json` instead of
+  under `fixtures/chain/`. Without it, the fixture lands in the tree.
+- signet and testnet4 use their default endpoints, and every session is paced
+  (see "Pacing and rate limits"). regtest needs `--esplora-url`.
+
+### The pinned tip
+
+The session first asks the endpoint for its tip. It then resolves the DID with
+the chain tip pinned to the set's `recordedTip`, not the live tip, and writes
+`tip_height = recordedTip` into the fixture. The replayed `confirmations` are
+therefore the ones the set was recorded with, however far the chain has moved
+since.
+
+### What a capture checks
+
+- **The outcome.** For a positive set, the resolved `didDocument`, `versionId`,
+  `deactivated` flag and any stated `confirmations` must match the set's
+  `resolve/output.json`. A negative set (its `resolve/output.json` carries
+  `didResolutionMetadata.error`) is captured when the resolve fails with **any**
+  specification error code. A resolve that succeeds, or that fails without a
+  code, is refused. The capture does not compare the code: run the conformance
+  harness on the new fixture afterwards, and it asserts the code.
+- **The signals.** The announcements found at the captured beacon addresses
+  must equal `signals.json` exactly: the same transactions, each with the
+  recorded `blockHeight`, `blockHash` and `signalBytes`, no more and no fewer.
+  This replaces the ordering checks that apply to a set without `signals.json`.
+
+### Refusals, and what to do
+
+Every refusal writes nothing for the set.
+
+| Refusal | What to do |
+|---|---|
+| The live tip is below `recordedTip`. | The indexer is behind the chain the set was recorded on. Wait for it to catch up, or name another endpoint with `--esplora-url`. |
+| An announcement (a transaction whose last output is `OP_RETURN` plus 32 bytes) is confirmed above `recordedTip`, or is unconfirmed. | The beacon has seen activity since the set was recorded, so the chain no longer matches the record. Report it upstream; there is nothing to retry. |
+| An announcement differs from `signals.json`: an entry with no announcement on chain, an announcement with no entry, or a disagreeing height, block hash or signal bytes. | Check that `--network`, the endpoint and the suite checkout are the ones the set was recorded on, then re-run. If they are, report the set upstream. |
+| `signals.json` repeats an `update` without `duplicate: true` on the later entry. | A malformed set. Report it upstream. |
+| The set declares a CAS or SMT beacon, or an entry belongs to a cohort, including a cohort-only set with no `update/` directory. | Unsupported: the resolver cannot query those beacons yet, so there is nothing to capture. Skip the set. |
+| The resolve outcome does not match (see above). | Either the chain no longer carries what the set was recorded against, or the resolver disagrees with the set. Establish which before re-running. |
+
+Any other transaction above `recordedTip`, such as someone paying the beacon
+address, is **recorded and ignored**: anyone can pay a beacon address on a
+public chain, and at the pinned tip the replay never counts it as a signal.
+
+### Known limitation: negative sets with post-rotation signals
+
+The capture records only the addresses the resolver requested. A resolve that
+errors before a beacon rotation takes effect never requests the beacons that
+rotation adds. A negative set whose `signals.json` names a signal on such a
+beacon is therefore refused as a signal not on chain, even though the chain is
+correct. No code handles this; such a set is out of scope for capture until a
+set needs it. The regenerated late-publishing set is unaffected: both of its
+signals sit on genesis beacons.
+
+### Live smoke (scratch only)
+
+One signet set and one testnet4 set, against the default mempool.space
+endpoints, from a scratch checkout of the test suite into a scratch output
+directory:
+
+```sh
+SCRATCH=$(mktemp -d)
+git clone --filter=blob:none https://github.com/dcdpr/did-btcr2-test-suite "$SCRATCH/test-suite"
+git -C "$SCRATCH/test-suite" checkout f234a6f3
+cargo run -p chain-capture -- capture --network signet   --suite-root "$SCRATCH/test-suite" --vector signet/k1/qyp5h7kz   --out "$SCRATCH/out"
+cargo run -p chain-capture -- capture --network testnet4 --suite-root "$SCRATCH/test-suite" --vector testnet4/k1/qspz5wep --out "$SCRATCH/out"
+```
+
+Nothing under `$SCRATCH` is committed; delete it when done. The smoke confirms
+the endpoints and the pacing against the real indexers, not a fixture. A
+resolution mismatch on signet may be the test suite's own open "Recreate Signet
+Test Vectors" item rather than a fault in this tool; check that before
+debugging.

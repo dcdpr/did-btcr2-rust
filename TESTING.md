@@ -40,10 +40,10 @@ the minted `clean` fixture and the `chain-capture` RUNBOOK at compile time.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 373 lib + 9 conformance + 1 doctest |
-| `did-btcr2-client` | 64 + 1 e2e |
+| `did-btcr2` | 478 lib + 9 conformance + 1 doctest |
+| `did-btcr2-client` | 66 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
-| `chain-capture` | 188 |
+| `chain-capture` | 269 |
 | `did-btcr2-resolver-http` | 62 lib + 9 bin + 47 conformance + 10 fixtures + 12 guard + 11 post + 5 schema + 6 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
@@ -55,19 +55,40 @@ on-chain replays from a captured fixture.
 ## 3. The operation-vector ledger
 
 The upstream vectors live in the `test-suite/` submodule. The accounting unit is
-a **row**: one (vector × assertion kind) pair, not one vector. A single vector
+a **row**: one (vector × assertion kind) pair, not one vector, and for the
+`resolve-option` kind one (vector × `resolve/NN` case) pair. A single vector
 can contribute a driven row for one kind and a skipped row for another — most
 commonly a driven `derivation` row and a skipped `resolve` row.
 
-### The five assertion kinds
+Discovery takes an explicit corpus root (`discover_in(&Corpus)`): the ledger
+walks `test-suite/` only, and the synthetic corpora under `fixtures/layout/`
+(below) are walked by their own tests, so they never move these counts.
+
+### The six assertion kinds
 
 | Kind | What it asserts | Driver test (`src/resolver.rs`) |
 |---|---|---|
 | `derivation` | `create/input.json` → encoded DID equals `create/output.json.did` | `op_vectors_create_derives_expected_did` |
 | `genesis-key` | `other.json.genesisKeys.secret` derives `genesisKeys.public`, and every update step signs with that same secret | `op_vectors_create_genesis_key_corroborated` |
-| `resolve` | the resolver FSM resolves the vector to `resolve/output.json` | `op_vectors_resolve_matches_output` |
+| `resolve` | the resolver FSM resolves the vector's main pair (`resolve/input.json`) to `resolve/output.json` | `op_vectors_resolve_matches_output` |
 | `update-crypto` | each update step's content-bound triple and BIP340 proof re-derive from its own inputs and verify against its source document | `op_vectors_update_signs_to_expected_hashes` |
 | `end-state` | applying every update step in order to the genesis document reproduces `resolve/output.json.didDocument` | `op_vectors_updates_apply_to_expected_end_state` |
+| `resolve-option` | one row per `resolve/NN/` case: the resolver, given that case's `resolutionOptions` (`versionId`, `versionTime`, both, `minConf`), produces its `output.json` | `op_vectors_resolve_cases_match_output` |
+
+`resolve` and `resolve-option` share one per-case driver. An output carrying
+`didResolutionMetadata.error` is asserted by **code only** (the `errorMessage`
+is the generating implementation's text). A positive output is asserted on
+`didDocument`, `versionId` (a string, no coercion, except for the pinned
+number-encoded vectors below), `deactivated`, and `confirmations` compared as
+**at least** the recorded value. A set that carries `signals.json` is replayed
+only after the chain fixture's announcements equal that file exactly (txid,
+block height, block hash, signal bytes). An unknown child under `resolve/`
+(neither the main pair nor a numbered case) fails discovery loudly.
+
+A `resolve-option` row inherits its set's `resolve` skip reasons: a case of a
+CAS-delivered set is as undeliverable as the main pair. Its `DRIVEN_FLOOR`
+entry is 0, because the current test-suite pin ships no `resolve/NN` case;
+it is raised when the regenerated suite is absorbed.
 
 ### The live ledger
 
@@ -81,6 +102,7 @@ operation-vector coverage: 22 vectors, 100 rows
   resolve              4       18
   update-crypto       17        0
   end-state           17        0
+  resolve-option       0        0
   skipped rows by reason (a row may carry several):
     unanchored (pending.json)                                                                       6
     CAS-aggregated delivery not implemented                                                         9
@@ -105,21 +127,23 @@ minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counte
 
 100 rows is 22 vectors × 5 kinds, minus the 10 rows that do not exist: 5 vectors
 are genesis-only and so have no `update-crypto` and no `end-state` row. That is
-also why those two kinds show 17 driven rows rather than 22.
+also why those two kinds show 17 driven rows rather than 22. The pinned suite
+has no `resolve/NN` case, so `resolve-option` contributes no rows.
 
-### The five skip reasons
+### The six skip reasons
 
 Defined by `SkipReason` (`src/test_vectors.rs`) and derived from each vector's
-own files — four by `derived_resolve_skip_reasons`, the fifth in
-`Vector::skip_reasons_with`. They are **additive**: a skipped row carries every
-applicable reason, not the first match, which is why the five counts above sum
-to more than the 18 skipped rows.
+own files in `Vector::row_skip_reasons` — the delivery, anchoring and beacon
+rules by `derived_resolve_skip_reasons`, `StaleContext` and `ExpectedError`
+beside them. They are **additive**: a skipped row carries every applicable
+reason, not the first match, which is why the counts above sum to more than
+the 18 skipped rows.
 
 - **`Unanchored`** — `pending.json` present: the vector's own generator recorded
   update steps that were never delivered on chain.
 - **`CasDelivery` / `SmtDelivery`** — the genesis document declares a `CASBeacon`
-  / `SMTBeacon` service, or `scenario.json` declares `delivery.genesis` or
-  `delivery.announcement` as `"cas"` / `"smt"`. That aggregation is
+  / `SMTBeacon` service, or the delivery derived from the set's files is CAS
+  (see "Delivery is derived from the files" below). That aggregation is
   unimplemented.
 - **`UnsupportedBeaconType`** — the genesis document declares a CAS or SMT
   beacon, so building the next round of requests returns `Unsupported` before any
@@ -136,18 +160,71 @@ to more than the 18 skipped rows.
   Self-clearing — a regenerated vector stops matching the rule and its row is
   driven again — and pinned at exactly 17 vectors by `STALE_UPDATE_CONTEXT`,
   asserted in both directions (see below).
+- **`ExpectedError`** — the set's main `resolve/output.json` carries
+  `didResolutionMetadata.error`. **`update-crypto` and `end-state` only**: the
+  set is built to fail resolution, so its `resolve` row asserts the error code
+  and there is no end state to reproduce. `derivation` and `genesis-key` stay
+  driven, because `create/` still holds a valid DID. A negative `resolve/NN`
+  case does not make its set negative. No set on the current pin is negative,
+  so the ledger prints no line for it.
 - **`Override(&str)`** — a hand-written one-off. `SKIP_OVERRIDES` is currently
   **empty by design**, so every skip on disk today comes from a derived rule.
+  An entry names exactly one row: a `resolve-option` entry names its case, and
+  every other entry names none.
 
 "Past genesis" is **not** a skip reason. A v2+ vector is driven from a captured
 chain snapshot under `fixtures/chain/`.
+
+### Delivery is derived from the files
+
+`derive_delivery` reads each set's delivery from the files it ships, not from
+any declaration:
+
+- A **negative** set is read by id type alone (key-based genesis is
+  deterministic, external genesis comes from the sidecar, updates come from the
+  sidecar). A set that withholds data on purpose has the same files as one that
+  delivers it through CAS, and only the expected error tells them apart.
+- For a **positive** set the file shape decides: an external set without a
+  sidecar `genesisDocument` has a CAS genesis, and update steps without sidecar
+  `updates` are CAS announcements.
+
+Where a set still ships `scenario.json` with a non-null `delivery`, discovery
+cross-checks the declaration against the derived value and fails loudly on a
+disagreement, so the unchanged counts above are a real cross-check. While
+`pending.json` is present only the genesis delivery is cross-checked: a pending
+set never ran its anchoring step, so its files cannot show which announcement
+mechanism was intended. A declared `"smt"` requires an `SMTBeacon` in the
+genesis document.
+
+Discovery also parses `signals.json` where a set ships one (a bare array; one
+`recordedTip` across all entries; `update` optional only on a cohort entry; a
+repeated `update` only with `duplicate: true`) and checks cohorts across sets:
+each cohort member names exactly one sibling set's `scenarioId`, and every
+member records the same cohort id and transaction. This is structure only:
+cohort members declare an aggregate beacon, so their resolve rows skip under
+the beacon-type rules.
+
+### Error-code divergences
+
+`ERROR_CODE_DIVERGENCES` (`src/test_vectors.rs`) pins pairs of (vector code →
+specification code) where a negative vector records a code other than the one
+the specification defines, each citing its upstream thread. A listed row stays
+**driven** and asserts that the resolver emits the specification's code; it is
+not a skip, and `SKIP_OVERRIDES` is never used for code drift. It is guarded in
+both directions, like `NUMBER_ENCODED_VERSION_ID`: an unlisted mismatch fails
+by name as a new divergence, and an entry no driven negative row uses fails,
+telling the reader to delete it. Equal codes and a vector code listed twice
+are rejected as malformed.
+
+The table is **empty** on the current pin, since no vector there records an
+error. The mechanism is proven on the `late-code` synthetic corpus below.
 
 ### The coverage ratchet
 
 `DRIVEN_FLOOR` (`src/test_vectors.rs`) records the minimum driven rows per kind:
 
 ```
-Derivation 22, GenesisKey 22, Resolve 4, UpdateCrypto 17, EndState 17
+Derivation 22, GenesisKey 22, Resolve 4, UpdateCrypto 17, EndState 17, ResolveOption 0
 ```
 
 It is compared with `>=`, so upstream adding vectors raises coverage without
@@ -207,6 +284,37 @@ verifies every update-step `proofValue` of the 17 vectors as shipped in
 `output.json` (the key read from `sourceDocument`), so at least 17 proofs
 produced by another implementation are still checked by this crate's BIP340
 path; a flipped-byte control proves the assertion bites.
+
+### Synthetic corpora (`fixtures/layout/`)
+
+The regenerated test suite's layout (`resolve/NN/` cases, negative sets,
+`signals.json`, no `scenario.json`/`pending.json`/`funding.json`) is proven
+ahead of the submodule bump on small corpora under `fixtures/layout/`, each
+`<name>/sets/{network}/{k1|x1}/{id}/` plus an optional
+`<name>/chain/{network}/{k1|x1}/{id}.json`. `fixtures/layout/README.md` records
+every set's provenance and what was copied, derived or hand-written.
+
+| Corpus | Set | What it proves | Tests |
+|---|---|---|---|
+| `options` | `mutinynet/k1/q5pew2jc` | the main pair plus eleven `resolve/NN` cases (`versionId` ×3, an unreachable `versionId` → `NOT_FOUND`, `versionTime` ×3, both → `INVALID_OPTIONS`, `minConf` too high → v1, `minConf` = a signal's exact count, `versionId` past deactivation → `NOT_FOUND`), driven off a real replayed chain; `confirmations` exactly equal at the pinned tip | `synthetic_options_*` |
+| `late-code` | `regtest/k1/qgph42l3` | a negative set recording `LATE_PUBLISHING_ERROR`: passes only with a `LATE_PUBLISHING_ERROR → LATE_PUBLISHING` entry in the divergence table it is given, fails without one | `synthetic_late_code_*`, `synthetic_unused_divergence_is_reported` |
+| `withheld` | `regtest/k1/qgph42l3` | update steps present, sidecar without them, expected `MISSING_UPDATE_DATA`: classified negative, not CAS | `synthetic_withheld_update_is_negative_not_cas`, `synthetic_negative_sets_skip_update_rows_as_expected_error` |
+| `shapes` | four sets | classification from files alone: a CAS genesis, a CAS-announced update, and a two-member cohort, one member cohort-only with no `update/` | `shapes_corpus_classifies_from_files` |
+| `shapes-unknown-resolve-child` | one set | an unknown `resolve/` child fails discovery | `shapes_unknown_resolve_child_fails_discovery` |
+| `shapes-malformed-signals` | one set | a `signals.json` that is an object, not a bare array, fails discovery | `shapes_malformed_signals_fail_discovery` |
+| `shapes-bad-cohort-member` | one set | a cohort member naming no sibling set fails discovery | `shapes_bad_cohort_member_fails_discovery` |
+
+`options`, `late-code` and `withheld` were reshaped from the two minted
+captures (`minted/clean-rotating-beacons`, `minted/late-publishing-fork`); the
+`shapes` sets from checked-out `test-suite/` sets. Nothing was minted for them.
+`synthetic_chain_copies_equal_their_minted_source` holds each chain copy equal
+to its minted source on every chain field, and
+`synthetic_signals_record_the_capture_tip` holds the `options` set's
+`recordedTip` equal to its chain copy's tip.
+
+No synthetic set carries a signing key. Their `genesis-key`, `update-crypto`
+and `end-state` rows are therefore asserted through classification only; those
+kinds stay driven on the real vectors.
 
 ## 4. The 22 upstream vectors
 
@@ -529,7 +637,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 71 `#[test]` functions; `src/test_vectors.rs` holds 62.
+`src/resolver.rs` holds 104 `#[test]` functions; `src/test_vectors.rs` holds 151.
 
 ## 8. When `test-suite/` is absent
 
