@@ -1253,17 +1253,26 @@ mod tests {
     /// genesis key, so the derived key must equal
     /// `create/input.json.genesisBytes` — not a hand-edited blob. For EXTERNAL
     /// (x1) vectors the descriptor is a hash of a document supplied out of band,
-    /// so the derived key is compared against
-    /// `other.json.genesisDocument.verificationMethod[0].publicKeyMultibase`.
-    /// Without that second branch an update-less external vector executed
-    /// exactly one assertion — that `secp256k1` derives its own public key from
-    /// its own secret key — which touches neither the vector's DID nor its
-    /// documents while being reported as full coverage.
+    /// so the derived key is compared against the key that document publishes:
+    /// `other.json.genesisDocument.verificationMethod[0].publicKeyMultibase`,
+    /// or, when `verificationMethod` is empty, the `publicKeyMultibase` of the
+    /// first method embedded in `capabilityInvocation` (a genesis document may
+    /// carry its invocation key only there). Without that second branch an
+    /// update-less external vector executed exactly one assertion — that
+    /// `secp256k1` derives its own public key from its own secret key — which
+    /// touches neither the vector's DID nor its documents while being reported
+    /// as full coverage.
     ///
     /// Then walk EVERY update step the vector ships — flat `update/` or numbered
-    /// `update/NN/` alike — and assert the genesis secret equals that step's
-    /// `signingMaterial`, so a multi-step vector is corroborated at every step
-    /// rather than only its first. This retires the trust-the-blob concern.
+    /// `update/NN/` alike. A step's `signingMaterial` must be one of the secrets
+    /// the vector declares: `other.json.genesisKeys.secret` or an
+    /// `other.json.extraKeys.*.secret` (a key a DID adds by update and then
+    /// signs with). Membership alone would accept a step signed by the wrong
+    /// declared key, so the step's key is also tied to its own documents: the
+    /// public key the secret derives must equal the key of the method the
+    /// step's `verificationMethodId` names in its `sourceDocument`, found
+    /// through the same capabilityInvocation lookup a resolver uses to verify
+    /// the proof.
     ///
     /// Coverage is observed, not declared: the loop accumulates the ids it
     /// actually asserted against and `reconcile_driven` compares that set with
@@ -1321,31 +1330,524 @@ mod tests {
                 // derives its own public key from its own secret key — a test of
                 // the dependency, touching neither the vector's DID nor its
                 // documents, reported as full genesis-key coverage.
-                VectorIdType::External => assert_eq!(
-                    derived.to_multikey(),
-                    field_str(
-                        &other,
-                        "genesisDocument.verificationMethod.0.publicKeyMultibase",
-                        id
-                    ),
-                    "{id}: the genesis secret must derive the key the genesis document \
-                     publishes as its first verification method"
-                ),
+                VectorIdType::External => {
+                    let genesis = &other["genesisDocument"];
+                    let first_method = genesis["verificationMethod"]
+                        .as_array()
+                        .and_then(|methods| methods.first());
+                    let (published, published_as) = match first_method {
+                        Some(method) => (method, "its first verification method"),
+                        None => (
+                            genesis["capabilityInvocation"]
+                                .as_array()
+                                .and_then(|entries| entries.iter().find(|e| e.is_object()))
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "{id}: other.json.genesisDocument has neither a \
+                                         verificationMethod entry nor a method embedded in \
+                                         capabilityInvocation to tie the genesis key to"
+                                    )
+                                }),
+                            "the first method embedded in its capabilityInvocation",
+                        ),
+                    };
+                    assert_eq!(
+                        derived.to_multikey(),
+                        field_str(published, "publicKeyMultibase", id),
+                        "{id}: the genesis secret must derive the key the genesis document \
+                         publishes as {published_as}"
+                    );
+                }
+            }
+
+            // Every secret the vector declares: the genesis key and any key a
+            // later update adds.
+            let mut declared_secrets = vec![secret_hex.to_string()];
+            match &other["extraKeys"] {
+                serde_json::Value::Null => {}
+                serde_json::Value::Object(keys) => {
+                    for (name, key) in keys {
+                        declared_secrets.push(
+                            field_str(key, "secret", &format!("{id} other.json.extraKeys.{name}"))
+                                .to_string(),
+                        );
+                    }
+                }
+                other => panic!("{id}: other.json.extraKeys must be an object, got {other}"),
             }
 
             for step in vector.update_layout.step_prefixes() {
+                let ctx = format!("{id} {step}");
                 let update_input = vector.fixture(&format!("{step}/input.json"));
+
+                let signing = field_str(&update_input, "signingMaterial", &ctx);
+                assert!(
+                    declared_secrets.iter().any(|s| s == signing),
+                    "{id}: {step}/input.json signingMaterial is neither \
+                     other.json.genesisKeys.secret nor any other.json.extraKeys secret"
+                );
+                let step_key: PublicKey =
+                    SecretKey::from_slice(&field_hex(&update_input, "signingMaterial", &ctx))
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "{id}: {step}/input.json signingMaterial is not a secret key: {e}"
+                            )
+                        })
+                        .public_key(&secp);
+
+                let vm_id = field_str(&update_input, "verificationMethodId", &ctx);
+                let source = Document::from_json_string(
+                    &update_input["sourceDocument"].to_string(),
+                )
+                .unwrap_or_else(|e| {
+                    panic!("{id}: {step}/input.json sourceDocument must parse as a Document: {e}")
+                });
+                let named_key = source
+                    .fields
+                    .invoking_public_key(vm_id)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{id}: {step}/input.json verificationMethodId {vm_id} must name an \
+                             invoking method of sourceDocument: {e}"
+                        )
+                    });
                 assert_eq!(
-                    field_str(&update_input, "signingMaterial", id),
-                    secret_hex,
-                    "{id}: {step}/input.json signingMaterial must equal \
-                     other.json.genesisKeys.secret"
+                    step_key, named_key,
+                    "{id}: {step}/input.json signingMaterial must derive the key of {vm_id}, \
+                     the method verificationMethodId names in sourceDocument"
                 );
             }
 
             observed.insert(RowKey::set(id.clone()));
         }
         reconcile_driven_with(AssertionKind::GenesisKey, vectors, &observed, overrides);
+    }
+
+    // --- Keyed test sets ---------------------------------------------------
+    //
+    // Sets in the vendor layout, written to a temp directory at test time and
+    // discovered through `discover_in`, for the driver rules the committed
+    // corpus does not exercise. They carry secrets, as vendor sets do, so they
+    // are never committed: the keys below are fixed test keys that exist only
+    // in this source and, for one test's lifetime, in the temp directory.
+
+    /// The genesis secret of every keyed test set.
+    const KEYED_GENESIS_SECRET: [u8; 32] = [7u8; 32];
+    /// The `other.json.extraKeys["key-1"]` secret of a keyed test set.
+    const KEYED_EXTRA_SECRET: [u8; 32] = [8u8; 32];
+
+    /// A corpus under a fresh temp directory, removed when dropped (also when
+    /// the test panics).
+    struct KeyedSuite {
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for KeyedSuite {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl KeyedSuite {
+        fn corpus(&self) -> Corpus {
+            Corpus {
+                sets: self.root.join("sets"),
+                chain: self.root.join("chain"),
+            }
+        }
+
+        /// The directory of set `regtest/{kind}/{short_id}`.
+        fn set_dir(&self, set: &KeyedSet) -> std::path::PathBuf {
+            self.root
+                .join("sets/regtest")
+                .join(set.kind)
+                .join(set.short_id)
+        }
+
+        /// Write every file of `set`.
+        fn write(&self, set: &KeyedSet) {
+            let dir = self.set_dir(set);
+            let write = |rel: &str, value: &serde_json::Value| {
+                let path = dir.join(rel);
+                std::fs::create_dir_all(path.parent().expect("a set file has a parent"))
+                    .expect("the keyed set directory is creatable");
+                std::fs::write(
+                    &path,
+                    serde_json::to_string_pretty(value).expect("JSON serializes"),
+                )
+                .expect("the keyed set file is writable");
+            };
+            write("create/input.json", &set.create_input);
+            write("other.json", &set.other);
+            write("resolve/input.json", &set.resolve_input);
+            write("resolve/output.json", &set.resolve_output);
+            for (index, (input, output)) in set.steps.iter().enumerate() {
+                write(&format!("update/{:02}/input.json", index + 1), input);
+                write(&format!("update/{:02}/output.json", index + 1), output);
+            }
+        }
+
+        /// Rewrite one file of `set` in place.
+        fn edit(&self, set: &KeyedSet, rel: &str, f: impl FnOnce(&mut serde_json::Value)) {
+            let path = self.set_dir(set).join(rel);
+            let mut value: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&path).expect("the keyed set file was written"),
+            )
+            .expect("the keyed set file is JSON");
+            f(&mut value);
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&value).expect("JSON serializes"),
+            )
+            .expect("the keyed set file is writable");
+        }
+
+        fn vectors(&self) -> Vec<Vector> {
+            discover_in(&self.corpus())
+        }
+    }
+
+    /// A fresh keyed corpus root; `tag` names the test in the directory name.
+    fn keyed_suite(tag: &str) -> KeyedSuite {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("did-btcr2-keyed-{}-{tag}-{n}", std::process::id()));
+        std::fs::create_dir_all(root.join("sets")).expect("the keyed corpus root is creatable");
+        KeyedSuite { root }
+    }
+
+    /// One keyed set's files, in the vendor layout.
+    struct KeyedSet {
+        kind: &'static str,
+        short_id: &'static str,
+        create_input: serde_json::Value,
+        other: serde_json::Value,
+        resolve_input: serde_json::Value,
+        resolve_output: serde_json::Value,
+        /// `update/NN/input.json` and `output.json`, in order.
+        steps: Vec<(serde_json::Value, serde_json::Value)>,
+    }
+
+    impl KeyedSet {
+        /// The discovered vector id.
+        fn id(&self) -> String {
+            format!("regtest/{}/{}", self.kind, self.short_id)
+        }
+    }
+
+    fn keyed_public(secret: [u8; 32]) -> crate::key::PublicKey {
+        secp256k1::SecretKey::from_slice(&secret)
+            .expect("a fixed test secret is a valid secret key")
+            .public_key(&secp256k1::Secp256k1::new())
+    }
+
+    fn keyed_secret(secret: [u8; 32]) -> crate::key::SecretKey {
+        crate::key::SecretKey::try_from(secret).expect("a fixed test secret is a valid secret key")
+    }
+
+    /// An `other.json` key entry: `{secret, public}` in hex.
+    fn keyed_entry(secret: [u8; 32]) -> serde_json::Value {
+        serde_json::json!({
+            "secret": hex::encode(secret),
+            "public": hex::encode(keyed_public(secret).serialize()),
+        })
+    }
+
+    /// The key-based regtest DID of the genesis key and its initial document.
+    fn keyed_k1_genesis() -> (crate::identifier::Did, InitialDocument) {
+        use crate::identifier::{Did, DidComponents, DidVersion, IdType, Network};
+        let did: Did = DidComponents::new(
+            DidVersion::One,
+            Network::Regtest,
+            IdType::from(keyed_public(KEYED_GENESIS_SECRET)),
+        )
+        .expect("regtest is a valid network")
+        .try_into()
+        .expect("a key id type encodes to a DID");
+        let initial = InitialDocument::from_did(&did, &ResolutionOptions::default())
+            .expect("a key-based DID generates its initial document");
+        (did, initial)
+    }
+
+    /// A patch that appends a non-beacon service, the vendor's usual update.
+    fn didcomm_patch() -> serde_json::Value {
+        serde_json::json!([{
+            "op": "add",
+            "path": "/service/-",
+            "value": {
+                "id": "#didcomm",
+                "type": "DIDCommMessaging",
+                "serviceEndpoint": "http://example.com/didcomm",
+            },
+        }])
+    }
+
+    /// An `update/NN/input.json` in the vendor shape.
+    fn keyed_step_input(
+        source: &InitialDocument,
+        patch: &serde_json::Value,
+        target_version_id: u64,
+        vm_id: &str,
+        secret: [u8; 32],
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "sourceDocument": source.as_ref(),
+            "patches": patch,
+            "sourceVersionId": target_version_id - 1,
+            "verificationMethodId": vm_id,
+            "signingMaterial": hex::encode(secret),
+        })
+    }
+
+    /// Sign `patch` over `source` through the crate's update path, and return
+    /// the step's input and output files and the document it produces.
+    fn keyed_step(
+        source: &InitialDocument,
+        patch: serde_json::Value,
+        target_version_id: u64,
+        vm_id: &str,
+        secret: [u8; 32],
+    ) -> (serde_json::Value, serde_json::Value, InitialDocument) {
+        let update = Document::from(source.clone())
+            .construct_signed_update(
+                serde_json::from_value(patch.clone()).expect("the test patch is a JSON Patch"),
+                NonZeroU64::new(target_version_id).expect("a target version is non-zero"),
+                vm_id,
+                keyed_secret(secret),
+            )
+            .expect("the keyed step signs");
+        let mut next = source.clone();
+        next.apply_update(&update, &AnnouncingBlock::fixed())
+            .expect("the keyed step applies");
+        (
+            keyed_step_input(source, &patch, target_version_id, vm_id, secret),
+            serde_json::json!({ "signedUpdate": update.json }),
+            next,
+        )
+    }
+
+    /// A positive `resolve/output.json` for `doc` at `version_id`.
+    fn keyed_resolved(
+        doc: &InitialDocument,
+        version_id: u64,
+        deactivated: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "didResolutionMetadata": { "contentType": "application/did" },
+            "didDocument": doc.as_ref(),
+            "didDocumentMetadata": {
+                "versionId": version_id.to_string(),
+                "deactivated": deactivated,
+                "confirmations": 1,
+            },
+        })
+    }
+
+    /// A k1 set over the genesis key with the given steps and end state.
+    fn keyed_k1_set(
+        short_id: &'static str,
+        did: &crate::identifier::Did,
+        with_extra_key: bool,
+        steps: Vec<(serde_json::Value, serde_json::Value)>,
+        resolve_output: serde_json::Value,
+    ) -> KeyedSet {
+        let mut other = serde_json::json!({ "genesisKeys": keyed_entry(KEYED_GENESIS_SECRET) });
+        if with_extra_key {
+            other["extraKeys"] = serde_json::json!({ "key-1": keyed_entry(KEYED_EXTRA_SECRET) });
+        }
+        KeyedSet {
+            kind: "k1",
+            short_id,
+            create_input: serde_json::json!({
+                "idType": "KEY",
+                "version": 1,
+                "network": "regtest",
+                "genesisBytes": hex::encode(keyed_public(KEYED_GENESIS_SECRET).serialize()),
+            }),
+            other,
+            resolve_input: serde_json::json!({ "did": did.encode(), "resolutionOptions": {} }),
+            resolve_output,
+            steps,
+        }
+    }
+
+    /// A k1 set that adds `#key-1` (the extra key) as an invoking method in
+    /// update/01, signed by the genesis key, and signs update/02 with `#key-1`.
+    fn keyed_k1_rotation_set() -> KeyedSet {
+        use crate::key::PublicKeyExt as _;
+        let (did, genesis) = keyed_k1_genesis();
+        let d = did.encode();
+        let initial_key = format!("{d}#initialKey");
+        let key_1 = format!("{d}#key-1");
+        let add_key = serde_json::json!([
+            {
+                "op": "add",
+                "path": "/verificationMethod/-",
+                "value": {
+                    "id": key_1,
+                    "type": "Multikey",
+                    "controller": d,
+                    "publicKeyMultibase": keyed_public(KEYED_EXTRA_SECRET).to_multikey(),
+                },
+            },
+            { "op": "add", "path": "/capabilityInvocation/-", "value": key_1 },
+        ]);
+        let (in1, out1, v2) = keyed_step(&genesis, add_key, 2, &initial_key, KEYED_GENESIS_SECRET);
+        let (in2, out2, v3) = keyed_step(&v2, didcomm_patch(), 3, &key_1, KEYED_EXTRA_SECRET);
+        keyed_k1_set(
+            "qrotate",
+            &did,
+            true,
+            vec![(in1, out1), (in2, out2)],
+            keyed_resolved(&v3, 3, false),
+        )
+    }
+
+    /// An x1 set whose genesis document has an empty `verificationMethod` and
+    /// carries the genesis key embedded in `capabilityInvocation`, with one
+    /// update signed by that embedded key.
+    fn keyed_x1_embedded_invocation_set() -> KeyedSet {
+        use crate::canonical_hash::CanonicalHash as _;
+        use crate::document::IntermediateDocument;
+        use crate::identifier::{DidVersion, Network};
+        use crate::key::PublicKeyExt as _;
+
+        const PLACEHOLDER: &str = "did:btcr2:_";
+        // The beacon services of the same key's k1 document, re-homed on the
+        // placeholder: regtest addresses the crate derived itself.
+        let (k1_did, k1_genesis) = keyed_k1_genesis();
+        let services: serde_json::Value = serde_json::from_str(
+            &k1_genesis.as_ref()["service"]
+                .to_string()
+                .replace(k1_did.encode(), PLACEHOLDER),
+        )
+        .expect("the re-homed services are JSON");
+        let genesis_document = serde_json::json!({
+            "id": PLACEHOLDER,
+            "@context": k1_genesis.as_ref()["@context"],
+            "verificationMethod": [],
+            "capabilityInvocation": [{
+                "id": format!("{PLACEHOLDER}#initialKey"),
+                "type": "Multikey",
+                "controller": PLACEHOLDER,
+                "publicKeyMultibase": keyed_public(KEYED_GENESIS_SECRET).to_multikey(),
+            }],
+            "service": services,
+        });
+        let intermediate =
+            IntermediateDocument::from_json_value(genesis_document.clone(), Network::Regtest)
+                .expect("the embedded-key genesis document is an intermediate document");
+        let genesis_bytes = intermediate.hash();
+        let (did, initial) = InitialDocument::from_external_intermediate(
+            intermediate,
+            Some(DidVersion::One),
+            Some(Network::Regtest),
+        )
+        .expect("the embedded-key genesis document becomes an initial document");
+
+        let (in1, out1, v2) = keyed_step(
+            &initial,
+            didcomm_patch(),
+            2,
+            &format!("{}#initialKey", did.encode()),
+            KEYED_GENESIS_SECRET,
+        );
+        KeyedSet {
+            kind: "x1",
+            short_id: "qembedded",
+            create_input: serde_json::json!({
+                "idType": "EXTERNAL",
+                "version": 1,
+                "network": "regtest",
+                "genesisBytes": hex::encode(genesis_bytes.as_bytes()),
+            }),
+            other: serde_json::json!({
+                "genesisKeys": keyed_entry(KEYED_GENESIS_SECRET),
+                "genesisDocument": genesis_document,
+            }),
+            resolve_input: serde_json::json!({
+                "did": did.encode(),
+                "resolutionOptions": { "sidecar": { "genesisDocument": genesis_document } },
+            }),
+            resolve_output: keyed_resolved(&v2, 2, false),
+            steps: vec![(in1, out1)],
+        }
+    }
+
+    /// A step signed by a key `other.json.extraKeys` declares, whose method an
+    /// earlier update added, is accepted.
+    #[test]
+    fn genesis_key_driver_accepts_a_step_signed_by_an_extra_key() {
+        let suite = keyed_suite("gk-extra");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        let vectors = suite.vectors();
+        assert_eq!(vectors.len(), 1, "the keyed corpus holds its one set");
+        assert_eq!(vectors[0].id, set.id());
+        drive_genesis_key(&vectors, &[]);
+    }
+
+    /// An x1 genesis document with no `verificationMethod` ties the genesis key
+    /// to the method embedded in `capabilityInvocation`.
+    #[test]
+    fn genesis_key_driver_ties_an_x1_key_to_an_embedded_invocation_method() {
+        let suite = keyed_suite("gk-embedded");
+        let set = keyed_x1_embedded_invocation_set();
+        suite.write(&set);
+        let vectors = suite.vectors();
+        assert_eq!(vectors.len(), 1, "the keyed corpus holds its one set");
+        assert_eq!(
+            vectors[0].fixture("other.json")["genesisDocument"]["verificationMethod"],
+            serde_json::json!([]),
+            "the set exercises the embedded-key branch"
+        );
+        drive_genesis_key(&vectors, &[]);
+    }
+
+    /// A step signed by a secret the vector does not declare fails, naming the
+    /// set, the step and `signingMaterial`.
+    #[test]
+    fn genesis_key_driver_rejects_an_undeclared_signing_secret() {
+        let suite = keyed_suite("gk-undeclared");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        suite.edit(&set, "update/02/input.json", |input| {
+            input["signingMaterial"] = serde_json::json!(hex::encode([9u8; 32]));
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_genesis_key(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/02")
+                && message.contains("signingMaterial"),
+            "got: {message}"
+        );
+    }
+
+    /// A declared extra secret used for a method whose key it does not derive
+    /// fails, naming the step and the method id.
+    #[test]
+    fn genesis_key_driver_rejects_a_declared_secret_for_another_method() {
+        let suite = keyed_suite("gk-wrong-method");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        let initial_key = format!(
+            "{}#initialKey",
+            set.resolve_input["did"]
+                .as_str()
+                .expect("the set names its DID")
+        );
+        suite.edit(&set, "update/02/input.json", |input| {
+            input["verificationMethodId"] = serde_json::json!(initial_key);
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_genesis_key(&vectors, &[]));
+        assert!(
+            message.contains("update/02") && message.contains(&initial_key),
+            "got: {message}"
+        );
     }
 
     /// RESOLVE driver: for EVERY vector discovered under `test-suite/` at

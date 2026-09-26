@@ -2155,8 +2155,9 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
 pub(crate) enum AssertionKind {
     /// `create/input.json` -> the encoded DID equals `create/output.json.did`.
     Derivation,
-    /// `other.json.genesisKeys.secret` derives `genesisKeys.public`, and every
-    /// update step signs with that same secret.
+    /// `other.json.genesisKeys.secret` derives `genesisKeys.public` and the
+    /// genesis key, and every update step signs with a declared secret that
+    /// derives the key of the method its `verificationMethodId` names.
     GenesisKey,
     /// The resolver FSM resolves the vector to `resolve/output.json`.
     Resolve,
