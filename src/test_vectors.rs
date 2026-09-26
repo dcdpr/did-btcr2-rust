@@ -1182,6 +1182,40 @@ pub(crate) fn confirmations_exact(
     }
 }
 
+/// The `confirmations` a resolve that ends at `version_id` reports at the
+/// set's `recordedTip`, derived from `signals.json` alone: `recordedTip -
+/// blockHeight + 1`, where `blockHeight` is that of the entry announcing the
+/// update that produced the version (update step `version_id - 1`), the
+/// earliest one when the update was announced again.
+///
+/// `Ok(None)` at genesis, which no update anchors. A version past genesis
+/// whose update no entry announces is an error: the record cannot say where
+/// the count starts.
+pub(crate) fn derived_confirmations(
+    signals: &Signals,
+    version_id: u64,
+) -> Result<Option<u64>, String> {
+    if version_id <= 1 {
+        return Ok(None);
+    }
+    let update = version_id - 1;
+    let height = signals
+        .entries
+        .iter()
+        .filter(|entry| entry.update == Some(update))
+        .map(|entry| entry.block_height)
+        .min()
+        .ok_or_else(|| {
+            format!(
+                "the resolve reached version {version_id}, but signals.json records no \
+                 announcement of update {update}, which produced it"
+            )
+        })?;
+    Ok(Some(
+        u64::from(signals.recorded_tip.saturating_sub(height)) + 1,
+    ))
+}
+
 /// The resolved `versionId` matches an expected positive outcome.
 ///
 /// The output records `versionId` as the ASCII string the specification
@@ -6698,6 +6732,38 @@ fn confirmations_at_least_rejects_an_absent_resolved_value() {
 fn confirmations_at_least_asserts_nothing_without_a_recorded_value() {
     assert_eq!(confirmations_at_least(None, None), Ok(()));
     assert_eq!(confirmations_at_least(Some(3), None), Ok(()));
+}
+
+/// A version's count starts at the block announcing the update that produced
+/// it, the earliest announcement when the update was announced again.
+#[test]
+fn derived_confirmations_count_from_the_earliest_announcement_of_the_version() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![
+            parsed_entry(1, false, &"a1".repeat(32), 300),
+            parsed_entry(2, false, &"a2".repeat(32), 305),
+            parsed_entry(1, true, &"a3".repeat(32), 310),
+        ],
+    };
+    assert_eq!(derived_confirmations(&signals, 2), Ok(Some(21)));
+    assert_eq!(derived_confirmations(&signals, 3), Ok(Some(16)));
+}
+
+/// Genesis has no announcing block; a version past it with no announcing
+/// entry fails, naming the version and the update.
+#[test]
+fn derived_confirmations_are_absent_at_genesis_and_refused_without_an_entry() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![parsed_entry(1, false, &"a1".repeat(32), 300)],
+    };
+    assert_eq!(derived_confirmations(&signals, 1), Ok(None));
+    let err = derived_confirmations(&signals, 3).expect_err("no entry announces update 2");
+    assert!(
+        err.contains("version 3") && err.contains("update 2"),
+        "got: {err}"
+    );
 }
 
 #[test]

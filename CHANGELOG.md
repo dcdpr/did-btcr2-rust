@@ -103,6 +103,10 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - `chain-capture` loads expected-error sets, recomputes its drivable and
   unsupported-beacon lists from the set files in a test that fails on any
   drift, and reads `versionId` only as a string.
+- `chain-capture` and the conformance suite require a resolve past genesis to
+  report exactly the `confirmations` the set's `signals.json` gives
+  (`recordedTip` minus the block announcing the resolved version, plus one);
+  the set's stated count stays a lower bound and may not exceed that.
 
 ### Deprecated
 

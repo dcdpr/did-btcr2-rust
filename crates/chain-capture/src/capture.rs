@@ -124,6 +124,37 @@ pub enum CaptureError {
         recorded_tip: u32,
     },
 
+    /// The set resolves past genesis, but its record announces no update that
+    /// produced the resolved version, so the count it states cannot be derived.
+    #[error(
+        "{vector}: the set resolves to version {version_id}, but its signals.json records no announcement of update {update}, which produced that version — the confirmations cannot be derived from the record, so the capture is refused; report the set upstream"
+    )]
+    UnannouncedVersion {
+        /// The set being captured.
+        vector: String,
+        /// The resolved version.
+        version_id: u64,
+        /// The update step that produced it.
+        update: u64,
+    },
+
+    /// The set states more confirmations than its own record gives.
+    #[error(
+        "{vector}: the set states {stated} confirmations, but its signals.json gives {derived} at its recordedTip {recorded_tip} (announcing block {height}) — a count at a tip can be no more than that, so the capture is refused; report the set upstream"
+    )]
+    ConfirmationsAboveRecord {
+        /// The set being captured.
+        vector: String,
+        /// The count `resolve/output.json` states.
+        stated: u64,
+        /// `recordedTip - height + 1`.
+        derived: u64,
+        /// The set's `recordedTip`.
+        recorded_tip: u32,
+        /// The block the resolved version was announced in.
+        height: u32,
+    },
+
     /// The chain has no vector this tool captures.
     #[error(
         "no vector this tool captures is filed under `{network_dir}` — the drivable set is: {drivable}"
@@ -184,7 +215,9 @@ pub fn resolution_options_for(
 /// Two independently derived numbers: `expected` is what the set states, and
 /// `observed` is what the resolver reported while resolving against the real
 /// chain at the set's `recordedTip`. The set states its count as "at least the
-/// recorded value" at that tip, so a count at or above it reproduces the set.
+/// recorded value" at that tip, so a count at or above it reproduces the set;
+/// past genesis the count must also equal the one the set's `signals.json`
+/// gives ([`check_confirmations`]), which a written row has passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationsCheck {
     /// The set's stated confirmations, `None` when it states none.
@@ -462,11 +495,8 @@ fn client_error_code(err: &did_btcr2_client::Error) -> Option<String> {
 /// Judge a resolve against what the set says it produces.
 ///
 /// A resolved expectation is compared on `didDocument`, `versionId`,
-/// `deactivated` and — when the set states them — `confirmations`. A set
-/// states them as a lower bound: its README contract is that at `recordedTip`
-/// each count is at least the recorded value, and the conformance harness
-/// compares them the same way, so a count at or above the stated one passes.
-/// A resolve that fails is refused with the client's own error.
+/// `deactivated` and `confirmations` ([`check_confirmations`]). A resolve that
+/// fails is refused with the client's own error.
 ///
 /// An expected error is satisfied by any failure that carries a specification
 /// error code, whatever the code: the capture only proves the chain makes the
@@ -534,23 +564,80 @@ fn check_outcome(
                     result.document_metadata.deactivated.to_string(),
                 ));
             }
-            // A set that states confirmations states them against its
-            // `recordedTip`, so the resolver's own report there is checked
-            // too: at or above the stated count. A set that states none is not
-            // checked here.
-            if let Some(expected) = confirmations {
-                let observed = result.document_metadata.confirmations;
-                if !confirmations_reproduce(*expected, observed) {
-                    return Err(mismatch(
-                        "confirmations",
-                        format!("at least {expected}"),
-                        observed.map_or_else(|| "none".to_string(), |n| n.to_string()),
-                    ));
-                }
-            }
+            check_confirmations(target, resolved_version_id, *confirmations, &result)?;
             Ok(Some(result))
         }
     }
+}
+
+/// Judge the resolver's reported `confirmations` for a resolve that reached
+/// `version_id` at the set's `recordedTip`.
+///
+/// Past genesis the count is derived from the record alone: `recordedTip -
+/// height + 1`, where `height` is the block of the `signals.json` entry
+/// announcing the update that produced the resolved version (the earliest, for
+/// a repeated announcement). The resolver's report must EQUAL that count, and
+/// the count the set states must not exceed it. The equality is what tells a
+/// resolver that anchors its count on the right block from one that anchors it
+/// on an earlier one: the signals gate pins every announcement's height, but
+/// not which of them the resolver counted from, and an earlier anchor only
+/// ever reports more.
+///
+/// The stated count is a lower bound: the set's contract is that at
+/// `recordedTip` each count is at least the recorded value, and some sets
+/// state one below what their own record gives. At genesis no update anchors
+/// the count, so only that lower bound is checked, when the set states one.
+fn check_confirmations(
+    target: &VectorTarget,
+    version_id: u64,
+    stated: Option<u64>,
+    result: &ResolutionResult,
+) -> Result<(), CaptureError> {
+    let observed = result.document_metadata.confirmations;
+    let shown = |n: Option<u32>| n.map_or_else(|| "none".to_string(), |n| n.to_string());
+    let mismatch = |expected: String| CaptureError::ResolutionMismatch {
+        vector: target.id.clone(),
+        field: "confirmations".to_string(),
+        expected,
+        got: shown(observed),
+    };
+
+    if version_id <= 1 {
+        return match stated {
+            Some(stated) if !confirmations_reproduce(stated, observed) => {
+                Err(mismatch(format!("at least {stated}")))
+            }
+            _ => Ok(()),
+        };
+    }
+
+    let recorded_tip = target.signals.recorded_tip;
+    let height = target
+        .signals
+        .announcing_height(version_id)
+        .ok_or_else(|| CaptureError::UnannouncedVersion {
+            vector: target.id.clone(),
+            version_id,
+            update: version_id - 1,
+        })?;
+    let derived = u64::from(recorded_tip.saturating_sub(height)) + 1;
+    if observed.map(u64::from) != Some(derived) {
+        return Err(mismatch(format!(
+            "{derived} (recordedTip {recorded_tip} - announcing block {height} + 1)"
+        )));
+    }
+    if let Some(stated) = stated
+        && stated > derived
+    {
+        return Err(CaptureError::ConfirmationsAboveRecord {
+            vector: target.id.clone(),
+            stated,
+            derived,
+            recorded_tip,
+            height,
+        });
+    }
+    Ok(())
 }
 
 /// A JSON value as pretty text, for an error an operator has to read.
@@ -829,12 +916,10 @@ mod tests {
                 deactivated: false,
                 confirmations,
             },
-            // Replaced by a test that runs the gate; the outcome checks never
-            // read it.
-            signals: CaptureSignals {
-                recorded_tip: 212,
-                entries: Vec::new(),
-            },
+            // Update 1 announced in block 208 against tip 212: a resolve that
+            // reaches version 2 there counts 5 confirmations. A test that runs
+            // the gate replaces it with a record its bodies carry.
+            signals: announcement_record([0x11; 32], 208, 212),
         }
     }
 
@@ -1593,12 +1678,14 @@ mod tests {
     fn outcome_resolved_refuses_a_different_confirmation_count() {
         let target = expecting(resolved_outcome(2, Some(5)));
         let error = check_outcome(&target, Ok(resolution(2, false, Some(4))))
-            .expect_err("a count below the stated lower bound is refused");
+            .expect_err("a count below the one the record gives is refused");
         assert!(
             matches!(
                 error,
                 CaptureError::ResolutionMismatch { ref field, ref expected, ref got, .. }
-                    if field == "confirmations" && expected == "at least 5" && got == "4"
+                    if field == "confirmations"
+                        && expected == "5 (recordedTip 212 - announcing block 208 + 1)"
+                        && got == "4"
             ),
             "got: {error}"
         );
@@ -1610,11 +1697,95 @@ mod tests {
         );
     }
 
+    /// A resolver that anchors its count on a block below the one announcing
+    /// the resolved version reports MORE confirmations than the record gives.
+    /// A lower-bound check alone accepts that; the derived count refuses it.
     #[test]
-    fn outcome_resolved_without_stated_confirmations_does_not_compare_them() {
+    fn outcome_resolved_refuses_a_count_anchored_on_an_earlier_block() {
+        let target = expecting(resolved_outcome(2, Some(5)));
+        let error = check_outcome(&target, Ok(resolution(2, false, Some(9))))
+            .expect_err("a count above the one the record gives is refused");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ResolutionMismatch { ref field, ref got, .. }
+                    if field == "confirmations" && got == "9"
+            ),
+            "got: {error}"
+        );
+    }
+
+    /// The set may state fewer confirmations than its record gives (some
+    /// state one below); the resolver must still report the derived count.
+    #[test]
+    fn outcome_resolved_accepts_a_stated_count_below_the_derived_one() {
+        let target = expecting(resolved_outcome(2, Some(4)));
+        check_outcome(&target, Ok(resolution(2, false, Some(5))))
+            .expect("a stated count below the derived one is a lower bound that holds");
+    }
+
+    #[test]
+    fn outcome_resolved_refuses_a_stated_count_above_the_derived_one() {
+        let target = expecting(resolved_outcome(2, Some(6)));
+        let error = check_outcome(&target, Ok(resolution(2, false, Some(5))))
+            .expect_err("a set may not state more than its record gives");
+        assert!(
+            matches!(
+                error,
+                CaptureError::ConfirmationsAboveRecord {
+                    stated: 6,
+                    derived: 5,
+                    recorded_tip: 212,
+                    height: 208,
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_resolved_without_stated_confirmations_still_requires_the_derived_count() {
         let target = expecting(resolved_outcome(2, None));
-        check_outcome(&target, Ok(resolution(2, false, Some(1_045))))
-            .expect("a set stating no confirmations is not checked on them");
+        check_outcome(&target, Ok(resolution(2, false, Some(5))))
+            .expect("the derived count is reproduced");
+        let error = check_outcome(&target, Ok(resolution(2, false, Some(1_045))))
+            .expect_err("the resolver's count is checked against the record either way");
+        assert!(
+            matches!(error, CaptureError::ResolutionMismatch { ref field, .. } if field == "confirmations"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_resolved_refuses_a_version_the_record_does_not_announce() {
+        let target = expecting(resolved_outcome(3, Some(5)));
+        let error = check_outcome(&target, Ok(resolution(3, false, Some(5))))
+            .expect_err("no entry announces update 2");
+        assert!(
+            matches!(
+                error,
+                CaptureError::UnannouncedVersion {
+                    version_id: 3,
+                    update: 2,
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_resolved_at_genesis_checks_only_the_stated_lower_bound() {
+        let target = expecting(resolved_outcome(1, Some(3)));
+        check_outcome(&target, Ok(resolution(1, false, Some(7))))
+            .expect("no update anchors a genesis count");
+        let error = check_outcome(&target, Ok(resolution(1, false, Some(2))))
+            .expect_err("below the stated count is refused");
+        assert!(
+            matches!(error, CaptureError::ResolutionMismatch { ref expected, .. } if expected == "at least 3"),
+            "got: {error}"
+        );
     }
 
     #[test]
@@ -2376,8 +2547,13 @@ mod tests {
             assert!(
                 matches!(
                     error,
-                    CaptureError::ResolutionMismatch { ref field, ref expected, ref got, .. }
-                        if field == "confirmations" && expected == "at least 12" && got == "11"
+                    CaptureError::ConfirmationsAboveRecord {
+                        stated: 12,
+                        derived: 11,
+                        recorded_tip: RECORDED_TIP,
+                        height: ANNOUNCED_AT,
+                        ..
+                    }
                 ),
                 "got: {error}"
             );

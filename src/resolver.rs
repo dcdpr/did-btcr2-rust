@@ -1122,13 +1122,13 @@ mod tests {
     use crate::test_vectors::{
         AnnouncementDelivery, AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR,
         ERROR_CODE_DIVERGENCES, GenesisDelivery, Outcome, RowKey, SKIP_OVERRIDES, SkipOverride,
-        SkipReason, Vector, VectorIdType, confirmations_at_least, confirmations_exact, discover_in,
-        expected_driven_with, expected_emitted_code, field_hex, field_nonzero_version_id,
-        field_str, field_u64, field_version_id, fixture_announcements, network_dirs_with_vectors,
-        parse_outcome, read_chain_fixture, read_chain_fixture_in, read_vendor_copy,
-        reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
-        signals_match, stale_overrides, test_suite_checked_out, unclassified_rows_with,
-        unused_divergences, version_id_matches,
+        SkipReason, Vector, VectorIdType, confirmations_at_least, confirmations_exact,
+        derived_confirmations, discover_in, expected_driven_with, expected_emitted_code, field_hex,
+        field_nonzero_version_id, field_str, field_u64, field_version_id, fixture_announcements,
+        network_dirs_with_vectors, parse_outcome, read_chain_fixture, read_chain_fixture_in,
+        read_vendor_copy, reconcile_driven_with, redundant_overrides, render_minted_summary,
+        render_summary_with, signals_match, stale_overrides, test_suite_checked_out,
+        unclassified_rows_with, unused_divergences, version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -2538,9 +2538,11 @@ mod tests {
     /// [`version_id_matches`]: as a string when the output encodes it as one.
     /// `deactivated` by value. `confirmations` as AT LEAST the recorded number
     /// ([`confirmations_at_least`]) — a recorded value was taken at the set's
-    /// recorded tip, and a later tip only adds confirmations. A replayed
-    /// positive pair, main or `resolve/NN/`, must record the number: one that
-    /// records none fails by name.
+    /// recorded tip, and a later tip only adds confirmations — and, on a set
+    /// with `signals.json` resolved past genesis, as EQUAL to the count the
+    /// record gives ([`derived_confirmations`]), which pins the block the
+    /// resolver counts from. A replayed positive pair, main or `resolve/NN/`,
+    /// must record the number: one that records none fails by name.
     ///
     /// Observation-dependent `updated` and `created` are never compared by
     /// value.
@@ -2630,6 +2632,30 @@ mod tests {
                         .unwrap_or_else(|e| {
                             panic!("{ctx}: {e} (replayed at tip {})", f.tip_height)
                         });
+                    // The resolver's own count must be the one the record
+                    // gives. At least the recorded value is all the corpus
+                    // promises, but it would accept a resolver that anchors
+                    // its count on an earlier block than the one announcing
+                    // the resolved version, which only ever reports more.
+                    if let Some(signals) = &vector.signals {
+                        let version = result.document_metadata.version_id.get();
+                        let derived = derived_confirmations(signals, version)
+                            .unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                        if let Some(derived) = derived {
+                            confirmations_exact(
+                                result.document_metadata.confirmations,
+                                Some(derived),
+                            )
+                            .unwrap_or_else(|e| {
+                                panic!(
+                                    "{ctx}: {e} derived from signals.json as recordedTip {} \
+                                         - the block announcing version {version} + 1 (replayed \
+                                         at tip {})",
+                                    signals.recorded_tip, f.tip_height
+                                )
+                            });
+                        }
+                    }
                 }
                 result.document_metadata.confirmations
             }
@@ -3091,6 +3117,27 @@ mod tests {
         assert!(
             message.contains("confirmations") && message.contains('5') && message.contains('6'),
             "the exact check names confirmations and both values: {message}"
+        );
+    }
+
+    /// The resolver's count must be the one `signals.json` gives, not merely
+    /// at least the recorded one: with the record's tip moved one block on,
+    /// the resolver's unchanged count still clears the recorded lower bound
+    /// but no longer equals the derived count, and the drive fails naming it.
+    #[test]
+    fn synthetic_options_confirmations_must_equal_the_count_signals_json_gives() {
+        let mut vectors = options_vectors();
+        vectors[0]
+            .signals
+            .as_mut()
+            .expect("the options set carries signals.json")
+            .recorded_tip += 1;
+        let message = panic_text(|| drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        assert!(
+            message.contains(OPTIONS_SET)
+                && message.contains("must equal")
+                && message.contains("derived from signals.json"),
+            "got: {message}"
         );
     }
 

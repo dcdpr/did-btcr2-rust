@@ -620,6 +620,22 @@ pub struct CaptureSignals {
     pub entries: Vec<SignalRecord>,
 }
 
+impl CaptureSignals {
+    /// The block a resolve that ends at `version_id` counts its
+    /// `confirmations` from: the height of the entry announcing the update
+    /// that produced that version (update step `version_id - 1`), the earliest
+    /// one when the update was announced again. `None` for version 1, which
+    /// no update produced, and when no entry announces that update.
+    pub fn announcing_height(&self, version_id: u64) -> Option<u32> {
+        let update = version_id.checked_sub(1).filter(|&update| update > 0)?;
+        self.entries
+            .iter()
+            .filter(|entry| entry.update == Some(update))
+            .map(|entry| entry.block_height)
+            .min()
+    }
+}
+
 /// The wire shape of one `signals.json` entry, before its rules are checked.
 ///
 /// Only the members this tool reads; members upstream adds later are ignored
