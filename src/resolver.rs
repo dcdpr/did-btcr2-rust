@@ -1274,6 +1274,13 @@ mod tests {
     /// through the same capabilityInvocation lookup a resolver uses to verify
     /// the proof.
     ///
+    /// The method is looked up wherever `sourceDocument` defines it — in
+    /// `verificationMethod` or embedded in a verification relationship — not
+    /// only among the invoking methods: a negative set may sign with a key the
+    /// document holds but does not authorize for capabilityInvocation, and the
+    /// key must still be the one that method publishes. A step naming a method
+    /// the document does not define at all is accepted only in a negative set.
+    ///
     /// Coverage is observed, not declared: the loop accumulates the ids it
     /// actually asserted against and `reconcile_driven` compares that set with
     /// the vector ledger's expectation for `AssertionKind::GenesisKey`.
@@ -1283,6 +1290,47 @@ mod tests {
             return;
         };
         drive_genesis_key(&vectors, SKIP_OVERRIDES);
+    }
+
+    /// The `publicKeyMultibase` of the method `vm_id` names in `source_json`,
+    /// looked up in `verificationMethod` and among the methods embedded in
+    /// every verification relationship, ids compared after resolving them
+    /// against the document id. `None` when the document defines no such
+    /// method.
+    fn named_method_multikey(
+        source_json: &serde_json::Value,
+        source: &Document,
+        vm_id: &str,
+        ctx: &str,
+    ) -> Option<String> {
+        use crate::document::absolutize_did_url;
+
+        let target = absolutize_did_url(vm_id, &source.fields.id);
+        [
+            "verificationMethod",
+            "authentication",
+            "assertionMethod",
+            "keyAgreement",
+            "capabilityInvocation",
+            "capabilityDelegation",
+        ]
+        .iter()
+        .filter_map(|field| source_json[*field].as_array())
+        .flatten()
+        .filter(|entry| entry.is_object())
+        .find(|method| {
+            method["id"]
+                .as_str()
+                .is_some_and(|id| absolutize_did_url(id, &source.fields.id) == target)
+        })
+        .map(|method| {
+            field_str(
+                method,
+                "publicKeyMultibase",
+                &format!("{ctx} sourceDocument {vm_id}"),
+            )
+            .to_string()
+        })
     }
 
     /// The genesis-key driver body, over an explicit override table so the same
@@ -1396,26 +1444,29 @@ mod tests {
                         .public_key(&secp);
 
                 let vm_id = field_str(&update_input, "verificationMethodId", &ctx);
-                let source = Document::from_json_string(
-                    &update_input["sourceDocument"].to_string(),
-                )
-                .unwrap_or_else(|e| {
-                    panic!("{id}: {step}/input.json sourceDocument must parse as a Document: {e}")
-                });
-                let named_key = source
-                    .fields
-                    .invoking_public_key(vm_id)
-                    .unwrap_or_else(|e| {
+                let source_json = &update_input["sourceDocument"];
+                let source =
+                    Document::from_json_string(&source_json.to_string()).unwrap_or_else(|e| {
                         panic!(
-                            "{id}: {step}/input.json verificationMethodId {vm_id} must name an \
-                             invoking method of sourceDocument: {e}"
+                            "{id}: {step}/input.json sourceDocument must parse as a Document: {e}"
                         )
                     });
-                assert_eq!(
-                    step_key, named_key,
-                    "{id}: {step}/input.json signingMaterial must derive the key of {vm_id}, \
-                     the method verificationMethodId names in sourceDocument"
-                );
+                match named_method_multikey(source_json, &source, vm_id, &ctx) {
+                    Some(published) => assert_eq!(
+                        step_key.to_multikey(),
+                        published,
+                        "{id}: {step}/input.json signingMaterial must derive the key of {vm_id}, \
+                         the method verificationMethodId names in sourceDocument"
+                    ),
+                    // A step naming a method its source document lacks is a
+                    // deliberately invalid update, which only a set expecting
+                    // the resolve to fail can carry.
+                    None => assert!(
+                        vector.is_negative(),
+                        "{id}: {step}/input.json verificationMethodId {vm_id} names no method \
+                         of sourceDocument, yet the set expects a resolved document"
+                    ),
+                }
             }
 
             observed.insert(RowKey::set(id.clone()));
@@ -2032,6 +2083,108 @@ mod tests {
             message.contains(&set.id())
                 && message.contains("update/02")
                 && message.contains("after update/01"),
+            "got: {message}"
+        );
+    }
+
+    /// A negative-set resolve output expecting `INVALID_DID_UPDATE`.
+    fn keyed_invalid_update_output() -> serde_json::Value {
+        serde_json::json!({
+            "didDocument": null,
+            "didDocumentMetadata": {},
+            "didResolutionMetadata": { "error": "INVALID_DID_UPDATE" },
+        })
+    }
+
+    /// A negative k1 set whose update/01 adds `#key-1` to `verificationMethod`
+    /// only, and whose update/02 is hand-signed with the extra key under
+    /// `#key-1`, a method the document holds but does not authorize for
+    /// capabilityInvocation.
+    fn keyed_k1_unauthorized_method_set() -> KeyedSet {
+        use crate::key::PublicKeyExt as _;
+        let (did, genesis) = keyed_k1_genesis();
+        let d = did.encode();
+        let initial_key = format!("{d}#initialKey");
+        let key_1 = format!("{d}#key-1");
+        let add_key = serde_json::json!([{
+            "op": "add",
+            "path": "/verificationMethod/-",
+            "value": {
+                "id": key_1,
+                "type": "Multikey",
+                "controller": d,
+                "publicKeyMultibase": keyed_public(KEYED_EXTRA_SECRET).to_multikey(),
+            },
+        }]);
+        let (in1, out1, v2) = keyed_step(&genesis, add_key, 2, &initial_key, KEYED_GENESIS_SECRET);
+        let patch = didcomm_patch();
+        let signed = keyed_hand_signed_update(&v2, &patch, 3, &key_1, KEYED_EXTRA_SECRET);
+        let in2 = keyed_step_input(&v2, &patch, 3, &key_1, KEYED_EXTRA_SECRET);
+        keyed_k1_set(
+            "qunauthorized",
+            &did,
+            true,
+            vec![
+                (in1, out1),
+                (in2, serde_json::json!({ "signedUpdate": signed })),
+            ],
+            keyed_invalid_update_output(),
+        )
+    }
+
+    /// A k1 set whose one update names `#unknown`, a method the document does
+    /// not define, hand-signed with the genesis key.
+    fn keyed_k1_unknown_method_set(resolve_output: serde_json::Value) -> KeyedSet {
+        let (did, genesis) = keyed_k1_genesis();
+        let unknown = format!("{}#unknown", did.encode());
+        let patch = didcomm_patch();
+        let signed = keyed_hand_signed_update(&genesis, &patch, 2, &unknown, KEYED_GENESIS_SECRET);
+        let input = keyed_step_input(&genesis, &patch, 2, &unknown, KEYED_GENESIS_SECRET);
+        keyed_k1_set(
+            "qunknown",
+            &did,
+            false,
+            vec![(input, serde_json::json!({ "signedUpdate": signed }))],
+            resolve_output,
+        )
+    }
+
+    /// A step signed by a declared key under a method the document holds but
+    /// does not authorize is accepted: the key is still the method's.
+    #[test]
+    fn genesis_key_driver_ties_a_key_to_a_non_invoking_method() {
+        let suite = keyed_suite("gk-unauthorized");
+        let set = keyed_k1_unauthorized_method_set();
+        suite.write(&set);
+        let vectors = suite.vectors();
+        assert!(
+            vectors[0].is_negative(),
+            "the set expects the resolve to fail"
+        );
+        drive_genesis_key(&vectors, &[]);
+    }
+
+    /// A step naming a method the document does not define is accepted in a
+    /// negative set and fails, naming the step and the method, in a positive
+    /// one.
+    #[test]
+    fn genesis_key_driver_accepts_an_undefined_method_only_in_a_negative_set() {
+        let suite = keyed_suite("gk-unknown-negative");
+        let set = keyed_k1_unknown_method_set(keyed_invalid_update_output());
+        suite.write(&set);
+        drive_genesis_key(&suite.vectors(), &[]);
+
+        let (_, genesis) = keyed_k1_genesis();
+        let suite = keyed_suite("gk-unknown-positive");
+        let set = keyed_k1_unknown_method_set(keyed_resolved(&genesis, 1, false));
+        suite.write(&set);
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_genesis_key(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/01")
+                && message.contains("#unknown")
+                && message.contains("names no method"),
             "got: {message}"
         );
     }
