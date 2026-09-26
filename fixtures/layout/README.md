@@ -22,6 +22,9 @@ submodule's pin when these corpora were written); none was minted. Reshaping rem
   `genesisDocument` (`genesisKeys` and `newBeaconKeys` are gone), and each
   `update/**/input.json` lost its `signingMaterial`.
 
+Every `didDocumentMetadata.versionId` is the ASCII string the specification
+requires; the source sets at `19f8d424` encoded some as JSON numbers.
+
 No set here carries a secret of any kind. None of these sets is driven past
 classification, so nothing reads the removed members.
 
@@ -31,10 +34,10 @@ Passes discovery. No `chain/` directory.
 
 | Set | Scenario id | Source | Reshape |
 |-----|-------------|--------|---------|
-| `mutinynet/x1/qh66uy2s` | `shape-x1-cas-genesis` | `test-suite/mutinynet/x1/qh66uy2s` at `19f8d424` | metadata and keys removed, `scenarioId` added. No sidecar `genesisDocument`, so its genesis is CAS-delivered. |
+| `mutinynet/x1/qh66uy2s` | `shape-x1-cas-genesis` | `test-suite/mutinynet/x1/qh66uy2s` at `19f8d424` | metadata and keys removed, `scenarioId` added, `versionId` as a string, `confirmations: 0` added (v1). No sidecar `genesisDocument`, so its genesis is CAS-delivered. |
 | `regtest/k1/qgppexmy` | `shape-k1-cas-update` | `test-suite/regtest/k1/qgppexmy` at `19f8d424` | `resolve/input.json` `resolutionOptions.sidecar.updates` deleted (the sidecar object kept), so its flat `update/` is CAS-announced. |
-| `mutinynet/x1/q5cfewep` | `shape-cohort-a` | `test-suite/mutinynet/x1/q5cfewep` at `19f8d424` | Keeps its flat `update/`. Hand-written `signals.json`: one entry with `update: 1` and the cohort. |
-| `mutinynet/x1/q425c5wf` | `shape-cohort-b` | `test-suite/mutinynet/x1/q425c5wf` at `19f8d424` | The cohort-only shape: its `update/` directory and the sidecar `updates` were deleted on purpose (the sidecar object kept). Hand-written `signals.json`: one entry with the cohort and no `update`. |
+| `mutinynet/x1/q5cfewep` | `shape-cohort-a` | `test-suite/mutinynet/x1/q5cfewep` at `19f8d424` | Keeps its flat `update/`. `versionId` as a string. Hand-written `signals.json`: one entry with `update: 1` and the cohort. |
+| `mutinynet/x1/q425c5wf` | `shape-cohort-b` | `test-suite/mutinynet/x1/q425c5wf` at `19f8d424` | `versionId` as a string. The cohort-only shape: its `update/` directory and the sidecar `updates` were deleted on purpose (the sidecar object kept). Hand-written `signals.json`: one entry with the cohort and no `update`. |
 
 The two cohort members declare the same `SMTBeacon` address in their genesis
 documents. Their `signals.json` entries share cohort `shape-cohort`, whose
@@ -59,8 +62,8 @@ object, not the bare array the layout specifies.
 ## `shapes-bad-cohort-member`
 
 Fails discovery. `shape-cohort-a` from `shapes` (the reshaped
-`mutinynet/x1/q5cfewep`) alone, without its partner, so its cohort's member
-`shape-cohort-b` matches no set.
+`mutinynet/x1/q5cfewep`, `versionId` as a string) alone, without its partner,
+so its cohort's member `shape-cohort-b` matches no set.
 
 ## `options`
 

@@ -28,7 +28,8 @@
         "service": []
     },
     "didDocumentMetadata": {
-        "versionId": 1,
+        "versionId": "1",
+        "confirmations": 0,
         "created": null,
         "updated": null,
         "deactivated": false

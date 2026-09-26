@@ -6833,6 +6833,11 @@ fn shapes_corpus_classifies_from_files() {
             v.id
         );
         assert!(!v.is_negative(), "{}", v.id);
+        assert!(
+            !v.version_id_is_number(),
+            "{}: versionId is the ASCII string the specification requires",
+            v.id
+        );
     }
     let by_id = |want: &str| {
         vectors
