@@ -1459,11 +1459,17 @@ mod tests {
                     ),
                     // A step naming a method its source document lacks is a
                     // deliberately invalid update, which only a set expecting
-                    // the resolve to fail can carry.
+                    // INVALID_DID_UPDATE can carry: the code resolve.md gives
+                    // for an update whose invoking method cannot be resolved.
                     None => assert!(
-                        vector.is_negative(),
+                        matches!(
+                            vector.outcome,
+                            Outcome::Error { ref code } if code == "INVALID_DID_UPDATE"
+                        ),
                         "{id}: {step}/input.json verificationMethodId {vm_id} names no method \
-                         of sourceDocument, yet the set expects a resolved document"
+                         of sourceDocument, yet the set expects {:?} rather than \
+                         INVALID_DID_UPDATE",
+                        vector.outcome
                     ),
                 }
             }
@@ -2234,8 +2240,8 @@ mod tests {
     }
 
     /// A step naming a method the document does not define is accepted in a
-    /// negative set and fails, naming the step and the method, in a positive
-    /// one.
+    /// set expecting INVALID_DID_UPDATE and fails, naming the step and the
+    /// method, in a positive one and in a negative set expecting another code.
     #[test]
     fn genesis_key_driver_accepts_an_undefined_method_only_in_a_negative_set() {
         let suite = keyed_suite("gk-unknown-negative");
@@ -2254,6 +2260,23 @@ mod tests {
                 && message.contains("update/01")
                 && message.contains("#unknown")
                 && message.contains("names no method"),
+            "got: {message}"
+        );
+
+        let suite = keyed_suite("gk-unknown-other-code");
+        let set = keyed_k1_unknown_method_set(serde_json::json!({
+            "didDocument": null,
+            "didDocumentMetadata": {},
+            "didResolutionMetadata": { "error": "INVALID_DID" },
+        }));
+        suite.write(&set);
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_genesis_key(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/01")
+                && message.contains("names no method")
+                && message.contains("INVALID_DID_UPDATE"),
             "got: {message}"
         );
     }
