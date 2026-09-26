@@ -1809,7 +1809,7 @@ mod tests {
     // feature-gated under `old-spec-fixtures`. Gate the import to match.
     #[cfg(feature = "old-spec-fixtures")]
     use crate::resolver::ResolverState;
-    use crate::test_vectors::read_fixture_or_skip;
+    use crate::test_vectors::read_vendor_copy;
 
     impl Did {
         fn hash_unchecked(&self) -> Sha256Hash {
@@ -1942,11 +1942,7 @@ mod tests {
         // services + 1 Multikey verificationMethod — is the regtest-vector
         // re-derivation of the asserted counts (was the now-deleted mutinynet
         // fixture, same 3/1 shape).
-        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
-        else {
-            return;
-        };
-        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
+        let resolve_output = read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json");
         let did_document = resolve_output["didDocument"].to_string();
         let doc = Document::from_json_string(&did_document).unwrap();
 
@@ -1961,11 +1957,7 @@ mod tests {
     /// whole document.
     #[test]
     fn non_beacon_service_is_retained_not_fatal() {
-        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
-        else {
-            return;
-        };
-        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
+        let resolve_output = read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json");
         let mut did_document = resolve_output["didDocument"].clone();
 
         let did_id = did_document["id"].as_str().unwrap().to_string();
@@ -1991,11 +1983,7 @@ mod tests {
     /// fields.
     #[test]
     fn service_missing_type_still_errors() {
-        let Some(resolve_output) = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")
-        else {
-            return;
-        };
-        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
+        let resolve_output = read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json");
         let mut did_document = resolve_output["didDocument"].clone();
 
         let service = &mut did_document["service"].as_array_mut().unwrap()[0];
@@ -2013,10 +2001,7 @@ mod tests {
     // q26jeds9 path.)
     #[test]
     fn test_sidecar_initial_validation() {
-        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
-            return;
-        };
-        let other: Value = serde_json::from_str(&other).unwrap();
+        let other = read_vendor_copy("regtest/x1/q26jeds9/other.json");
 
         let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
             .parse()
@@ -2052,10 +2037,7 @@ mod tests {
     // `initial_document` shortcut used by `test_sidecar_initial_validation`.
     #[test]
     fn resolve_external_bridges_genesis_document_from_serde_path() {
-        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
-            return;
-        };
-        let other: Value = serde_json::from_str(&other).unwrap();
+        let other = read_vendor_copy("regtest/x1/q26jeds9/other.json");
 
         let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
             .parse()
@@ -2219,10 +2201,7 @@ mod tests {
     // and the error must be `InvalidDid`.
     #[test]
     fn test_sidecar_initial_validation_hash_mismatch() {
-        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
-            return;
-        };
-        let other: Value = serde_json::from_str(&other).unwrap();
+        let other = read_vendor_copy("regtest/x1/q26jeds9/other.json");
 
         let did: Did = "did:btcr2:x1q26jeds9at48fu5jvpya5s88eqpzne77sp6zlrr9v5dtg7jppa08uhacp3f"
             .parse()
@@ -2287,17 +2266,11 @@ mod tests {
     /// the sidecar genesis document as shipped. Both halves are asserted: the
     /// as-shipped genesis hashes to the DID's genesis bytes, and the
     /// substituted initial document hashes to the vector's `sourceHash`.
-    /// Iterates every external vector in the suite that carries an update, so
-    /// a regenerated vector that breaks the recipe fails here by name.
+    /// Iterates the external vectors of the test-suite at `19f8d424` that
+    /// carry an update, read from their in-repository copies, so it never
+    /// skips and a copy that breaks the recipe fails here by name.
     #[test]
     fn external_source_hash_is_the_initial_document_after_placeholder_substitution() {
-        if !crate::test_vectors::test_suite_checked_out() {
-            eprintln!(
-                "SKIP: test-suite submodule absent; \
-                 run `git submodule update --init --recursive` to enable"
-            );
-            return;
-        }
         const EXTERNAL_WITH_UPDATES: &[&str] = &[
             "mutinynet/x1/q425c5wf",
             "mutinynet/x1/q550pp4e",
@@ -2308,8 +2281,7 @@ mod tests {
             "regtest/x1/qfl7se8f",
         ];
         for id in EXTERNAL_WITH_UPDATES {
-            let input = crate::test_vectors::read_fixture_json(&format!("{id}/resolve/input.json"))
-                .unwrap_or_else(|| panic!("{id}: resolve/input.json must be readable"));
+            let input = read_vendor_copy(&format!("{id}/resolve/input.json"));
             let did: Did = input["did"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{id}: `did` is a string"))
@@ -2654,12 +2626,10 @@ mod tests {
     ///
     /// Re-homed onto the regtest k1 qgpakaw4 resolved didDocument (≥1
     /// capabilityInvocation + 3 SingletonBeacon services, so the NonEmpty
-    /// invariant holds). Returns `None` when the test-suite submodule is absent
-    /// callers skip.
-    fn valid_resolved_doc_json() -> Option<Value> {
-        let resolve_output = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")?;
-        let resolve_output: Value = serde_json::from_str(&resolve_output).unwrap();
-        Some(resolve_output["didDocument"].clone())
+    /// invariant holds), read from the in-repository copy of that vendor file
+    /// at `19f8d424`, so it never skips.
+    fn valid_resolved_doc_json() -> Value {
+        read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json")["didDocument"].clone()
     }
 
     #[test]
@@ -2672,9 +2642,7 @@ mod tests {
         // field name in the detail string (the outer Error variant prints
         // only "DID:BTCR2 error" — Btcr2Error doc comments are the Display form
         // so the test pattern-matches the inner variant directly).
-        let Some(mut json) = valid_resolved_doc_json() else {
-            return;
-        };
+        let mut json = valid_resolved_doc_json();
         json["capabilityInvocation"] = serde_json::json!([]);
         let result = DocumentFields::<Did>::try_from((&json, None));
         match result {
@@ -2693,9 +2661,7 @@ mod tests {
     fn empty_service_rejected() {
         // a resolved DID document must contain ≥1
         // beacon service. Spec: did-btcr2/src/data-structures.md §did-document.
-        let Some(mut json) = valid_resolved_doc_json() else {
-            return;
-        };
+        let mut json = valid_resolved_doc_json();
         json["service"] = serde_json::json!([]);
         let result = DocumentFields::<Did>::try_from((&json, None));
         match result {
@@ -2715,9 +2681,7 @@ mod tests {
         // Happy path: a fully populated resolved-DID document parses
         // into `DocumentFields<Did>` successfully and the NonEmpty fields
         // carry the populated entries.
-        let Some(json) = valid_resolved_doc_json() else {
-            return;
-        };
+        let json = valid_resolved_doc_json();
         let fields = DocumentFields::<Did>::try_from((&json, None))
             .expect("fully populated resolved-DID document must parse");
         assert_eq!(fields.capability_invocation.len(), 1);
@@ -2733,10 +2697,7 @@ mod tests {
         // Re-homed onto the x1 q26jeds9 vector's `other.json.genesisDocument`
         // (the external intermediate/placeholder-DID shape, id `did:btcr2:_`).
         // The old flat regtest/x1qgcs.../intermediateDidDoc.json was deleted.
-        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
-            return;
-        };
-        let other: Value = serde_json::from_str(&other).unwrap();
+        let other = read_vendor_copy("regtest/x1/q26jeds9/other.json");
         let mut json = other["genesisDocument"].clone();
         json["capabilityInvocation"] = serde_json::json!([]);
         json["service"] = serde_json::json!([]);
@@ -2761,15 +2722,8 @@ mod tests {
     // deleted upstream; this read is homed on the surviving q26jeds9 path.)
     #[test]
     fn test_from_external_intermediate() {
-        let Some(other) = read_fixture_or_skip("regtest/x1/q26jeds9/other.json") else {
-            return;
-        };
-        let Some(create_output) = read_fixture_or_skip("regtest/x1/q26jeds9/create/output.json")
-        else {
-            return;
-        };
-        let other: Value = serde_json::from_str(&other).unwrap();
-        let create_output: Value = serde_json::from_str(&create_output).unwrap();
+        let other = read_vendor_copy("regtest/x1/q26jeds9/other.json");
+        let create_output = read_vendor_copy("regtest/x1/q26jeds9/create/output.json");
 
         let intermediate_doc = IntermediateDocument::from_json_value(
             other["genesisDocument"].clone(),

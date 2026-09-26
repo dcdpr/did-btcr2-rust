@@ -1126,7 +1126,7 @@ mod tests {
         Vector, VectorIdType, confirmations_at_least, confirmations_exact, discover_in,
         expected_driven_with, expected_emitted_code, field_hex, field_nonzero_version_id,
         field_str, field_u64, field_version_id, fixture_announcements, network_dirs_with_vectors,
-        read_chain_fixture, read_chain_fixture_in, read_fixture_or_skip, reconcile_driven_with,
+        read_chain_fixture, read_chain_fixture_in, read_vendor_copy, reconcile_driven_with,
         redundant_overrides, render_minted_summary, render_summary_with, signals_match,
         stale_overrides, test_suite_checked_out, unclassified_rows_with, unused_divergences,
         version_id_matches,
@@ -3250,9 +3250,7 @@ mod tests {
         // address (the key is the attribution). The resolver doc is re-homed
         // onto the regtest k1 qgpakaw4 vector purely so a valid resolver with
         // a declared beacon exists to key the fixture under.
-        let Some(mut resolver) = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP)) else {
-            return;
-        };
+        let mut resolver = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP));
 
         // Confirmed pass: discover the update hash this beacon tx announces, reusing
         // the production extraction path rather than re-parsing the OP_RETURN.
@@ -3337,9 +3335,7 @@ mod tests {
 
         // Empty sidecar → the announced hash is not present in the lookup table, so
         // the unconfirmed tx is not a signal we are waiting on.
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), None);
         let transactions = fixture_txs_under_first_beacon(&resolver, json);
 
         let signals = resolver
@@ -3362,9 +3358,7 @@ mod tests {
     /// is still extracted.
     #[test]
     fn malformed_op_return_tail_is_rejected_as_signal() {
-        let Some(resolver) = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP)) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP));
 
         // Well-formed signal (6a 20 <32B>) — must still be extracted.
         let good_signal = Sha256Hash::from([0x11u8; 32]);
@@ -3418,11 +3412,11 @@ mod tests {
 
     /// Build a minimal Singleton-beacon resolver over the regtest k1 qgpakaw4
     /// resolved DID document with a caller-supplied sidecar + chain tip. Shared by
-    /// the RESOLVE-NN FSM tests below. Returns `None` (so the caller skips) when
-    /// the test-suite submodule is absent.
-    fn resolver_with(sidecar: SidecarData, chain_tip_height: Option<u32>) -> Option<Resolver> {
-        let resolve_output = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")?;
-        let resolve_output: serde_json::Value = serde_json::from_str(&resolve_output).unwrap();
+    /// the RESOLVE-NN FSM tests below. The document is the in-repository copy
+    /// of that vendor file at `19f8d424`, so this never skips: an absent copy
+    /// is a failure.
+    fn resolver_with(sidecar: SidecarData, chain_tip_height: Option<u32>) -> Resolver {
+        let resolve_output = read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json");
         let did_document = resolve_output["didDocument"].to_string();
         let initial_document = InitialDocument::from_json_string(&did_document)
             .expect("regtest k1 qgpakaw4 resolved didDocument parses");
@@ -3432,7 +3426,7 @@ mod tests {
             chain_tip_height,
             ..test_options()
         };
-        Some(Resolver::new(initial_document, resolution_options).expect("the options are valid"))
+        Resolver::new(initial_document, resolution_options).expect("the options are valid")
     }
 
     /// The Esplora base every offline resolver test is built against. The
@@ -3470,15 +3464,15 @@ mod tests {
 
     /// Build a minimal Singleton-beacon resolver over the regtest k1 qgpakaw4
     /// resolved DID document with the given `ResolutionOptions`. Pure construction
-    /// — no FSM stepping, no network. Returns `None` (so the caller skips) when
-    /// the test-suite submodule is absent.
-    fn resolver_from_options(resolution_options: ResolutionOptions) -> Option<Resolver> {
-        let resolve_output = read_fixture_or_skip("regtest/k1/qgpakaw4/resolve/output.json")?;
-        let resolve_output: serde_json::Value = serde_json::from_str(&resolve_output).unwrap();
+    /// — no FSM stepping, no network. The document is the in-repository copy
+    /// of that vendor file at `19f8d424`, so this never skips: an absent copy
+    /// is a failure.
+    fn resolver_from_options(resolution_options: ResolutionOptions) -> Resolver {
+        let resolve_output = read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json");
         let did_document = resolve_output["didDocument"].to_string();
         let initial_document = InitialDocument::from_json_string(&did_document)
             .expect("regtest k1 qgpakaw4 resolved didDocument parses");
-        Some(Resolver::new(initial_document, resolution_options).expect("the options are valid"))
+        Resolver::new(initial_document, resolution_options).expect("the options are valid")
     }
 
     /// `ResolutionOptions.esplora_url = Some(url)` overrides the resolver's
@@ -3487,12 +3481,10 @@ mod tests {
     #[test]
     fn esplora_url_some_overrides_rpc_host() {
         let url = "https://node.example/api".to_string();
-        let Some(resolver) = resolver_from_options(ResolutionOptions {
+        let resolver = resolver_from_options(ResolutionOptions {
             esplora_url: Some(url.clone()),
             ..test_options()
-        }) else {
-            return;
-        };
+        });
         assert_eq!(resolver.rpc_host, url);
     }
 
@@ -3770,9 +3762,7 @@ mod tests {
         // (target_version_id, block_height) is driven by target_version_id, and
         // construct the NextSignals in REVERSED order (hi first) to model a
         // non-deterministic discovery order.
-        let Some(resolver) = resolver_with(sidecar, None) else {
-            return;
-        };
+        let resolver = resolver_with(sidecar, None);
         let signal_hi = NextSignal {
             beacon_type: BeaconType::Singleton,
             beacon_address: first_beacon_address(&resolver),
@@ -3835,9 +3825,7 @@ mod tests {
     /// Spec: did-btcr2/src/operations/resolve.md lines 48-57 (return signature).
     #[test]
     fn resolve_returns_the_resolution_triple() {
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), None);
         let result = resolve_with_no_signals(resolver);
 
         // Structural: destructuring the triple is a compile-time guarantee;
@@ -3861,9 +3849,7 @@ mod tests {
     /// starts at `0`; `confirmations` is REQUIRED in `didDocumentMetadata`).
     #[test]
     fn genesis_resolve_with_a_tip_reports_zero_confirmations() {
-        let Some(resolver) = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP)) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), Some(TEST_CHAIN_TIP));
         let result = resolve_with_no_signals(resolver);
         assert_eq!(result.document_metadata.confirmations, Some(0));
         let json =
@@ -3883,9 +3869,7 @@ mod tests {
     /// Spec: did-btcr2/src/data-structures.md:341 (versionId is ASCII string).
     #[test]
     fn metadata_version_id_is_an_ascii_string() {
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), None);
         let result = resolve_with_no_signals(resolver);
         let json =
             serde_json::to_string(&result.document_metadata).expect("document metadata serializes");
@@ -3911,9 +3895,7 @@ mod tests {
         // terminal_state computes confirmations from chain_tip_height +
         // current_block_height. Drive the field directly to cover the three
         // arithmetic regimes plus the no-tip case.
-        let Some(mut resolver) = resolver_with(SidecarData::default(), Some(100)) else {
-            return;
-        };
+        let mut resolver = resolver_with(SidecarData::default(), Some(100));
 
         // tip > h: 100 - 90 + 1 = 11.
         resolver.current_block_height = Some(90);
@@ -3946,9 +3928,7 @@ mod tests {
         );
 
         // No chain tip → confirmations None even with an applied height.
-        let Some(mut no_tip) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let mut no_tip = resolver_with(SidecarData::default(), None);
         no_tip.current_block_height = Some(90);
         assert_eq!(
             no_tip.terminal_state().document_metadata.confirmations,
@@ -5977,16 +5957,12 @@ mod tests {
     #[test]
     fn metadata_deactivated_follows_the_document() {
         // Un-deactivated initial document → metadata.deactivated == false.
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), None);
         let result = resolve_with_no_signals(resolver);
         assert!(!result.document_metadata.deactivated);
 
         // A deactivated contemporary document → metadata.deactivated == true.
-        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let mut resolver = resolver_with(SidecarData::default(), None);
         resolver.contemporary_doc.fields.deactivated = true;
         assert!(resolver.terminal_state().document_metadata.deactivated);
     }
@@ -6002,9 +5978,7 @@ mod tests {
         // A resolver whose document is already deactivated, driven with empty
         // signals, resolves directly and preserves version_id == 1 (no further
         // update is applied past the short-circuit point).
-        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let mut resolver = resolver_with(SidecarData::default(), None);
         resolver.contemporary_doc.fields.deactivated = true;
         let version_before = resolver.current_version_id;
 
@@ -6031,9 +6005,7 @@ mod tests {
         let sidecar = SidecarData::from_json_value(value).expect("sidecar deserializes");
         assert!(sidecar.update_lookup_table.is_empty());
 
-        let Some(resolver) = resolver_with(sidecar, None) else {
-            return;
-        };
+        let resolver = resolver_with(sidecar, None);
 
         // Synthesize a beacon signal whose hash is absent from the (empty) table.
         let missing_hash = Sha256Hash::from([7u8; 32]);
@@ -6063,9 +6035,7 @@ mod tests {
     /// instead of panicking — no remote DoS.
     #[test]
     fn cas_signal_returns_unsupported() {
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), None);
 
         let signal = NextSignal {
             beacon_type: BeaconType::Cas,
@@ -6089,9 +6059,7 @@ mod tests {
     /// the typed `Btcr2Error::Unsupported` instead of panicking.
     #[test]
     fn smt_signal_returns_unsupported() {
-        let Some(resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let resolver = resolver_with(SidecarData::default(), None);
 
         let signal = NextSignal {
             beacon_type: BeaconType::SparseMerkleTree,
@@ -6116,9 +6084,7 @@ mod tests {
     /// to the typed `Btcr2Error::Unsupported` instead of a panic.
     #[test]
     fn cas_service_request_returns_unsupported() {
-        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let mut resolver = resolver_with(SidecarData::default(), None);
         // Subject-controlled: flip the genesis beacon to an unimplemented type.
         resolver.contemporary_doc.fields.service.head.ty = BeaconType::Cas;
 
@@ -6135,9 +6101,7 @@ mod tests {
     /// the request-building path to the typed `Btcr2Error::Unsupported`.
     #[test]
     fn smt_service_request_returns_unsupported() {
-        let Some(mut resolver) = resolver_with(SidecarData::default(), None) else {
-            return;
-        };
+        let mut resolver = resolver_with(SidecarData::default(), None);
         resolver.contemporary_doc.fields.service.head.ty = BeaconType::SparseMerkleTree;
 
         let err = resolver
