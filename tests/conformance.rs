@@ -1122,7 +1122,7 @@ const KNOWN_TESTS: &[&str] = &[
     "document::tests::golden_signed_update_bytes",
     "document::tests::golden_signed_update_with_expires_bytes",
     "document::tests::external_genesis_without_sidecar_is_not_found",
-    "document::tests::invoking_entry_type_string_is_not_gated",
+    "document::tests::top_level_method_with_publickeymultibase_must_declare_multikey",
     "document::tests::proof_value_is_base58btc_64_bytes",
     "document::tests::relationship_arrays_accept_foreign_embedded_methods",
     "document::tests::relationship_entry_names_the_array_in_id_errors",

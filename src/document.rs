@@ -285,9 +285,22 @@ where
         })?;
 
         let controller = controllers_from_object(value)?;
-        // A verification method's declared `type` is carried verbatim.
         let verification_method =
             vec_from_object(value, "verificationMethod", verification_method_from_value)?;
+        // An entry that carries `publicKeyMultibase` must declare the Multikey
+        // type it pairs with; any other type makes the document
+        // non-conformant (an update producing it is INVALID_DID_UPDATE).
+        // Entries without `publicKeyMultibase` keep their own type.
+        if let Some(method) = verification_method
+            .iter()
+            .find(|method| method.public_key_multibase.is_some() && method.type_ != "Multikey")
+        {
+            return Err(Btcr2Error::InvalidDidDocument(format!(
+                "verification method {} carries publicKeyMultibase but declares type {}, not Multikey",
+                method.id.0, method.type_
+            ))
+            .into());
+        }
         let authentication = vec_from_object(value, "authentication", |entry| {
             relationship_from_value(entry, "authentication")
         })?;
@@ -380,15 +393,23 @@ where
 /// Parse one entry of the top-level `verificationMethod` array (`id`, `type`,
 /// `controller`, `publicKeyMultibase`).
 ///
-/// Entries are retained opaque: DID Core 1.1 §5.2 allows any registered
-/// verification method type there — an Ed25519 key with a `did:key`
-/// controller, a JWK with no `publicKeyMultibase` — and
+/// Entries are retained opaque: DID Core 1.1 §5.2 allows verification
+/// methods that are not secp256k1 keys there — an Ed25519 Multikey with a
+/// `did:key` controller, a JWK with no `publicKeyMultibase` — and
 /// did-btcr2/src/operations/resolve.md ("Check `update.proof`") reads
 /// `publicKeyMultibase` only from the entry a proof invokes. So `id`, `type`
 /// and `controller` must be strings, `publicKeyMultibase` is kept verbatim
 /// when present (a present value must be a JSON string), and nothing is
 /// decoded until `DocumentFields<Did>::invoking_public_key` reads the invoked
-/// entry. The declared `type` is carried verbatim and does not gate key use.
+/// entry.
+///
+/// One conformance rule applies to the array, checked by the caller once the
+/// entries are parsed: an entry carrying `publicKeyMultibase` must declare
+/// `type` `Multikey`, the Controlled Identifiers type that pairs with
+/// `publicKeyMultibase`. Otherwise the document does not conform to DID
+/// Core, which resolve.md turns into INVALID_DID_UPDATE when an update
+/// produces it. The rule does not look at the key's curve or the
+/// controller, and it does not apply to the relationship arrays.
 fn verification_method_from_value(
     method: &Value,
 ) -> Result<VerificationMethod, json_tools::JsonError> {
@@ -4194,6 +4215,19 @@ mod tests {
         })
     }
 
+    /// The same Ed25519 key and `did:key` controller as `ed25519_method_json`,
+    /// declared with the Controlled Identifiers `Multikey` type: the shape a
+    /// top-level `verificationMethod` entry carrying `publicKeyMultibase`
+    /// must take.
+    fn multikey_ed25519_method_json(did: &Did) -> Value {
+        serde_json::json!({
+            "id": format!("{}#ed", did.encode()),
+            "type": "Multikey",
+            "controller": format!("did:key:{ED25519_MULTIKEY}"),
+            "publicKeyMultibase": ED25519_MULTIKEY,
+        })
+    }
+
     /// An embedded JWK verification method with no `publicKeyMultibase` at all
     /// and a foreign controller.
     fn jwk_method_json(did: &Did) -> Value {
@@ -4269,10 +4303,11 @@ mod tests {
     }
 
     /// DID Core 1.1 §5.2: the top-level `verificationMethod` array may carry
-    /// any registered verification method — an Ed25519 key with a `did:key`
-    /// controller, a JWK with no `publicKeyMultibase` and a foreign
-    /// controller — referenced from `authentication` (the common DIDComm
-    /// layout). The document parses with the entries retained verbatim, and
+    /// verification methods that are not secp256k1 keys — an Ed25519
+    /// Multikey with a `did:key` controller, a JWK with no
+    /// `publicKeyMultibase` and a foreign controller — referenced from
+    /// `authentication` (the common DIDComm layout). The document parses
+    /// with the entries retained verbatim, and
     /// an update invoking the secp256k1 entry constructs and applies over it:
     /// nothing about the foreign entries is decoded because no proof invokes
     /// them.
@@ -4285,7 +4320,7 @@ mod tests {
         let secp256k1_entry = json["verificationMethod"][0].clone();
         json["verificationMethod"] = serde_json::json!([
             secp256k1_entry,
-            ed25519_method_json(&did),
+            multikey_ed25519_method_json(&did),
             jwk_method_json(&did)
         ]);
         json["authentication"] = serde_json::json!([vm_id, ed_id, jwk_id]);
@@ -4298,7 +4333,7 @@ mod tests {
             methods[1],
             VerificationMethod {
                 id: VerificationMethodId(ed_id.clone()),
-                type_: "Ed25519VerificationKey2020".to_string(),
+                type_: "Multikey".to_string(),
                 controller: format!("did:key:{ED25519_MULTIKEY}"),
                 public_key_multibase: Some(ED25519_MULTIKEY.to_string()),
             }
@@ -4326,7 +4361,7 @@ mod tests {
     /// is a reference, `publicKeyMultibase` is read from the
     /// `verificationMethod` entry with that `id` and handed to the BIP340
     /// cryptosuite, so it must decode as a secp256k1 Multikey. A top-level
-    /// Ed25519 method parses (the document is still a valid DID document)
+    /// Ed25519 Multikey parses (the document is still a valid DID document)
     /// but is INVALID_DID_UPDATE the moment a proof names it as the invoker
     /// — on both the construct and the apply path — and so is a top-level
     /// method with no `publicKeyMultibase` at all.
@@ -4341,7 +4376,7 @@ mod tests {
         let secp256k1_entry = json["verificationMethod"][0].clone();
         json["verificationMethod"] = serde_json::json!([
             secp256k1_entry,
-            ed25519_method_json(&did),
+            multikey_ed25519_method_json(&did),
             jwk_method_json(&did)
         ]);
         json["capabilityInvocation"] = serde_json::json!([vm_id, ed_id, jwk_id]);
@@ -4514,37 +4549,162 @@ mod tests {
         }
     }
 
-    /// The declared `type` of the invoking verification method is not
-    /// consulted. resolve.md "Check update.proof" says "Read
-    /// `publicKeyMultibase` from that entry" and "Use a BIP340 Cryptosuite
-    /// instance with `publicKeyMultibase`"; the BIP340 cryptosuite's Multikey
-    /// section constrains only the `publicKeyMultibase` encoding (a `0xe701`
-    /// secp256k1 Multikey). A `verificationMethod` entry typed
-    /// `Ed25519VerificationKey2020` whose `publicKeyMultibase` is a secp256k1
-    /// Multikey therefore signs and verifies like any other, as it does in
-    /// resolvers that read `publicKeyMultibase`.
+    /// A top-level `verificationMethod` entry that carries
+    /// `publicKeyMultibase` must declare `type` `Multikey`: the Controlled
+    /// Identifiers Multikey type is the one paired with `publicKeyMultibase`,
+    /// so a secp256k1 key declared `Ed25519VerificationKey2020` does not
+    /// conform and the document is rejected at parse, naming the entry and
+    /// its declared type.
     #[test]
-    fn invoking_entry_type_string_is_not_gated() {
+    fn top_level_method_with_publickeymultibase_must_declare_multikey() {
         let (did, vm_id, _initial, _document) = source_documents();
         let mut json = document_json(&did, &vm_id);
         json["verificationMethod"][0]["type"] = serde_json::json!("Ed25519VerificationKey2020");
+
+        let err = Document::from_json_value(json.clone())
+            .expect_err("a publicKeyMultibase entry typed other than Multikey must be rejected");
+        match err {
+            Error::Btcr2Error(Btcr2Error::InvalidDidDocument(msg)) => {
+                assert!(msg.contains("Multikey"), "got: {msg}");
+                assert!(msg.contains(&vm_id), "must name the entry; got: {msg}");
+                assert!(
+                    msg.contains("Ed25519VerificationKey2020"),
+                    "must name the declared type; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDidDocument, got {other:?}"),
+        }
+        assert!(matches!(
+            InitialDocument::from_json_value(json),
+            Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(_)))
+        ));
+    }
+
+    /// An Ed25519 key declared with its legacy `Ed25519VerificationKey2020`
+    /// type is rejected in the top-level array, even beside a conformant
+    /// secp256k1 entry: the rule is per entry, not per invoked entry.
+    #[test]
+    fn top_level_ed25519_verification_key_type_is_rejected() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        let secp256k1_entry = json["verificationMethod"][0].clone();
+        json["verificationMethod"] =
+            serde_json::json!([secp256k1_entry, ed25519_method_json(&did)]);
+
+        match InitialDocument::from_json_value(json) {
+            Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(msg))) => {
+                assert!(msg.contains("Multikey"), "got: {msg}");
+                assert!(msg.contains(&format!("{}#ed", did.encode())), "got: {msg}");
+            }
+            other => panic!("expected InvalidDidDocument, got {other:?}"),
+        }
+    }
+
+    /// The Multikey rule gates only entries that carry `publicKeyMultibase`:
+    /// a JWK entry with no `publicKeyMultibase` keeps its own `type` and the
+    /// document parses.
+    #[test]
+    fn top_level_jwk_without_publickeymultibase_is_accepted() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        let secp256k1_entry = json["verificationMethod"][0].clone();
+        let mut jwk = jwk_method_json(&did);
+        jwk["type"] = serde_json::json!("JsonWebKey");
+        json["verificationMethod"] = serde_json::json!([secp256k1_entry, jwk]);
+
+        let parsed = InitialDocument::from_json_value(json)
+            .expect("a top-level JWK without publicKeyMultibase parses");
+        let methods = &parsed.fields.verification_method;
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[1].type_, "JsonWebKey");
+        assert_eq!(methods[1].public_key_multibase, None);
+    }
+
+    /// A signed update whose patch retypes the secp256k1 method to
+    /// `JsonWebKey2020` produces a document that no longer conforms, so
+    /// resolve.md ("the current document conforms to DID Core") makes it
+    /// INVALID_DID_UPDATE on apply; construction refuses the same patch.
+    /// The update is built by hand because construction would refuse it.
+    #[test]
+    fn apply_update_rejects_a_patch_that_retypes_a_multikey_method() {
+        /// A raw JSON value hashed through the crate's canonical hash, for a
+        /// target document that cannot parse as a `Document`.
+        struct RawDocument(Value);
+        impl AsRef<Value> for RawDocument {
+            fn as_ref(&self) -> &Value {
+                &self.0
+            }
+        }
+        impl CanonicalHash for RawDocument {}
+
+        let (_did, vm_id, initial, document) = source_documents();
+        let retype_patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "replace", "path": "/verificationMethod/0/type", "value": "JsonWebKey2020"}
+        ]))
+        .expect("retype patch is a valid RFC 6902 op array");
         let version = NonZeroU64::new(2).expect("2 is non-zero");
 
-        let document = Document::from_json_value(json.clone()).expect("document is conformant");
-        assert_eq!(
-            document.fields.verification_method[0].type_,
-            "Ed25519VerificationKey2020"
+        // Construct path.
+        let err = document
+            .construct_signed_update(retype_patch.clone(), version, &vm_id, source_secret_key())
+            .expect_err("construction must refuse a patch that retypes the method");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if m.contains("non-conformant")),
+            "got: {err:?}"
         );
-        let update = document
-            .construct_signed_update(benign_patch(&vm_id), version, &vm_id, source_secret_key())
-            .expect("the declared type does not block signing");
 
-        let mut target =
-            InitialDocument::from_json_value(json).expect("the apply target is conformant");
-        target
+        // Apply path: target hash over the raw patched JSON so the hash check
+        // cannot be what rejects it.
+        let source_hash = initial.hash();
+        let mut target_value = initial.as_ref().clone();
+        json_patch::patch(&mut target_value, &retype_patch)
+            .expect("the retype patch applies to the genesis json");
+        let target_hash = RawDocument(target_value).hash();
+        let unsigned = UnsecuredUpdate::construct(&retype_patch, source_hash, target_hash, version);
+
+        let capability = derive_root_capability(initial.fields.id.clone());
+        let inner = ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: vm_id.clone(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability,
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        };
+        let proof = CryptoSuite
+            .create_proof(&unsigned, inner, &source_secret_key())
+            .expect("the retyping update signs");
+        let mut signed_json = unsigned.as_ref().clone();
+        if let Value::Object(map) = &mut signed_json {
+            map.insert(
+                "proof".to_string(),
+                serde_json::to_value(&proof).expect("proof serializes"),
+            );
+        }
+        let update = Update::from_json_value(signed_json).expect("the signed update parses");
+
+        let mut target = initial.clone();
+        let err = target
             .apply_update(&update, &AnnouncingBlock::fixed())
-            .expect("the declared type does not block verification");
-        assert_eq!(target.hash(), update.target_hash);
+            .expect_err("a patch that retypes a Multikey method must be rejected on apply");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if m.contains("non-conformant")),
+            "got: {err:?}"
+        );
+        assert_eq!(
+            target.hash(),
+            initial.hash(),
+            "a rejected update leaves the document unchanged"
+        );
     }
 
     /// An embedded relationship object whose `publicKeyMultibase` is present

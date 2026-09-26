@@ -20,11 +20,11 @@ impl FromStr for VerificationMethodId {
 
 /// One entry of the top-level `verificationMethod` array.
 ///
-/// Entries are retained as opaque DID Core 1.1 §5.2 objects: any registered
-/// verification method type, any controller DID, any key encoding. A
-/// document may carry an Ed25519 key with a `did:key` controller or a JWK
-/// with no `publicKeyMultibase` next to its secp256k1 key, and it still
-/// parses. Nothing is decoded here because did-btcr2/src/operations/resolve.md
+/// Entries are retained as opaque DID Core 1.1 §5.2 objects: any controller
+/// DID, any key encoding. A document may carry an Ed25519 Multikey with a
+/// `did:key` controller or a JWK with no `publicKeyMultibase` next to its
+/// secp256k1 key, and it still parses. The one parse-time rule is that an
+/// entry carrying `publicKeyMultibase` declares `type` `Multikey`. Nothing is decoded here because did-btcr2/src/operations/resolve.md
 /// ("Check `update.proof`") reads `publicKeyMultibase` only from the entry a
 /// proof invokes; the key is decoded at that point
 /// (`DocumentFields<Did>::invoking_public_key`), never at parse time.
@@ -34,9 +34,10 @@ pub struct VerificationMethod {
     pub id: VerificationMethodId,
 
     /// Type of verification method, carried as the raw parsed `type` string
-    /// (e.g. `"Multikey"`). It is not used to select or reject a key: the
-    /// resolve path reads `publicKeyMultibase` and verifies with the BIP340
-    /// cryptosuite regardless of the declared type.
+    /// (e.g. `"Multikey"`). Document parsing requires `"Multikey"` when
+    /// `public_key_multibase` is present; beyond that it does not select a
+    /// key: the resolve path reads `publicKeyMultibase` from the invoked
+    /// entry and verifies with the BIP340 cryptosuite.
     pub type_: String,
 
     /// The controller DID, verbatim; not parsed as a did:btcr2 identifier (a
