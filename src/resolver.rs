@@ -1695,7 +1695,9 @@ mod tests {
         })
     }
 
-    /// A k1 set over the genesis key with the given steps and end state.
+    /// A k1 set over the genesis key with the given steps and end state. The
+    /// steps' signed updates ride in the sidecar, as in a vendor set whose
+    /// resolve is driven.
     fn keyed_k1_set(
         short_id: &'static str,
         did: &crate::identifier::Did,
@@ -1707,6 +1709,10 @@ mod tests {
         if with_extra_key {
             other["extraKeys"] = serde_json::json!({ "key-1": keyed_entry(KEYED_EXTRA_SECRET) });
         }
+        let updates: Vec<serde_json::Value> = steps
+            .iter()
+            .map(|(_, output)| output["signedUpdate"].clone())
+            .collect();
         KeyedSet {
             kind: "k1",
             short_id,
@@ -1717,7 +1723,10 @@ mod tests {
                 "genesisBytes": hex::encode(keyed_public(KEYED_GENESIS_SECRET).serialize()),
             }),
             other,
-            resolve_input: serde_json::json!({ "did": did.encode(), "resolutionOptions": {} }),
+            resolve_input: serde_json::json!({
+                "did": did.encode(),
+                "resolutionOptions": { "sidecar": { "updates": updates } },
+            }),
             resolve_output,
             steps,
         }
@@ -2082,6 +2091,32 @@ mod tests {
             message.contains(&set.id())
                 && message.contains("update/02")
                 && message.contains("after update/01"),
+            "got: {message}"
+        );
+    }
+
+    /// The version cutoff trusts the vendor's resolved version, so it is
+    /// allowed only where the resolve driver confirms it: the same set with
+    /// its updates withheld from the sidecar (CAS-delivered, so its Resolve
+    /// row is skipped) fails the end-state driver, naming the set.
+    #[test]
+    fn end_state_cutoff_requires_a_driven_resolve_row() {
+        let suite = keyed_suite("end-state-cutoff-unconfirmed");
+        let set = keyed_k1_deactivated_then_updated_set();
+        suite.write(&set);
+        suite.edit(&set, "resolve/input.json", |input| {
+            input["resolutionOptions"] = serde_json::json!({});
+        });
+        let vectors = suite.vectors();
+        assert!(
+            !vectors[0].should_drive_with(AssertionKind::Resolve, &[]),
+            "without sidecar updates the set's Resolve row is not driven"
+        );
+        let message = panic_text(|| drive_end_state(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/02")
+                && message.contains("Resolve row is not driven"),
             "got: {message}"
         );
     }
@@ -3779,7 +3814,10 @@ mod tests {
     /// must be a suffix of the walk, so it can only trim the end: every step at
     /// or below the resolved version is applied, and a mismatch there still
     /// fails. A skipped step's own content is the update-crypto driver's to
-    /// check.
+    /// check. The resolved version is the vendor's claim, and only the resolve
+    /// driver ties it to what a resolver actually does, so the cutoff is
+    /// allowed only on a set whose Resolve row is driven: a cutoff anywhere
+    /// else fails, naming the set.
     ///
     /// The comparison is EXACT and needs no key normalization. `InitialDocument`
     /// derives only `Clone, Debug, PartialEq, Eq` (`document.rs:977`) — it is
@@ -3837,6 +3875,15 @@ mod tests {
                 let target_version_id =
                     field_nonzero_version_id(&step_output, "signedUpdate.targetVersionId", &ctx);
                 if target_version_id.get() > resolved_version_id {
+                    // The cutoff trusts the vendor's resolved version; only
+                    // the resolve driver confirms that a resolver stops
+                    // there, so the cutoff is allowed only where it runs.
+                    assert!(
+                        vector.should_drive_with(AssertionKind::Resolve, overrides),
+                        "{id}: {step} targets version {target_version_id} above the resolved \
+                         version {resolved_version_id}, but the set's Resolve row is not \
+                         driven, so nothing confirms the resolver stops there"
+                    );
                     past_resolved_version.get_or_insert(step);
                     continue;
                 }
