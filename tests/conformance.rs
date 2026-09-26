@@ -1090,7 +1090,7 @@ const CURATED: &[ConformanceRow] = &[
 const KNOWN_TESTS: &[&str] = &[
     "beacon::tests::beacon_type_serde_round_trips_spec_strings",
     "cryptosuite::tests::create_proof_accepts_all_string_context",
-    "cryptosuite::tests::stale_vectors_foreign_proofs_verify_under_this_cryptosuite",
+    "cryptosuite::tests::vendor_update_proofs_verify_under_this_cryptosuite",
     "cryptosuite::tests::verify_proof_rejects_prefix_context_forgery",
     "document::tests::apply_update_accepts_embedded_capability_invocation",
     "document::tests::apply_update_accepts_proof_times_inside_the_block_bounds",

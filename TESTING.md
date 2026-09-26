@@ -279,12 +279,14 @@ Resolve rows parked here would still pass; the skip lands before the reject so
 that no commit is red, and the label becomes literally true once the reject
 lands.
 
-While those rows are parked,
-`cryptosuite::tests::stale_vectors_foreign_proofs_verify_under_this_cryptosuite`
-verifies every update-step `proofValue` of the 17 vectors as shipped in
-`output.json` (the key read from `sourceDocument`), so at least 17 proofs
-produced by another implementation are still checked by this crate's BIP340
-path; a flipped-byte control proves the assertion bites.
+Whether or not those rows are parked,
+`cryptosuite::tests::vendor_update_proofs_verify_under_this_cryptosuite`
+verifies every update-step `proofValue` of every positive, update-bearing
+vector as shipped in `output.json` (the key read from `sourceDocument`), so
+proofs produced by another implementation are checked by this crate's BIP340
+path directly (at least 17). The vectors are selected
+by that rule, not by an id list. A flipped-byte control proves the assertion
+bites.
 
 ### Synthetic corpora (`fixtures/layout/`)
 

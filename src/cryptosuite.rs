@@ -833,26 +833,29 @@ mod tests {
         );
     }
 
-    /// Verify every update-step proof of every vendor vector whose update
-    /// `@context` predates the spec pin, exactly as shipped in `output.json`.
+    /// Verify every update-step proof of every positive, update-bearing vendor
+    /// vector, exactly as shipped in `output.json`.
     ///
-    /// While those vectors' Resolve rows are skipped, this is the only place a
-    /// proof produced by another implementation reaches this crate's BIP340
-    /// verification path; every other driver re-signs the update with the
-    /// vector's own secret and so only ever verifies its own signature. The
-    /// pinned-context check lives in `apply_update`, not here, so the stale
-    /// `@context` does not get in the way: what is under test is the JCS /
-    /// proof-options composition, and this fails loudly if it ever diverges
-    /// from the vendor's.
+    /// This is where a proof produced by another implementation reaches this
+    /// crate's BIP340 verification path directly, whether or not the vector's
+    /// Resolve row is driven: the genesis-key and update-crypto drivers re-sign
+    /// the update with the vector's own secret and so only ever verify their
+    /// own signature. The pinned-context check lives in `apply_update`, not
+    /// here, so what is under test is the JCS / proof-options composition, and
+    /// this fails loudly if it ever diverges from the vendor's.
+    ///
+    /// The vectors are selected by rule, not by a list of ids: every vector that
+    /// is not negative and ships at least one update step. Negative vectors are
+    /// left out because some of them carry a deliberately bad proof.
     ///
     /// The signing key is the one the vector's own `sourceDocument` names for
     /// the proof's `verificationMethod`, so a proof that verifies under some
     /// other key does not pass. A flipped signature byte proves the assertion
     /// bites.
     #[test]
-    fn stale_vectors_foreign_proofs_verify_under_this_cryptosuite() {
+    fn vendor_update_proofs_verify_under_this_cryptosuite() {
         use crate::document::Document;
-        use crate::test_vectors::{Corpus, STALE_UPDATE_CONTEXT, discover_in};
+        use crate::test_vectors::{Corpus, UpdateLayout, discover_in};
         use crate::update::Update;
         use crate::zcap::proof::ProofPurpose;
 
@@ -886,7 +889,7 @@ mod tests {
         let mut first_proof: Option<(String, serde_json::Value, serde_json::Value)> = None;
         for vector in discover_in(&Corpus::test_suite())
             .into_iter()
-            .filter(|v| STALE_UPDATE_CONTEXT.contains(&v.id.as_str()))
+            .filter(|v| !v.is_negative() && v.update_layout != UpdateLayout::None)
         {
             for step in vector.update_layout.step_prefixes() {
                 let ctx = format!("{} {step}", vector.id);
@@ -914,7 +917,7 @@ mod tests {
         }
         assert!(
             verified >= 17,
-            "expected every stale vector to contribute at least one foreign proof, verified {verified}"
+            "expected at least 17 vendor update proofs from positive update-bearing vectors, verified {verified}"
         );
 
         // Anti-vacuity: one flipped signature byte must fail.
