@@ -1126,10 +1126,10 @@ mod tests {
         Vector, VectorIdType, confirmations_at_least, confirmations_exact, discover_in,
         expected_driven_with, expected_emitted_code, field_hex, field_nonzero_version_id,
         field_str, field_u64, field_version_id, fixture_announcements, network_dirs_with_vectors,
-        read_chain_fixture, read_chain_fixture_in, read_vendor_copy, reconcile_driven_with,
-        redundant_overrides, render_minted_summary, render_summary_with, signals_match,
-        stale_overrides, test_suite_checked_out, unclassified_rows_with, unused_divergences,
-        version_id_matches,
+        parse_outcome, read_chain_fixture, read_chain_fixture_in, read_vendor_copy,
+        reconcile_driven_with, redundant_overrides, render_minted_summary, render_summary_with,
+        signals_match, stale_overrides, test_suite_checked_out, unclassified_rows_with,
+        unused_divergences, version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -1846,6 +1846,192 @@ mod tests {
         let message = panic_text(|| drive_genesis_key(&vectors, &[]));
         assert!(
             message.contains("update/02") && message.contains(&initial_key),
+            "got: {message}"
+        );
+    }
+
+    /// Sign `patch` over `source` WITHOUT the deactivated-document guard of
+    /// `construct_signed_update`, the way another implementation could: the
+    /// unsigned update the crate builds, signed with the same proof
+    /// configuration.
+    fn keyed_hand_signed_update(
+        source: &InitialDocument,
+        patch: &serde_json::Value,
+        target_version_id: u64,
+        vm_id: &str,
+        secret: [u8; 32],
+    ) -> serde_json::Value {
+        use crate::cryptosuite::CryptoSuite;
+        use crate::zcap::derive_root_capability;
+        use crate::zcap::proof::{CryptoSuiteName, ProofInner, ProofPurpose, ProofType};
+
+        let source = Document::from(source.clone());
+        let (unsigned, _, _) = source
+            .construct_unsigned_update(
+                &serde_json::from_value(patch.clone()).expect("the test patch is a JSON Patch"),
+                NonZeroU64::new(target_version_id).expect("a target version is non-zero"),
+            )
+            .expect("the patch applies to the source document");
+        let inner = ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: vm_id.to_string(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability: derive_root_capability(source.fields.id.clone()),
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        };
+        let proof = CryptoSuite
+            .create_proof(&unsigned, inner, &keyed_secret(secret))
+            .expect("the hand-built update signs");
+        let mut signed = unsigned.as_ref().clone();
+        signed["proof"] = serde_json::to_value(&proof).expect("the proof serializes");
+        signed
+    }
+
+    /// A k1 set whose update/01 deactivates the DID and whose update/02, over
+    /// the deactivated document, is hand-signed: the main resolve output is the
+    /// deactivated document at version 2.
+    fn keyed_k1_deactivated_then_updated_set() -> KeyedSet {
+        let (did, genesis) = keyed_k1_genesis();
+        let initial_key = format!("{}#initialKey", did.encode());
+        let deactivate =
+            serde_json::json!([{ "op": "add", "path": "/deactivated", "value": true }]);
+        let (in1, out1, v2) =
+            keyed_step(&genesis, deactivate, 2, &initial_key, KEYED_GENESIS_SECRET);
+        let patch = didcomm_patch();
+        let signed = keyed_hand_signed_update(&v2, &patch, 3, &initial_key, KEYED_GENESIS_SECRET);
+        let in2 = keyed_step_input(&v2, &patch, 3, &initial_key, KEYED_GENESIS_SECRET);
+        keyed_k1_set(
+            "qdeactivated",
+            &did,
+            false,
+            vec![
+                (in1, out1),
+                (in2, serde_json::json!({ "signedUpdate": signed })),
+            ],
+            keyed_resolved(&v2, 2, true),
+        )
+    }
+
+    /// An update over a deactivated source: the end-state walk stops at the
+    /// resolved version, and the update-crypto driver checks both steps.
+    #[test]
+    fn update_drivers_handle_an_update_over_a_deactivated_source() {
+        let suite = keyed_suite("deactivated");
+        let set = keyed_k1_deactivated_then_updated_set();
+        suite.write(&set);
+        let vectors = suite.vectors();
+        assert_eq!(vectors.len(), 1, "the keyed corpus holds its one set");
+        assert_eq!(
+            vectors[0].fixture("update/02/input.json")["sourceDocument"]["deactivated"],
+            serde_json::json!(true),
+            "update/02 is over a deactivated source"
+        );
+        drive_end_state(&vectors, &[]);
+        drive_update_crypto(&vectors, &[]);
+        drive_genesis_key(&vectors, &[]);
+    }
+
+    /// A flipped proofValue on the update over a deactivated source fails the
+    /// update-crypto driver, naming the step.
+    #[test]
+    fn update_crypto_rejects_a_tampered_proof_over_a_deactivated_source() {
+        let suite = keyed_suite("deactivated-proof");
+        let set = keyed_k1_deactivated_then_updated_set();
+        suite.write(&set);
+        suite.edit(&set, "update/02/output.json", |output| {
+            let proof_value = output["signedUpdate"]["proof"]["proofValue"]
+                .as_str()
+                .expect("the proof carries a proofValue")
+                .to_string();
+            // Swap the last base58 character for another one, so the value
+            // still decodes but to a different signature.
+            let last = proof_value
+                .chars()
+                .last()
+                .expect("a proofValue is non-empty");
+            let swapped = if last == '2' { '3' } else { '2' };
+            output["signedUpdate"]["proof"]["proofValue"] = serde_json::json!(format!(
+                "{}{swapped}",
+                &proof_value[..proof_value.len() - 1]
+            ));
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_update_crypto(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/02")
+                && message.contains("proof"),
+            "got: {message}"
+        );
+    }
+
+    /// An altered sourceHash on the update over a deactivated source fails the
+    /// update-crypto driver, naming the step and sourceHash.
+    #[test]
+    fn update_crypto_rejects_a_tampered_source_hash_over_a_deactivated_source() {
+        let suite = keyed_suite("deactivated-source-hash");
+        let set = keyed_k1_deactivated_then_updated_set();
+        suite.write(&set);
+        suite.edit(&set, "update/02/output.json", |output| {
+            output["signedUpdate"]["sourceHash"] =
+                serde_json::json!(hash_b64(&Sha256Hash::from([0u8; 32])));
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_update_crypto(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/02")
+                && message.contains("sourceHash must be the JSON Document Hash of sourceDocument"),
+            "got: {message}"
+        );
+    }
+
+    /// The version cutoff hides nothing at or below the resolved version: a
+    /// set resolved at version 2 whose expected document is not what update/01
+    /// produces still fails the end-state driver.
+    #[test]
+    fn end_state_still_fails_below_the_resolved_version() {
+        let suite = keyed_suite("end-state-mismatch");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        // Resolved at version 2, but expecting the version-3 document.
+        suite.edit(&set, "resolve/output.json", |output| {
+            output["didDocumentMetadata"]["versionId"] = serde_json::json!("2");
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_end_state(&vectors, &[]));
+        assert!(
+            message.contains(&set.id()) && message.contains("resolve/output.json.didDocument"),
+            "got: {message}"
+        );
+    }
+
+    /// The version cutoff only trims the end of the walk: a step at or below
+    /// the resolved version after one above it fails, naming both steps.
+    #[test]
+    fn end_state_cutoff_must_be_a_suffix_of_the_walk() {
+        let suite = keyed_suite("end-state-suffix");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        suite.edit(&set, "update/01/output.json", |output| {
+            output["signedUpdate"]["targetVersionId"] = serde_json::json!(5);
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_end_state(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/02")
+                && message.contains("after update/01"),
             "got: {message}"
         );
     }
@@ -3215,13 +3401,14 @@ mod tests {
     /// carries the real DID — not `other.json.genesisDocument`, whose id is the
     /// `did:btcr2:_` placeholder and would need `into_initial` first.
     ///
-    /// SAFE MID-WALK. Deactivation is the TERMINAL step in both multi-update
-    /// vectors (`q5m2fh36` 01=add service / 02=deactivate; `qky9e7qz`
-    /// 01,02=add service / 03=deactivate), so the walk never applies an update to
-    /// an already-deactivated document and never trips `apply_update`'s
-    /// "a deactivated DID is terminal" guard. The patches add NON-beacon services
-    /// (`DIDCommMessaging`, `DecentralizedWebNode`), which the document parser
-    /// retains and ignores.
+    /// A STEP OVER A DEACTIVATED SOURCE is not re-derived: this crate refuses
+    /// to construct it, and a deactivated DID is terminal, so no resolver
+    /// applies it. The refusal is asserted, and the vendor's `signedUpdate` is
+    /// checked on its own terms — hashes against `sourceDocument`, proof
+    /// verified under the key `sourceDocument` names — by
+    /// [`check_update_over_deactivated_source`]. The ordering, hash and
+    /// document linkage still hold it to the step before it; nothing carries
+    /// past it.
     ///
     /// The raw `proofValue` is NOT byte-compared: BIP340 Schnorr signing here is
     /// deterministic (no-aux-rand), but the suite's vector was produced by a
@@ -3291,15 +3478,109 @@ mod tests {
         }
     }
 
+    /// A JSON Document Hash in the base64url (no padding) form `sourceHash`
+    /// and `targetHash` are stored in.
+    fn hash_b64(hash: &Sha256Hash) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.as_bytes())
+    }
+
+    /// Check an update step whose `sourceDocument` is deactivated, and return
+    /// its `output.json`.
+    ///
+    /// Such a step cannot be re-derived: `construct_signed_update` refuses a
+    /// deactivated source, which is this crate's policy (the specification only
+    /// requires resolution to stop at a deactivated document). So the refusal
+    /// is asserted, and the vendor's `signedUpdate` is checked on its own
+    /// terms instead: its `sourceHash` and `targetHash` must be the JSON
+    /// Document Hashes of `sourceDocument` before and after the patch, its
+    /// patch must be the step's, its proof must name the step's
+    /// `verificationMethodId`, and the proof must verify under the key that
+    /// method has in `sourceDocument`. The update is never applied.
+    fn check_update_over_deactivated_source(vector: &Vector, step: &str) -> serde_json::Value {
+        use crate::cryptosuite::CryptoSuite;
+        use crate::document::absolutize_did_url;
+        use crate::key::SecretKey;
+        use crate::zcap::proof::ProofPurpose;
+        use json_patch::Patch;
+
+        let input = vector.fixture(&format!("{step}/input.json"));
+        let output = vector.fixture(&format!("{step}/output.json"));
+        let ctx = format!("{} {step}", vector.id);
+
+        let source_doc = Document::from_json_string(&input["sourceDocument"].to_string())
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: input.json.sourceDocument must parse as a Document: {e}")
+            });
+        let patch: Patch = serde_json::from_value(input["patches"].clone())
+            .unwrap_or_else(|e| panic!("{ctx}: input.json.patches must be a JSON Patch: {e}"));
+        let target_version_id =
+            field_nonzero_version_id(&output, "signedUpdate.targetVersionId", &ctx);
+        let vm_id = field_str(&input, "verificationMethodId", &ctx);
+        let secret = SecretKey::try_from(field_hex(&input, "signingMaterial", &ctx))
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: input.json.signingMaterial is not a secret key: {e}")
+            });
+
+        match source_doc.construct_signed_update(patch.clone(), target_version_id, vm_id, secret) {
+            Err(Btcr2Error::InvalidDidUpdate(msg)) if msg.contains("deactivated") => {}
+            other => panic!(
+                "{ctx}: construct_signed_update must refuse an update over a deactivated \
+                 sourceDocument, got {other:?}"
+            ),
+        }
+
+        let (_, source_hash, target_hash) = source_doc
+            .construct_unsigned_update(&patch, target_version_id)
+            .unwrap_or_else(|e| panic!("{ctx}: the patch must apply to sourceDocument: {e}"));
+        assert_eq!(
+            hash_b64(&source_hash),
+            field_str(&output, "signedUpdate.sourceHash", &ctx),
+            "{ctx}: signedUpdate.sourceHash must be the JSON Document Hash of sourceDocument"
+        );
+        assert_eq!(
+            hash_b64(&target_hash),
+            field_str(&output, "signedUpdate.targetHash", &ctx),
+            "{ctx}: signedUpdate.targetHash must be the JSON Document Hash of sourceDocument \
+             with the patch applied"
+        );
+        assert_eq!(
+            output["signedUpdate"]["patch"], input["patches"],
+            "{ctx}: signedUpdate.patch must be the step's patches"
+        );
+
+        let vendor = Update::from_json_value(output["signedUpdate"].clone())
+            .unwrap_or_else(|e| panic!("{ctx}: signedUpdate must parse as an update: {e}"));
+        assert_eq!(
+            vendor.proof.inner.verification_method,
+            absolutize_did_url(vm_id, &source_doc.fields.id),
+            "{ctx}: the proof must name the step's verificationMethodId"
+        );
+        let key = source_doc
+            .fields
+            .invoking_public_key(&vendor.proof.inner.verification_method)
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: the proof's verificationMethod must be an invoking method of sourceDocument: {e}")
+            });
+        CryptoSuite
+            .data_integrity_verify_proof(key, &vendor, &ProofPurpose::CapabilityInvocation)
+            .unwrap_or_else(|e| {
+                panic!("{ctx}: the signedUpdate proof must verify under the key sourceDocument names: {e}")
+            });
+
+        output
+    }
+
     /// The UPDATE-crypto driver body, over an explicit override table so the same
     /// code path can be exercised with a hand-written skip in place.
+    ///
+    /// A step over a deactivated `sourceDocument` is checked by
+    /// [`check_update_over_deactivated_source`] instead of being re-derived;
+    /// the step linkage checks apply to it like to any other step.
     fn drive_update_crypto(vectors: &[Vector], overrides: &[SkipOverride]) {
         use crate::document::InitialDocument;
 
-        let to_b64 = |h: &Sha256Hash| {
-            use base64::Engine as _;
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.as_bytes())
-        };
+        let to_b64 = hash_b64;
 
         let mut observed = BTreeSet::new();
         for vector in vectors {
@@ -3312,11 +3593,15 @@ mod tests {
             let mut carried: Option<InitialDocument> = None;
 
             for (step_index, step) in vector.update_layout.step_prefixes().iter().enumerate() {
-                let StepFixtures {
-                    input,
-                    output,
-                    update,
-                } = signed_update_for_step(vector, step);
+                let input = vector.fixture(&format!("{step}/input.json"));
+                let (output, update) = if input["sourceDocument"]["deactivated"]
+                    == serde_json::Value::Bool(true)
+                {
+                    (check_update_over_deactivated_source(vector, step), None)
+                } else {
+                    let StepFixtures { output, update, .. } = signed_update_for_step(vector, step);
+                    (output, Some(update))
+                };
 
                 // (a) Step-index linkage: step NN is update number NN.
                 assert_eq!(
@@ -3348,6 +3633,21 @@ mod tests {
                          by the previous step"
                     );
                 }
+
+                // (f) Structural proof shape.
+                assert_eq!(
+                    field_str(&output, "signedUpdate.proof.cryptosuite", id),
+                    "bip340-jcs-2025",
+                    "{id}: {step} vector proof cryptosuite"
+                );
+
+                // A step over a deactivated source was checked on its own terms
+                // and is never applied, so nothing carries past it.
+                let Some(update) = update else {
+                    previous_target_hash = Some(stated_target_hash.to_string());
+                    carried = None;
+                    continue;
+                };
 
                 // (d) Content-bound triple must equal the vector's signedUpdate.
                 assert_eq!(
@@ -3381,13 +3681,6 @@ mod tests {
                 initial
                     .apply_update(&update, &AnnouncingBlock::fixed())
                     .unwrap_or_else(|e| panic!("{id}: {step} produced proof must verify: {e}"));
-
-                // (f) Structural proof shape.
-                assert_eq!(
-                    field_str(&output, "signedUpdate.proof.cryptosuite", id),
-                    "bip340-jcs-2025",
-                    "{id}: {step} vector proof cryptosuite"
-                );
 
                 // (g) Carry forward into the next step.
                 previous_target_hash = Some(stated_target_hash.to_string());
@@ -3426,11 +3719,16 @@ mod tests {
     /// carries the real DID — not `other.json.genesisDocument`, whose id is the
     /// `did:btcr2:_` placeholder and would need `into_initial` first.
     ///
-    /// SAFE MID-WALK: deactivation is the TERMINAL step in both multi-update
-    /// vectors (`q5m2fh36` 01=add service / 02=deactivate; `qky9e7qz` 01,02=add
-    /// service / 03=deactivate), so the walk never applies an update to an
-    /// already-deactivated document and never trips `apply_update`'s
-    /// "a deactivated DID is terminal" guard.
+    /// THE WALK STOPS AT THE RESOLVED VERSION: a step whose
+    /// `signedUpdate.targetVersionId` exceeds the main `resolve/output.json`
+    /// `versionId` is one no resolver applies — an update over a deactivated
+    /// DID, one announced on a beacon the document has since removed, or one
+    /// whose signal lies past the resolution height — so it is not applied
+    /// here either. The cutoff is read from the files, and the steps it skips
+    /// must be a suffix of the walk, so it can only trim the end: every step at
+    /// or below the resolved version is applied, and a mismatch there still
+    /// fails. A skipped step's own content is the update-crypto driver's to
+    /// check.
     ///
     /// The comparison is EXACT and needs no key normalization. `InitialDocument`
     /// derives only `Clone, Debug, PartialEq, Eq` (`document.rs:977`) — it is
@@ -3465,12 +3763,40 @@ mod tests {
             let id = &vector.id;
 
             let steps = vector.update_layout.step_prefixes();
+            let output = vector.fixture("resolve/output.json");
+
+            // The resolved version, read as metadata (a string `versionId`);
+            // each step's target is read as an update-payload integer.
+            let resolved_version_id =
+                match parse_outcome(&output, &format!("{id}/resolve/output.json")) {
+                    Outcome::Positive { version_id, .. } => version_id,
+                    Outcome::Error { code } => {
+                        panic!("{id}: an end-state row resolves to a document, got error {code}")
+                    }
+                };
 
             // The walk starts from step 01's stated source document and carries
             // each step's result forward.
             let mut carried: Option<InitialDocument> = None;
+            let mut past_resolved_version: Option<&str> = None;
 
             for (step_index, step) in steps.iter().enumerate() {
+                let ctx = format!("{id} {step}");
+                let step_output = vector.fixture(&format!("{step}/output.json"));
+                let target_version_id =
+                    field_nonzero_version_id(&step_output, "signedUpdate.targetVersionId", &ctx);
+                if target_version_id.get() > resolved_version_id {
+                    past_resolved_version.get_or_insert(step);
+                    continue;
+                }
+                if let Some(skipped) = past_resolved_version {
+                    panic!(
+                        "{id}: {step} targets version {target_version_id}, at or below the \
+                         resolved version {resolved_version_id}, after {skipped} targeted a \
+                         version above it"
+                    );
+                }
+
                 let StepFixtures { input, update, .. } = signed_update_for_step(vector, step);
 
                 // Step-index linkage, mirrored from the update-crypto driver:
@@ -3499,16 +3825,16 @@ mod tests {
                 carried = Some(doc);
             }
 
-            let doc = carried
-                .unwrap_or_else(|| panic!("{id}: an end-state row ships at least one update step"));
+            let doc = carried.unwrap_or_else(|| {
+                panic!("{id}: an end-state row applies at least one update step")
+            });
 
-            let output = vector.fixture("resolve/output.json");
             let got: serde_json::Value = doc.as_ref().clone();
             let want: serde_json::Value = output["didDocument"].clone();
             assert_eq!(
                 got, want,
-                "{id}: applying every update step in order must reproduce \
-                 resolve/output.json.didDocument"
+                "{id}: applying every update step up to the resolved version in order \
+                 must reproduce resolve/output.json.didDocument"
             );
 
             observed.insert(RowKey::set(id.clone()));
