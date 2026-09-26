@@ -815,6 +815,39 @@ pub(crate) fn read_chain_fixture_in(chain_root: &Path, vector_id: &str) -> Chain
     fixture
 }
 
+/// Root of the in-repository copies of the vendor documents the unit tests
+/// read, taken from the test-suite at `19f8d424`.
+fn vendor_copy_root() -> PathBuf {
+    PathBuf::from(format!(
+        "{}/fixtures/layout/vendor-19f8d424",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+}
+
+/// Read one in-repository copy of a vendor document, by its path relative to
+/// the test-suite root (e.g. `regtest/k1/qgpakaw4/resolve/output.json`).
+/// **Panics** when the file is absent or is not JSON.
+///
+/// Unlike [`read_fixture_or_skip`], this never skips: the copies live in this
+/// repository, so the unit tests that read them keep running whatever commit
+/// the test-suite submodule is at, or whether it is checked out at all.
+pub(crate) fn read_vendor_copy(rel: &str) -> serde_json::Value {
+    read_vendor_copy_in(&vendor_copy_root(), rel)
+}
+
+fn read_vendor_copy_in(root: &Path, rel: &str) -> serde_json::Value {
+    let path = root.join(rel);
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "no vendor copy at {} ({e}): these copies live in this repository, so an absent \
+             one is a bug",
+            path.display()
+        )
+    });
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("vendor copy {} is not JSON ({e})", path.display()))
+}
+
 /// One Beacon Signal on chain, as the exact-match check between a set's
 /// `signals.json` and its replayed chain compares it: which transaction, in
 /// which block, pushing which 32 bytes.
@@ -3330,6 +3363,52 @@ fn id_type_maps_both_vocabularies_and_rejects_unknown() {
     assert!(
         panic_message(payload).contains("HYBRID"),
         "the message names the offending wire string"
+    );
+}
+
+/// The in-repository copy of the k1 resolved document is the document the
+/// helper tests expect, read with no dependence on the submodule.
+#[test]
+fn read_vendor_copy_reads_the_in_repo_k1_document() {
+    let output = read_vendor_copy("regtest/k1/qgpakaw4/resolve/output.json");
+    assert_eq!(
+        output["didDocument"]["id"],
+        "did:btcr2:k1qgpakaw4lwemekywf0lyth9hf6j8r2td7gqtrs4aztqfky50jnx7s8gfapup6"
+    );
+}
+
+/// An absent copy panics naming the full path and why that is a bug, rather
+/// than skipping.
+#[test]
+fn read_vendor_copy_panics_on_a_missing_copy() {
+    let rel = "regtest/k1/qnotthere/resolve/output.json";
+    let payload = std::panic::catch_unwind(|| read_vendor_copy(rel))
+        .expect_err("an absent vendor copy must panic");
+    let message = panic_message(payload);
+    let full = vendor_copy_root().join(rel);
+    assert!(
+        message.contains(&full.display().to_string()),
+        "the message names the full path: {message}"
+    );
+    assert!(
+        message.contains("in this repository"),
+        "the message says the copies are in-repo: {message}"
+    );
+}
+
+/// A copy that is not JSON panics naming its path.
+#[test]
+fn read_vendor_copy_panics_on_invalid_json() {
+    let dir = std::env::temp_dir().join(format!("vendor-copy-bad-json-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("bad.json"), "{ not json").unwrap();
+    let payload = std::panic::catch_unwind(|| read_vendor_copy_in(&dir, "bad.json"))
+        .expect_err("a copy that is not JSON must panic");
+    let message = panic_message(payload);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        message.contains("bad.json") && message.contains("is not JSON"),
+        "the message names the file: {message}"
     );
 }
 

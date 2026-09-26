@@ -13,8 +13,8 @@ The production ledger walks only the `test-suite/` submodule, so nothing here
 changes its counts. These files belong to this repository: an absent one is a
 bug, and the tests that read them never skip.
 
-Every set was reshaped from a set of the checked-out `test-suite/`; none was
-minted. Reshaping removed:
+Every set was reshaped from a set of `test-suite/` at `19f8d424` (the
+submodule's pin when these corpora were written); none was minted. Reshaping removed:
 
 - `scenario.json`, `funding.json` and `pending.json` (the regenerated layout
   ships none of them);
@@ -31,10 +31,10 @@ Passes discovery. No `chain/` directory.
 
 | Set | Scenario id | Source | Reshape |
 |-----|-------------|--------|---------|
-| `mutinynet/x1/qh66uy2s` | `shape-x1-cas-genesis` | `test-suite/mutinynet/x1/qh66uy2s` | metadata and keys removed, `scenarioId` added. No sidecar `genesisDocument`, so its genesis is CAS-delivered. |
-| `regtest/k1/qgppexmy` | `shape-k1-cas-update` | `test-suite/regtest/k1/qgppexmy` | `resolve/input.json` `resolutionOptions.sidecar.updates` deleted (the sidecar object kept), so its flat `update/` is CAS-announced. |
-| `mutinynet/x1/q5cfewep` | `shape-cohort-a` | `test-suite/mutinynet/x1/q5cfewep` | Keeps its flat `update/`. Hand-written `signals.json`: one entry with `update: 1` and the cohort. |
-| `mutinynet/x1/q425c5wf` | `shape-cohort-b` | `test-suite/mutinynet/x1/q425c5wf` | The cohort-only shape: its `update/` directory and the sidecar `updates` were deleted on purpose (the sidecar object kept). Hand-written `signals.json`: one entry with the cohort and no `update`. |
+| `mutinynet/x1/qh66uy2s` | `shape-x1-cas-genesis` | `test-suite/mutinynet/x1/qh66uy2s` at `19f8d424` | metadata and keys removed, `scenarioId` added. No sidecar `genesisDocument`, so its genesis is CAS-delivered. |
+| `regtest/k1/qgppexmy` | `shape-k1-cas-update` | `test-suite/regtest/k1/qgppexmy` at `19f8d424` | `resolve/input.json` `resolutionOptions.sidecar.updates` deleted (the sidecar object kept), so its flat `update/` is CAS-announced. |
+| `mutinynet/x1/q5cfewep` | `shape-cohort-a` | `test-suite/mutinynet/x1/q5cfewep` at `19f8d424` | Keeps its flat `update/`. Hand-written `signals.json`: one entry with `update: 1` and the cohort. |
+| `mutinynet/x1/q425c5wf` | `shape-cohort-b` | `test-suite/mutinynet/x1/q425c5wf` at `19f8d424` | The cohort-only shape: its `update/` directory and the sidecar `updates` were deleted on purpose (the sidecar object kept). Hand-written `signals.json`: one entry with the cohort and no `update`. |
 
 The two cohort members declare the same `SMTBeacon` address in their genesis
 documents. Their `signals.json` entries share cohort `shape-cohort`, whose
@@ -46,14 +46,14 @@ real transaction. `beaconId` and `address` are read from each set's own DID and
 
 ## `shapes-unknown-resolve-child`
 
-Fails discovery. `regtest/k1/qgpakaw4` from `test-suite/`, metadata and keys
-removed, plus a hand-written `resolve/notes.md`: a `resolve/` child that is
+Fails discovery. `regtest/k1/qgpakaw4` from `test-suite/` at `19f8d424`,
+metadata and keys removed, plus a hand-written `resolve/notes.md`: a `resolve/` child that is
 neither the main pair nor a numbered case.
 
 ## `shapes-malformed-signals`
 
-Fails discovery. `regtest/k1/qgpakaw4` from `test-suite/`, metadata and keys
-removed, plus a hand-written `signals.json` holding `{"entries": []}`: an
+Fails discovery. `regtest/k1/qgpakaw4` from `test-suite/` at `19f8d424`,
+metadata and keys removed, plus a hand-written `signals.json` holding `{"entries": []}`: an
 object, not the bare array the layout specifies.
 
 ## `shapes-bad-cohort-member`
@@ -67,7 +67,7 @@ Fails discovery. `shape-cohort-a` from `shapes` (the reshaped
 Passes discovery, and its Resolve and ResolveOption rows are driven end to end
 off a real chain. One set, `mutinynet/k1/q5pew2jc`, scenario id
 `reshaped-clean-rotating-beacons`. Unlike the sets above, it was reshaped from
-a minted capture, not from a `test-suite/` set:
+a minted capture, not from a `test-suite/` set at `19f8d424`:
 `fixtures/chain/minted/clean-rotating-beacons.json` (the four-version
 mutinynet chain: v2 at block 3443744, v3 at 3443745, v4 at 3443746, which
 deactivates; tip 3443751).
@@ -225,7 +225,7 @@ update-crypto and end-state rows are asserted through classification only.
 Passes discovery, and its Resolve row is driven with no chain. One set,
 `mutinynet/x1/qh66uy2s`, scenario id `reshaped-withheld-genesis`: the `shapes`
 corpus's CAS-genesis set (itself reshaped from
-`test-suite/mutinynet/x1/qh66uy2s`) with its `create/`, `resolve/input.json`
+`test-suite/mutinynet/x1/qh66uy2s` at `19f8d424`) with its `create/`, `resolve/input.json`
 and `other.json` copied, `scenarioId` renamed.
 
 Chosen: `resolve/output.json` expects `NOT_FOUND`, with a null `didDocument`
@@ -235,3 +235,33 @@ that outcome `NOT_FOUND`. The files are those of a CAS-genesis set; only the
 expected error marks the genesis as withheld. It pins that such a set is
 driven and asserts its code, rather than being left neither driven nor
 skipped. No `signals.json`, no `update/`, no `resolve/NN/` cases.
+
+## Vendor copies at `19f8d424`
+
+`vendor-19f8d424/` is not a corpus: it has no `sets/` tree, so no
+`discover_in` walk finds it, and no ledger counts it. It holds single files
+of the test-suite at `19f8d424`, at their test-suite paths, for the unit tests
+in `document.rs` and `resolver.rs` that need stable real documents (a resolved
+k1 document, an x1 genesis document, x1 resolve inputs carrying signed
+updates). Those tests read them through `read_vendor_copy`, which panics on an
+absent file instead of skipping, so they keep running after the submodule
+moves to a corpus that no longer has these sets.
+
+Each file was written from the pinned commit with
+`git -C test-suite show 19f8d424:<path>`, not from a working tree. The resolve
+inputs hold signed updates and public documents only; no file carries a
+secret or key material.
+
+| File | Source | Reshape |
+|------|--------|---------|
+| `regtest/k1/qgpakaw4/resolve/output.json` | `test-suite/regtest/k1/qgpakaw4/resolve/output.json` at `19f8d424` | byte copy |
+| `regtest/k1/qgpakaw4/create/output.json` | `test-suite/regtest/k1/qgpakaw4/create/output.json` at `19f8d424` | byte copy |
+| `regtest/x1/q26jeds9/create/output.json` | `test-suite/regtest/x1/q26jeds9/create/output.json` at `19f8d424` | byte copy |
+| `regtest/x1/q26jeds9/other.json` | `test-suite/regtest/x1/q26jeds9/other.json` at `19f8d424` | `other.json` reduced to `genesisDocument` (`genesisKeys` and `generatedKeys` dropped) |
+| `mutinynet/x1/q425c5wf/resolve/input.json` | `test-suite/mutinynet/x1/q425c5wf/resolve/input.json` at `19f8d424` | byte copy |
+| `mutinynet/x1/q550pp4e/resolve/input.json` | `test-suite/mutinynet/x1/q550pp4e/resolve/input.json` at `19f8d424` | byte copy |
+| `mutinynet/x1/q5cfewep/resolve/input.json` | `test-suite/mutinynet/x1/q5cfewep/resolve/input.json` at `19f8d424` | byte copy |
+| `mutinynet/x1/q5ugrf3w/resolve/input.json` | `test-suite/mutinynet/x1/q5ugrf3w/resolve/input.json` at `19f8d424` | byte copy |
+| `mutinynet/x1/qkrrp544/resolve/input.json` | `test-suite/mutinynet/x1/qkrrp544/resolve/input.json` at `19f8d424` | byte copy |
+| `regtest/x1/q26jeds9/resolve/input.json` | `test-suite/regtest/x1/q26jeds9/resolve/input.json` at `19f8d424` | byte copy |
+| `regtest/x1/qfl7se8f/resolve/input.json` | `test-suite/regtest/x1/qfl7se8f/resolve/input.json` at `19f8d424` | byte copy |
