@@ -24,7 +24,10 @@ impl FromStr for VerificationMethodId {
 /// DID, any key encoding. A document may carry an Ed25519 Multikey with a
 /// `did:key` controller or a JWK with no `publicKeyMultibase` next to its
 /// secp256k1 key, and it still parses. The one parse-time rule is that an
-/// entry carrying `publicKeyMultibase` declares `type` `Multikey`. Nothing is decoded here because did-btcr2/src/operations/resolve.md
+/// entry carrying `publicKeyMultibase` declares `type` `Multikey`, this
+/// crate's reading of resolve.md's DID Core conformance check rather than a
+/// rule the spec names (see `DocumentFields` parsing). Nothing is decoded here
+/// because did-btcr2/src/operations/resolve.md
 /// ("Check `update.proof`") reads `publicKeyMultibase` only from the entry a
 /// proof invokes; the key is decoded at that point
 /// (`DocumentFields<Did>::invoking_public_key`), never at parse time.

@@ -92,7 +92,9 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - A top-level verification method that carries `publicKeyMultibase` must
   declare type `Multikey`; any other type is rejected as
   `InvalidDidDocument`, and an update that produces one is
-  `INVALID_DID_UPDATE`.
+  `INVALID_DID_UPDATE`. This is the crate's reading of the resolve
+  algorithm's DID Core conformance check; the method spec does not name the
+  rule, and the question is open with the spec authors.
 - The conformance suite runs against the regenerated test suite: 236 sets on
   regtest, mutinynet, signet and testnet4, including negative sets and
   `resolve/NN` resolution-option cases, replayed off fresh chain captures

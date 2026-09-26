@@ -287,10 +287,12 @@ where
         let controller = controllers_from_object(value)?;
         let verification_method =
             vec_from_object(value, "verificationMethod", verification_method_from_value)?;
-        // An entry that carries `publicKeyMultibase` must declare the Multikey
-        // type it pairs with; any other type makes the document
-        // non-conformant (an update producing it is INVALID_DID_UPDATE).
-        // Entries without `publicKeyMultibase` keep their own type.
+        // An entry that carries `publicKeyMultibase` must declare type
+        // `Multikey`; this crate reads that into resolve.md's "conforms to
+        // DID Core" check (the spec does not name the rule), so any other
+        // type fails the parse, and an update producing it is
+        // INVALID_DID_UPDATE. Entries without `publicKeyMultibase` keep their
+        // own type. See `verification_method_from_value`.
         if let Some(method) = verification_method
             .iter()
             .find(|method| method.public_key_multibase.is_some() && method.type_ != "Multikey")
@@ -403,13 +405,19 @@ where
 /// decoded until `DocumentFields<Did>::invoking_public_key` reads the invoked
 /// entry.
 ///
-/// One conformance rule applies to the array, checked by the caller once the
-/// entries are parsed: an entry carrying `publicKeyMultibase` must declare
-/// `type` `Multikey`, the Controlled Identifiers type that pairs with
-/// `publicKeyMultibase`. Otherwise the document does not conform to DID
-/// Core, which resolve.md turns into INVALID_DID_UPDATE when an update
-/// produces it. The rule does not look at the key's curve or the
-/// controller, and it does not apply to the relationship arrays.
+/// One rule applies to the array, checked by the caller once the entries are
+/// parsed: an entry carrying `publicKeyMultibase` must declare `type`
+/// `Multikey`. This is this crate's reading of resolve.md's check that the
+/// resolved document conforms to DID Core, not a rule the spec names: DID
+/// Core itself does not constrain which `type` may carry
+/// `publicKeyMultibase` (the DID Specification Registries pair
+/// `Ed25519VerificationKey2020` with it too). The Controlled Identifiers
+/// `Multikey` type is the one this method's documents use with
+/// `publicKeyMultibase`, so any other type is read as non-conformant: the
+/// parse fails, and resolve.md turns an update producing such a document into
+/// INVALID_DID_UPDATE. Whether the spec means this is an open question to the
+/// spec authors. The rule does not look at the key's curve or the controller,
+/// and it does not apply to the relationship arrays.
 fn verification_method_from_value(
     method: &Value,
 ) -> Result<VerificationMethod, json_tools::JsonError> {
@@ -4504,10 +4512,10 @@ mod tests {
     }
 
     /// A top-level `verificationMethod` entry that carries
-    /// `publicKeyMultibase` must declare `type` `Multikey`: the Controlled
-    /// Identifiers Multikey type is the one paired with `publicKeyMultibase`,
-    /// so a secp256k1 key declared `Ed25519VerificationKey2020` does not
-    /// conform and the document is rejected at parse, naming the entry and
+    /// `publicKeyMultibase` must declare `type` `Multikey` (this crate's
+    /// reading of the DID Core conformance check; see
+    /// `verification_method_from_value`), so a secp256k1 key declared
+    /// `Ed25519VerificationKey2020` is rejected at parse, naming the entry and
     /// its declared type.
     #[test]
     fn top_level_method_with_publickeymultibase_must_declare_multikey() {
