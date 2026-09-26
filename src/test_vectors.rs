@@ -1688,7 +1688,8 @@ pub(crate) struct Delivery {
 /// has the same files as one that delivers it through CAS, and only the
 /// expected error tells them apart. For a positive set the file shape decides:
 /// an external set without a sidecar `genesisDocument` has a CAS genesis, and
-/// update steps without a sidecar `updates` array are CAS announcements.
+/// update steps without a non-empty sidecar `updates` array are CAS
+/// announcements.
 pub(crate) fn derive_delivery(
     id_type: VectorIdType,
     negative: bool,
@@ -2119,7 +2120,12 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                     matches!(outcome, Outcome::Error { .. }),
                     has_sidecar_genesis_document,
                     update_layout != UpdateLayout::None,
-                    resolve_input["resolutionOptions"]["sidecar"]["updates"].is_array(),
+                    // An empty `updates` delivers nothing, so it is not a
+                    // sidecar delivery; the capture tool's classification
+                    // reads it the same way.
+                    resolve_input["resolutionOptions"]["sidecar"]["updates"]
+                        .as_array()
+                        .is_some_and(|updates| !updates.is_empty()),
                 );
 
                 let signals_path = vector_path.join("signals.json");
@@ -4323,6 +4329,36 @@ impl Drop for TempRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// A positive set whose sidecar carries an empty `updates` array is
+/// CAS-delivered, not sidecar-delivered: an empty list delivers nothing.
+#[test]
+fn an_empty_sidecar_updates_array_is_not_a_sidecar_delivery() {
+    let root = TempRoot::new("empty-sidecar-updates");
+    let set = "mutinynet/k1/q5pew2jc";
+    let set_dir = root.0.join("sets").join(set);
+    copy_tree(
+        &Corpus::synthetic("below-min-conf").sets.join(set),
+        &set_dir,
+    );
+    let corpus = Corpus {
+        sets: root.0.join("sets"),
+        chain: root.0.join("chain"),
+    };
+    let announcement = |corpus: &Corpus| {
+        let vectors = discover_in(corpus);
+        assert_eq!(vectors.len(), 1, "the temp corpus holds its one set");
+        assert!(!vectors[0].is_negative(), "the set expects a document");
+        vectors[0].delivery.announcement
+    };
+    assert_eq!(announcement(&corpus), Some(AnnouncementDelivery::Sidecar));
+
+    let input_path = set_dir.join("resolve/input.json");
+    let mut input = read_json_at(&input_path, "the copied input");
+    input["resolutionOptions"]["sidecar"]["updates"] = serde_json::json!([]);
+    std::fs::write(&input_path, input.to_string()).unwrap();
+    assert_eq!(announcement(&corpus), Some(AnnouncementDelivery::Cas));
 }
 
 /// The raw walk finds a number-encoded `versionId` in a main output and in a
