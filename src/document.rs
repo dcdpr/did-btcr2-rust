@@ -416,8 +416,16 @@ where
 /// `publicKeyMultibase`, so any other type is read as non-conformant: the
 /// parse fails, and resolve.md turns an update producing such a document into
 /// INVALID_DID_UPDATE. Whether the spec means this is an open question to the
-/// spec authors. The rule does not look at the key's curve or the controller,
-/// and it does not apply to the relationship arrays.
+/// spec authors. The rule does not look at the key's curve or the controller.
+///
+/// It deliberately does not apply to the relationship arrays either, although
+/// an embedded method there is a verification method too (DID Core 1.1
+/// §5.3.1): a `capabilityInvocation` object typed `JsonWebKey2020` that
+/// carries a secp256k1 `publicKeyMultibase` parses, and an update can sign
+/// with it. The asymmetry is intentional. No spec rule names either shape,
+/// and the test-suite vector that motivates the rule exercises only the
+/// top-level one, so the narrowest reading that meets it stands until the
+/// spec authors answer the open question; see `relationship_from_value`.
 fn verification_method_from_value(
     method: &Value,
 ) -> Result<VerificationMethod, json_tools::JsonError> {
@@ -459,7 +467,9 @@ fn optional_multibase_from_object(
 /// only: DID Core allows any verification method type there (an Ed25519 key,
 /// a `publicKeyJwk` with no multibase form, a foreign controller), and none
 /// of that is inspected unless a proof invokes the entry — see
-/// `DocumentFields<Did>::invoking_public_key`. The `id` must be a JSON
+/// `DocumentFields<Did>::invoking_public_key`. In particular the top-level
+/// `Multikey` type rule of `verification_method_from_value` is not applied
+/// here, on purpose, pending the same open question to the spec authors. The `id` must be a JSON
 /// string and a present `publicKeyMultibase` must be one too; both errors
 /// name the array (`{field}.id`, `{field}.publicKeyMultibase`).
 fn relationship_from_value(
@@ -4540,6 +4550,33 @@ mod tests {
             InitialDocument::from_json_value(json),
             Err(Error::Btcr2Error(Btcr2Error::InvalidDidDocument(_)))
         ));
+    }
+
+    /// The top-level `Multikey` type rule does not reach an embedded method:
+    /// a `capabilityInvocation` object typed `JsonWebKey2020` carrying the
+    /// secp256k1 key parses, and a proof may invoke it. The asymmetry is
+    /// intentional (see `verification_method_from_value`); this pins it so a
+    /// change to it is a decision, not a side effect.
+    #[test]
+    fn embedded_method_with_publickeymultibase_keeps_its_declared_type() {
+        let (did, vm_id, _initial, _document) = source_documents();
+        let mut json = document_json(&did, &vm_id);
+        let mut embedded = json["verificationMethod"][0].clone();
+        let embedded_id = format!("{}#embeddedJwk", did.encode());
+        embedded["id"] = serde_json::json!(embedded_id);
+        embedded["type"] = serde_json::json!("JsonWebKey2020");
+        json["capabilityInvocation"] = serde_json::json!([embedded]);
+
+        let document =
+            Document::from_json_value(json).expect("an embedded method's type is not checked");
+        let key = document
+            .fields
+            .invoking_public_key(&embedded_id)
+            .expect("the embedded method is an invoking key");
+        assert_eq!(
+            key,
+            source_secret_key().as_inner().public_key(&Secp256k1::new())
+        );
     }
 
     /// An Ed25519 key declared with its legacy `Ed25519VerificationKey2020`

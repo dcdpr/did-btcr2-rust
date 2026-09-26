@@ -58,6 +58,13 @@ pub struct VerificationMethod {
 /// present. Only the entry that a proof invokes is read as a key, and
 /// it is decoded at that point (did-btcr2/src/operations/resolve.md,
 /// "Check update.proof").
+///
+/// Its `type` is not retained, so the rule that a top-level entry carrying
+/// `publicKeyMultibase` declares `Multikey` does not reach an embedded one:
+/// an embedded secp256k1 key typed `JsonWebKey2020` is accepted and can
+/// sign. That asymmetry is intentional — the spec names neither rule, and
+/// the top-level rule is kept to the narrowest reading until the spec
+/// authors answer the open question about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedVerificationMethod {
     /// The object's `id`; may be a relative DID URL.
