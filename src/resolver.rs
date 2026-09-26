@@ -2075,24 +2075,59 @@ mod tests {
         );
     }
 
-    /// The version cutoff only trims the end of the walk: a step at or below
-    /// the resolved version after one above it fails, naming both steps.
+    /// The version cutoff only trims the end of the walk: an inflated target
+    /// on a step before the last fails both update drivers, naming the step,
+    /// before the cutoff can skip it.
     #[test]
-    fn end_state_cutoff_must_be_a_suffix_of_the_walk() {
-        let suite = keyed_suite("end-state-suffix");
+    fn update_drivers_reject_an_inflated_target_version_before_the_last_step() {
+        let suite = keyed_suite("inflated-target-early");
         let set = keyed_k1_rotation_set();
         suite.write(&set);
         suite.edit(&set, "update/01/output.json", |output| {
             output["signedUpdate"]["targetVersionId"] = serde_json::json!(5);
         });
         let vectors = suite.vectors();
-        let message = panic_text(|| drive_end_state(&vectors, &[]));
-        assert!(
-            message.contains(&set.id())
-                && message.contains("update/02")
-                && message.contains("after update/01"),
-            "got: {message}"
-        );
+        for message in [
+            panic_text(|| drive_end_state(&vectors, &[])),
+            panic_text(|| drive_update_crypto(&vectors, &[])),
+        ] {
+            assert!(
+                message.contains(&set.id())
+                    && message.contains("update/01")
+                    && message.contains("targetVersionId must be sourceVersionId + 1"),
+                "got: {message}"
+            );
+        }
+    }
+
+    /// An inflated target on the final step would otherwise drop that step
+    /// from the end-state walk unseen: a set resolved at version 3 whose
+    /// expected document is the version-2 one, with update/02 claiming to
+    /// target version 4, fails both update drivers, naming the step.
+    #[test]
+    fn update_drivers_reject_an_inflated_target_version_on_the_last_step() {
+        let suite = keyed_suite("inflated-target-last");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        let v2 = set.steps[1].0["sourceDocument"].clone();
+        suite.edit(&set, "resolve/output.json", |output| {
+            output["didDocument"] = v2;
+        });
+        suite.edit(&set, "update/02/output.json", |output| {
+            output["signedUpdate"]["targetVersionId"] = serde_json::json!(4);
+        });
+        let vectors = suite.vectors();
+        for message in [
+            panic_text(|| drive_end_state(&vectors, &[])),
+            panic_text(|| drive_update_crypto(&vectors, &[])),
+        ] {
+            assert!(
+                message.contains(&set.id())
+                    && message.contains("update/02")
+                    && message.contains("targetVersionId must be sourceVersionId + 1"),
+                "got: {message}"
+            );
+        }
     }
 
     /// The version cutoff trusts the vendor's resolved version, so it is
@@ -3564,6 +3599,37 @@ mod tests {
         }
     }
 
+    /// Pin an update step's version numbers to its place in the walk: step
+    /// `step_index` (zero-based) is update number `step_index + 1`, so its
+    /// `sourceVersionId` is `step_index + 1` and its
+    /// `signedUpdate.targetVersionId` is one above that.
+    ///
+    /// Both update drivers run this before anything branches on a version
+    /// number. The update the drivers build takes its target version FROM
+    /// `signedUpdate.targetVersionId`, so comparing the two afterwards is a
+    /// tautology; only the source version ties the target to the chain. With
+    /// both pinned, the targets rise by one per step, so any cutoff on them
+    /// trims only the end of the walk.
+    fn check_step_versions(
+        input: &serde_json::Value,
+        output: &serde_json::Value,
+        step_index: usize,
+        ctx: &str,
+    ) {
+        let source_version = field_version_id(input, "sourceVersionId", ctx);
+        assert_eq!(
+            source_version,
+            step_index as u64 + 1,
+            "{ctx}: must be update number {} in the chain",
+            step_index + 1
+        );
+        assert_eq!(
+            field_version_id(output, "signedUpdate.targetVersionId", ctx),
+            source_version + 1,
+            "{ctx}: signedUpdate.targetVersionId must be sourceVersionId + 1"
+        );
+    }
+
     /// A JSON Document Hash in the base64url (no padding) form `sourceHash`
     /// and `targetHash` are stored in.
     fn hash_b64(hash: &Sha256Hash) -> String {
@@ -3680,6 +3746,16 @@ mod tests {
 
             for (step_index, step) in vector.update_layout.step_prefixes().iter().enumerate() {
                 let input = vector.fixture(&format!("{step}/input.json"));
+
+                // (a) Version linkage: step NN is update number NN, and it
+                // targets the next version.
+                check_step_versions(
+                    &input,
+                    &vector.fixture(&format!("{step}/output.json")),
+                    step_index,
+                    &format!("{id} {step}"),
+                );
+
                 let (output, update) = if input["sourceDocument"]["deactivated"]
                     == serde_json::Value::Bool(true)
                 {
@@ -3688,14 +3764,6 @@ mod tests {
                     let StepFixtures { output, update, .. } = signed_update_for_step(vector, step);
                     (output, Some(update))
                 };
-
-                // (a) Step-index linkage: step NN is update number NN.
-                assert_eq!(
-                    field_version_id(&input, "sourceVersionId", id),
-                    step_index as u64 + 1,
-                    "{id}: {step} must be update number {} in the chain",
-                    step_index + 1
-                );
 
                 let stated_source_hash = field_str(&output, "signedUpdate.sourceHash", id);
                 let stated_target_hash = field_str(&output, "signedUpdate.targetHash", id);
@@ -3735,7 +3803,9 @@ mod tests {
                     continue;
                 };
 
-                // (d) Content-bound triple must equal the vector's signedUpdate.
+                // (d) Content-bound hashes must equal the vector's
+                // signedUpdate. The target version is not compared here: the
+                // update was built from it, and (a) ties it to the chain.
                 assert_eq!(
                     to_b64(&update.source_hash),
                     stated_source_hash,
@@ -3745,11 +3815,6 @@ mod tests {
                     to_b64(&update.target_hash),
                     stated_target_hash,
                     "{id}: {step} targetHash"
-                );
-                assert_eq!(
-                    u64::from(update.target_version_id),
-                    field_version_id(&output, "signedUpdate.targetVersionId", id),
-                    "{id}: {step} targetVersionId"
                 );
 
                 // (e) Proof must VERIFY (not byte-compare proofValue): apply the
@@ -3810,10 +3875,12 @@ mod tests {
     /// `versionId` is one no resolver applies — an update over a deactivated
     /// DID, one announced on a beacon the document has since removed, or one
     /// whose signal lies past the resolution height — so it is not applied
-    /// here either. The cutoff is read from the files, and the steps it skips
-    /// must be a suffix of the walk, so it can only trim the end: every step at
-    /// or below the resolved version is applied, and a mismatch there still
-    /// fails. A skipped step's own content is the update-crypto driver's to
+    /// here either. The cutoff is read from the files, and every step's
+    /// versions are first pinned to its place in the walk
+    /// ([`check_step_versions`]), so the targets rise by one per step and the
+    /// cutoff can only trim the end: every step at or below the resolved
+    /// version is applied, and a mismatch there still fails. A skipped step's
+    /// own content is the update-crypto driver's to
     /// check. The resolved version is the vendor's claim, and only the resolve
     /// driver ties it to what a resolver actually does, so the cutoff is
     /// allowed only on a set whose Resolve row is driven: a cutoff anywhere
@@ -3867,11 +3934,24 @@ mod tests {
             // The walk starts from step 01's stated source document and carries
             // each step's result forward.
             let mut carried: Option<InitialDocument> = None;
-            let mut past_resolved_version: Option<&str> = None;
 
             for (step_index, step) in steps.iter().enumerate() {
                 let ctx = format!("{id} {step}");
                 let step_output = vector.fixture(&format!("{step}/output.json"));
+
+                // Version linkage, mirrored from the update-crypto driver and
+                // checked before the cutoff branches on the target: step NN is
+                // update number NN and targets the next version. Without it an
+                // inflated target would drop its step from the walk unseen,
+                // and a mis-ordered walk would surface only as an opaque
+                // target-hash mismatch.
+                check_step_versions(
+                    &vector.fixture(&format!("{step}/input.json")),
+                    &step_output,
+                    step_index,
+                    &ctx,
+                );
+
                 let target_version_id =
                     field_nonzero_version_id(&step_output, "signedUpdate.targetVersionId", &ctx);
                 if target_version_id.get() > resolved_version_id {
@@ -3884,29 +3964,10 @@ mod tests {
                          version {resolved_version_id}, but the set's Resolve row is not \
                          driven, so nothing confirms the resolver stops there"
                     );
-                    past_resolved_version.get_or_insert(step);
                     continue;
-                }
-                if let Some(skipped) = past_resolved_version {
-                    panic!(
-                        "{id}: {step} targets version {target_version_id}, at or below the \
-                         resolved version {resolved_version_id}, after {skipped} targeted a \
-                         version above it"
-                    );
                 }
 
                 let StepFixtures { input, update, .. } = signed_update_for_step(vector, step);
-
-                // Step-index linkage, mirrored from the update-crypto driver:
-                // step NN is update number NN. Without it a mis-ordered walk
-                // surfaces here only as an opaque target-hash mismatch, naming
-                // the symptom rather than the cause.
-                assert_eq!(
-                    field_version_id(&input, "sourceVersionId", id),
-                    step_index as u64 + 1,
-                    "{id}: {step} must be update number {} in the chain",
-                    step_index + 1
-                );
 
                 let mut doc = match carried.take() {
                     Some(doc) => doc,
