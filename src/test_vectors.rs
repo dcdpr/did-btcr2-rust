@@ -4241,12 +4241,48 @@ fn live_vectors_classify_without_overrides() {
     assert!(!qfgeftze.should_drive_with(AssertionKind::Resolve, &[]));
 }
 
+/// Every main and `resolve/NN` output under `root` (a sets root in the
+/// vendor layout) whose `didDocumentMetadata.versionId` is a JSON number, as
+/// `{network}/{kind}/{short-id}/{rel}`.
+///
+/// Walks the files directly rather than through [`discover_in`], which
+/// refuses such a file through [`metadata_version_id`] before it could be
+/// counted.
+fn number_encoded_version_ids_in(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for network in network_dirs_with_vectors_in(root) {
+        for kind in sorted_child_dirs(&root.join(&network)) {
+            for short_id in sorted_child_dirs(&root.join(&network).join(&kind)) {
+                let id = format!("{network}/{kind}/{short_id}");
+                let set_dir = root.join(&network).join(&kind).join(&short_id);
+                let rels = std::iter::once("resolve/output.json".to_string()).chain(
+                    sorted_child_dirs(&set_dir.join("resolve"))
+                        .into_iter()
+                        .map(|case| format!("resolve/{case}/output.json")),
+                );
+                for rel in rels {
+                    let path = set_dir.join(&rel);
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let output = read_json_at(&path, &format!("{id}/{rel}"));
+                    if output["didDocumentMetadata"]["versionId"].is_number() {
+                        found.push(format!("{id}/{rel}"));
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 /// No vector encodes `didDocumentMetadata.versionId` as a number, and
 /// [`NUMBER_ENCODED_VERSION_ID`] is empty.
 ///
-/// Reads the raw main and `resolve/NN` output files rather than the parsed
-/// outcome, so the guard stands on its own and does not lean on the strict
-/// reader it backs up.
+/// Reads the raw main and `resolve/NN` output files
+/// ([`number_encoded_version_ids_in`]) rather than the discovered vectors, so
+/// the guard stands on its own and does not lean on the strict reader it
+/// backs up.
 #[test]
 fn live_vectors_record_their_version_id_encoding() {
     assert!(
@@ -4260,26 +4296,58 @@ fn live_vectors_record_their_version_id_encoding() {
         );
         return;
     }
-    let vectors = discover_in(&Corpus::test_suite());
-    assert!(!vectors.is_empty());
-
-    let mut number_encoded = Vec::new();
-    for v in &vectors {
-        let outputs = std::iter::once("resolve/output.json".to_string()).chain(
-            v.resolve_cases
-                .iter()
-                .map(|c| format!("resolve/{}/output.json", c.name)),
-        );
-        for rel in outputs {
-            if v.fixture(&rel)["didDocumentMetadata"]["versionId"].is_number() {
-                number_encoded.push(format!("{}/{rel}", v.id));
-            }
-        }
-    }
+    let root = Corpus::test_suite().sets;
+    assert!(!network_dirs_with_vectors_in(&root).is_empty());
+    let number_encoded = number_encoded_version_ids_in(&root);
     assert!(
         number_encoded.is_empty(),
         "these outputs encode didDocumentMetadata.versionId as a JSON number, but the \
          specification requires an ASCII string: {number_encoded:?}"
+    );
+}
+
+/// A directory under the system temp directory, removed when dropped (also
+/// when the test panics).
+struct TempRoot(PathBuf);
+
+impl TempRoot {
+    /// A fresh root; `tag` names the test in the directory name.
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("did-btcr2-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Self(root)
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The raw walk finds a number-encoded `versionId` in a main output and in a
+/// `resolve/NN` case, the shapes discovery would refuse before counting them.
+#[test]
+fn number_encoded_version_ids_are_found_without_discovery() {
+    let root = TempRoot::new("number-version-id-walk");
+    let set = "mutinynet/x1/qh66uy2s";
+    let set_dir = root.0.join(set);
+    copy_tree(&Corpus::synthetic("shapes").sets.join(set), &set_dir);
+    assert_eq!(number_encoded_version_ids_in(&root.0), Vec::<String>::new());
+
+    let main = set_dir.join("resolve/output.json");
+    let mut output = read_json_at(&main, "the copied output");
+    output["didDocumentMetadata"]["versionId"] = serde_json::json!(2);
+    std::fs::write(&main, output.to_string()).unwrap();
+    std::fs::create_dir_all(set_dir.join("resolve/01")).unwrap();
+    std::fs::write(set_dir.join("resolve/01/output.json"), output.to_string()).unwrap();
+
+    assert_eq!(
+        number_encoded_version_ids_in(&root.0),
+        vec![
+            format!("{set}/resolve/output.json"),
+            format!("{set}/resolve/01/output.json"),
+        ]
     );
 }
 
