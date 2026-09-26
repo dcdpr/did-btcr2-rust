@@ -13,8 +13,12 @@ The production ledger walks only the `test-suite/` submodule, so nothing here
 changes its counts. These files belong to this repository: an absent one is a
 bug, and the tests that read them never skip.
 
-Every set was reshaped from a set of `test-suite/` at `19f8d424` (the
-submodule's pin when these corpora were written); none was minted. Reshaping removed:
+Every set was reshaped, none was minted. The `shapes*` and `withheld-genesis`
+sets come from sets of `test-suite/` at `19f8d424`, the submodule's pin when
+these corpora were written. The checked-out suite no longer ships those sets,
+so their ids name nothing under `test-suite/` today. The `options`,
+`below-min-conf`, `late-code` and `withheld` sets come from the minted
+captures, as their sections say. Reshaping removed:
 
 - `scenario.json`, `funding.json` and `pending.json` (the regenerated layout
   ships none of them);

@@ -4037,10 +4037,10 @@ mod tests {
         );
     }
 
-    /// A DID from the vendor regtest vectors, so the emission tests carry a real
+    /// The DID of `regtest/k1/qgph7nre`, so the emission tests carry a real
     /// identifier rather than one this test invented.
     const MINTED_DID: &str =
-        "did:btcr2:k1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s";
+        "did:btcr2:k1qgph7nrekhzerkmsktp8l7rdtpxh2mw45xp6e90sjvxszpz6au0grssegjx6z";
 
     /// A signed update the core crate parses, targeting `version`.
     ///

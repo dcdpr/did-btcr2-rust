@@ -1,12 +1,11 @@
 //! Which vendor vectors this tool captures chain data for, and what each one
 //! expects.
 //!
-//! Four things live here: the target set (with the derivation that produced it,
-//! plus a test that re-derives it from the tree), the per-vector loader that
-//! reads a vector's DID, sidecar and expected resolve output from its own files,
-//! the explicit-root loader for sets that carry a `signals.json` record
-//! ([`load_in`]), and the endpoint rule that maps a chain name onto an Esplora
-//! base URL.
+//! Three things live here: the target set (with the derivation that produced
+//! it, plus a test that re-derives it from the tree), the loader that reads a
+//! set's DID, sidecar, expected resolve output and `signals.json` record from
+//! its own files ([`load_in`], reached through the allow-list by [`load`]), and
+//! the endpoint rule that maps a chain name onto an Esplora base URL.
 
 use did_btcr2::identifier::{Did, Network};
 use did_btcr2_client::resolve_base_url;
@@ -16,13 +15,21 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
-/// The seven vendor vectors this tool drives on-chain.
+/// The sets this tool drives on-chain: thirty-five per network.
 ///
-/// Derived, not chosen: eleven vectors resolve to version 2 or later and ship no
-/// `pending.json`, and four of them declare a CAS or Sparse Merkle Tree beacon in
-/// their genesis document, which the resolver rejects as unsupported before it
-/// reads a single transaction. Capturing their chain data would put bytes in the
-/// tree that no test reads.
+/// Derived, not chosen. A set is drivable when it ships `signals.json` (it
+/// announces at least one Beacon Signal), no entry of that file aggregates its
+/// signal in a cohort, its genesis document declares no CAS or SMT beacon, and
+/// its update is not delivered through CAS: a positive x1 set whose sidecar
+/// carries no genesis document, or a positive set with an `update/` directory
+/// and no sidecar `updates`, has its data served from CAS, which the resolver
+/// does not query. A set that expects an error is never CAS-delivered — its
+/// missing data is the point of the set.
+///
+/// Sets that expect an error are captured too. Their capture gate proves that
+/// the recorded chain makes the resolve fail with the specification error the
+/// set names, so replay exercises that failure against real transactions
+/// rather than an absent chain.
 ///
 /// Written out as an allow-list rather than re-derived at runtime because the
 /// core crate's vector-classification machinery is test-only and unreachable from
@@ -31,31 +38,221 @@ use std::str::FromStr as _;
 /// instead lives in `drivable_set_matches_the_tree` below, which recomputes both
 /// lists from the vector files and fails if they disagree — the drift check
 /// without the duplicate control flow.
+///
+/// Ordered by network (regtest, mutinynet, signet, testnet4), then by id.
 pub const DRIVABLE_VECTORS: &[&str] = &[
-    "mutinynet/k1/q5p6w9su",
-    "mutinynet/k1/q5pgeu9z",
-    "mutinynet/x1/q5ugrf3w",
-    "regtest/k1/qgppexmy",
-    "regtest/k1/qgpy0hmm",
-    "regtest/x1/q26jeds9",
-    "regtest/x1/qfl7se8f",
+    "regtest/k1/qgp040ju",
+    "regtest/k1/qgp0enf0",
+    "regtest/k1/qgp2ht79",
+    "regtest/k1/qgp33y4v",
+    "regtest/k1/qgp3e09g",
+    "regtest/k1/qgp5fh0e",
+    "regtest/k1/qgp5wcmx",
+    "regtest/k1/qgp6fp4d",
+    "regtest/k1/qgpejq0v",
+    "regtest/k1/qgpepnx0",
+    "regtest/k1/qgpf5yjw",
+    "regtest/k1/qgpgm6kn",
+    "regtest/k1/qgph7nre",
+    "regtest/k1/qgpl0zen",
+    "regtest/k1/qgpmreat",
+    "regtest/k1/qgpnkuln",
+    "regtest/k1/qgpp9e44",
+    "regtest/k1/qgpq3zd0",
+    "regtest/k1/qgpq4wrg",
+    "regtest/k1/qgpqx326",
+    "regtest/k1/qgpseq0v",
+    "regtest/k1/qgpw4847",
+    "regtest/k1/qgpw65qy",
+    "regtest/k1/qgpx06u2",
+    "regtest/k1/qgpxl5uu",
+    "regtest/k1/qgpz0cp4",
+    "regtest/x1/q2z78yxz",
+    "regtest/x1/qfaqdrxu",
+    "regtest/x1/qfuuz6h4",
+    "regtest/x1/qg4zny9h",
+    "regtest/x1/qg935lwg",
+    "regtest/x1/qt04c7dn",
+    "regtest/x1/qtk24dpv",
+    "regtest/x1/qtrhj3w0",
+    "regtest/x1/qty0lp74",
+    "mutinynet/k1/q5p08ynf",
+    "mutinynet/k1/q5p0w6a9",
+    "mutinynet/k1/q5p4s0y9",
+    "mutinynet/k1/q5p8svrz",
+    "mutinynet/k1/q5p97uqz",
+    "mutinynet/k1/q5p9uafd",
+    "mutinynet/k1/q5p9zf8s",
+    "mutinynet/k1/q5paaduz",
+    "mutinynet/k1/q5pduhpu",
+    "mutinynet/k1/q5pe44p3",
+    "mutinynet/k1/q5petkk0",
+    "mutinynet/k1/q5pfvsce",
+    "mutinynet/k1/q5pggxe7",
+    "mutinynet/k1/q5pkk6xt",
+    "mutinynet/k1/q5pmrprx",
+    "mutinynet/k1/q5ppjlgm",
+    "mutinynet/k1/q5pqhkks",
+    "mutinynet/k1/q5pqp5tn",
+    "mutinynet/k1/q5pqss3y",
+    "mutinynet/k1/q5pt9ln3",
+    "mutinynet/k1/q5ptfnef",
+    "mutinynet/k1/q5pueuxw",
+    "mutinynet/k1/q5puvng8",
+    "mutinynet/k1/q5py5sz0",
+    "mutinynet/k1/q5pyz053",
+    "mutinynet/k1/q5pzmjfx",
+    "mutinynet/x1/q4d3qyze",
+    "mutinynet/x1/q4nw2tdl",
+    "mutinynet/x1/q4typvtp",
+    "mutinynet/x1/q5pzvvxz",
+    "mutinynet/x1/q5rp7phe",
+    "mutinynet/x1/qhfjzym7",
+    "mutinynet/x1/qhwufjvy",
+    "mutinynet/x1/qk58te4e",
+    "mutinynet/x1/qkj4a5xu",
+    "signet/k1/qyp0nl7q",
+    "signet/k1/qyp2ju95",
+    "signet/k1/qyp3yvm3",
+    "signet/k1/qyp527dr",
+    "signet/k1/qyp5h7kz",
+    "signet/k1/qyp7s8n5",
+    "signet/k1/qypc0v9c",
+    "signet/k1/qypcaw4m",
+    "signet/k1/qypdef8c",
+    "signet/k1/qypdscmf",
+    "signet/k1/qype9x7f",
+    "signet/k1/qyph2fjv",
+    "signet/k1/qyphftn0",
+    "signet/k1/qyphkqcy",
+    "signet/k1/qyphxahc",
+    "signet/k1/qypjcajt",
+    "signet/k1/qypkdal6",
+    "signet/k1/qyplj6cu",
+    "signet/k1/qypljzfn",
+    "signet/k1/qypp2qva",
+    "signet/k1/qyprgq5l",
+    "signet/k1/qypv877a",
+    "signet/k1/qypws7tm",
+    "signet/k1/qypxn45q",
+    "signet/k1/qypxr0l9",
+    "signet/k1/qypyl83s",
+    "signet/x1/q84gyrkg",
+    "signet/x1/q8y5x5f3",
+    "signet/x1/q98uadmd",
+    "signet/x1/q99qwj9u",
+    "signet/x1/q9j6lwt5",
+    "signet/x1/q9rxnv97",
+    "signet/x1/qx6ld2rx",
+    "signet/x1/qxkut6n0",
+    "signet/x1/qyzmtprn",
+    "testnet4/k1/qsp2x348",
+    "testnet4/k1/qsp3k0pq",
+    "testnet4/k1/qsp472vc",
+    "testnet4/k1/qsp622hd",
+    "testnet4/k1/qsp854zk",
+    "testnet4/k1/qsp8g0tw",
+    "testnet4/k1/qsp9820e",
+    "testnet4/k1/qspaj3wh",
+    "testnet4/k1/qspe8u25",
+    "testnet4/k1/qspf02mv",
+    "testnet4/k1/qspk7udk",
+    "testnet4/k1/qspm6rmq",
+    "testnet4/k1/qspmajv6",
+    "testnet4/k1/qspmsf53",
+    "testnet4/k1/qspn3pvr",
+    "testnet4/k1/qspq6yml",
+    "testnet4/k1/qspqm6j2",
+    "testnet4/k1/qspqn994",
+    "testnet4/k1/qspqqxgv",
+    "testnet4/k1/qsps5avm",
+    "testnet4/k1/qsptz2u9",
+    "testnet4/k1/qspurjp5",
+    "testnet4/k1/qspxna3u",
+    "testnet4/k1/qspxpjr0",
+    "testnet4/k1/qspz5wep",
+    "testnet4/k1/qspzu0kw",
+    "testnet4/x1/q359fq2n",
+    "testnet4/x1/qjmhfkyx",
+    "testnet4/x1/qjszxrzd",
+    "testnet4/x1/qjw0t0e4",
+    "testnet4/x1/qnenf7q8",
+    "testnet4/x1/qnwp673e",
+    "testnet4/x1/qsryv830",
+    "testnet4/x1/qsukh94m",
+    "testnet4/x1/qsvpyve8",
 ];
 
-/// The four vectors foreclosed by a non-Singleton beacon, with the blocker named
-/// so asking for one of them says why instead of failing on a missing file.
+/// The fourteen cohort, CAS and SMT sets per network: they ship `signals.json`
+/// but aggregate a signal in a cohort or declare a CAS or SMT genesis beacon,
+/// which the resolver cannot query yet. Named so asking for one says why
+/// instead of reporting it as unknown. Same order as [`DRIVABLE_VECTORS`].
 pub const UNSUPPORTED_BEACON_VECTORS: &[&str] = &[
-    "mutinynet/x1/q425c5wf",
-    "mutinynet/x1/q550pp4e",
-    "mutinynet/x1/q5cfewep",
-    "mutinynet/x1/qkrrp544",
+    "regtest/x1/q2tyuy6t",
+    "regtest/x1/qf0zm452",
+    "regtest/x1/qf9ruh87",
+    "regtest/x1/qfgm2swr",
+    "regtest/x1/qfmlfxut",
+    "regtest/x1/qfqxmcf0",
+    "regtest/x1/qfwwah7z",
+    "regtest/x1/qfzppzx5",
+    "regtest/x1/qg5kgjm0",
+    "regtest/x1/qgncuznq",
+    "regtest/x1/qgxluz9h",
+    "regtest/x1/qtcszm9j",
+    "regtest/x1/qttq27ml",
+    "regtest/x1/qtxu0aj9",
+    "mutinynet/x1/q4as9ul0",
+    "mutinynet/x1/q4u560pr",
+    "mutinynet/x1/q4zfcvh0",
+    "mutinynet/x1/q52dx36q",
+    "mutinynet/x1/q53st3h5",
+    "mutinynet/x1/q5cegwvp",
+    "mutinynet/x1/q5kssq8u",
+    "mutinynet/x1/q5x8n94l",
+    "mutinynet/x1/qh2etls9",
+    "mutinynet/x1/qhem7zpy",
+    "mutinynet/x1/qhwkcy3u",
+    "mutinynet/x1/qhyt2nkm",
+    "mutinynet/x1/qk66z56a",
+    "mutinynet/x1/qklrxhg4",
+    "signet/x1/q8sxjrau",
+    "signet/x1/q8wpt5qu",
+    "signet/x1/q93l6dxt",
+    "signet/x1/q9nhcz2z",
+    "signet/x1/q9pspvd9",
+    "signet/x1/q9wkxze8",
+    "signet/x1/qxqfmajn",
+    "signet/x1/qxrwycar",
+    "signet/x1/qxs3zu4m",
+    "signet/x1/qxsfdgg9",
+    "signet/x1/qxunyl82",
+    "signet/x1/qxvg5h46",
+    "signet/x1/qy0glluz",
+    "signet/x1/qyuvshka",
+    "testnet4/x1/q3kwecw9",
+    "testnet4/x1/q3wj7wpq",
+    "testnet4/x1/q3zsv63l",
+    "testnet4/x1/qj0ku5u9",
+    "testnet4/x1/qj7t8rsc",
+    "testnet4/x1/qjg3rvgl",
+    "testnet4/x1/qn7jezzt",
+    "testnet4/x1/qny5xjfv",
+    "testnet4/x1/qs3ep4v7",
+    "testnet4/x1/qs7clm0n",
+    "testnet4/x1/qsjx2r7d",
+    "testnet4/x1/qsk6l540",
+    "testnet4/x1/qsp4ahzq",
+    "testnet4/x1/qsvhmpzp",
 ];
 
 /// Genesis beacon service types the resolver cannot query, so a set declaring
 /// one of them is out of scope for capture.
 ///
-/// Read at runtime only by [`load_in`], which has no allow-list to consult; the
-/// allow-list path uses the same list in `drivable_set_matches_the_tree` to
-/// re-derive its constants from the tree.
+/// Read at runtime by [`load_in`], so a set reached through an explicit suite
+/// root is refused the same way the allow-list refuses one by name; the test
+/// `drivable_set_matches_the_tree` uses the same list to re-derive the
+/// allow-lists from the tree.
 const UNSUPPORTED_BEACON_TYPES: &[&str] = &["CASBeacon", "SMTBeacon"];
 
 /// Target-layer failures. Every message names the vector it is about, including
@@ -91,9 +288,9 @@ pub enum TargetError {
         vector: String,
     },
 
-    /// A set loaded from an explicit suite root ships no `signals.json`.
+    /// The set ships no `signals.json`.
     #[error(
-        "{vector}: ships no signals.json, and an explicit suite root captures only sets that carry signals.json — capture a set without one through the default test-suite tree"
+        "{vector}: ships no signals.json, so it records no Beacon Signal for the capture to check the chain against — this tool captures only sets that carry one"
     )]
     NoSignals {
         /// The set that ships no `signals.json`.
@@ -338,7 +535,7 @@ fn reject_credential_in_endpoint(url: &str) -> Result<(), TargetError> {
 /// what the result must be.
 #[derive(Debug, Clone)]
 pub struct VectorTarget {
-    /// The vector id, e.g. `regtest/k1/qgppexmy`.
+    /// The vector id, e.g. `regtest/k1/qgph7nre`.
     pub id: String,
     /// The leading path segment, e.g. `regtest`.
     pub network_dir: String,
@@ -361,7 +558,8 @@ pub enum ExpectedOutcome {
     Resolved {
         /// `didDocument`.
         document: Value,
-        /// `didDocumentMetadata.versionId`, read tolerantly (see [`version_id`]).
+        /// `didDocumentMetadata.versionId`, a decimal string on the wire (see
+        /// [`version_id`]).
         version_id: u64,
         /// `didDocumentMetadata.deactivated`.
         deactivated: bool,
@@ -447,17 +645,18 @@ struct RawCohort {
     id: String,
 }
 
-/// Load one vector's capture target from its own files.
+/// Load one allow-listed set's capture target from the test-suite tree.
 ///
 /// The id is matched against the allow-lists BEFORE any path is built, so an
 /// operator-supplied id is never joined onto the fixture root as a free-form
-/// path.
+/// path. The set is then read by [`load_in`], the one loader every capture goes
+/// through.
 pub fn load(id: &str) -> Result<VectorTarget, TargetError> {
     load_from(&test_suite_root(), id)
 }
 
-/// [`load`]'s body against an explicit root, so the missing-fixture path is
-/// testable without mutating the repository's vector tree.
+/// [`load`] against an explicit root, so the allow-list prologue and the
+/// missing-fixture paths are testable without mutating the repository's tree.
 fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
     if UNSUPPORTED_BEACON_VECTORS.contains(&id) {
         return Err(TargetError::UnsupportedBeacon(id.to_string()));
@@ -468,81 +667,17 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
             drivable: DRIVABLE_VECTORS.join(", "),
         });
     }
-
-    let network_dir = id
-        .split('/')
-        .next()
-        .expect("`str::split` always yields at least one segment")
-        .to_string();
-    let network = network_from_dir(&network_dir)?;
-
-    let input_path = root.join(id).join("resolve/input.json");
-    let output_path = root.join(id).join("resolve/output.json");
-    let input = read_json(id, &input_path)?;
-    let output = read_json(id, &output_path)?;
-
-    let did_str = input["did"].as_str().ok_or_else(|| {
-        malformed(
-            id,
-            &input_path,
-            "no `did` string at the top level; a resolve vector must name the DID it resolves",
-        )
-    })?;
-    let did = Did::from_str(did_str).map_err(|source| TargetError::Identifier {
-        vector: id.to_string(),
-        did: did_str.to_string(),
-        source,
-    })?;
-
-    refuse_target_options(id, &input_path, &input)?;
-
-    // Every drivable vector ships a sidecar object (several non-drivable ones do
-    // not — they omit `resolutionOptions.sidecar` entirely). Treating an absent
-    // sidecar as an empty one would let a capture validate against zero updates
-    // and pass vacuously, which is exactly the failure the capture gate exists to
-    // prevent, so an absent sidecar is an error here.
-    let sidecar = input["resolutionOptions"]["sidecar"].clone();
-    if !sidecar.is_object() {
-        return Err(malformed(
-            id,
-            &input_path,
-            "no `resolutionOptions.sidecar` object; every vector this tool captures \
-             supplies its updates out of band",
-        ));
-    }
-
-    let expected = resolved_outcome(id, &output_path, &output)?;
-
-    // An allow-listed vector that later ships a signals.json is captured
-    // through the signals gate like any other set that carries one.
-    let signals_path = root.join(id).join("signals.json");
-    let signals = if signals_path.exists() {
-        Some(parse_signals(
-            id,
-            &signals_path,
-            &read_json(id, &signals_path)?,
-        )?)
-    } else {
-        None
-    };
-
-    Ok(VectorTarget {
-        id: id.to_string(),
-        network_dir,
-        network,
-        did,
-        sidecar,
-        expected,
-        signals,
-    })
+    load_in(root, id)
 }
 
 /// Load one set from an explicit suite root.
 ///
-/// The path for regenerated-layout sets, which the allow-list does not name:
-/// the id is shape-checked instead ([`check_vector_id`]) before any path is
-/// built, and only a set that ships `signals.json` is accepted, because that
-/// record is what the capture gate compares the chain with.
+/// The single loader: [`load`] reaches it after its allow-list check, and an
+/// explicit `--test-suite-root` reaches it directly, for sets the allow-list
+/// does not name. Either way the id is shape-checked ([`check_vector_id`])
+/// before any path is built, and only a set that ships `signals.json` is
+/// accepted, because that record is what the capture gate compares the chain
+/// with.
 ///
 /// Refusals, in order: a malformed id; no `signals.json`; a `signals.json` that
 /// breaks its shape rules; a set that is out of scope because it aggregates its
@@ -551,11 +686,11 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
 /// `update/` directory, so a cohort-only set — no `update/`, no `update` member
 /// on any entry — is reported as unsupported rather than malformed.
 ///
-/// Unlike [`load`], a set may carry no sidecar (read as `{}`), a sidecar
-/// without `updates`, and an expected error rather than a resolved document.
-/// The core crate's replay reads an absent sidecar on a set with
-/// `signals.json` as `{}` too. Like [`load`], a main input carrying
-/// `versionId`, `versionTime` or `minConf` is refused.
+/// A set may carry no sidecar (read as `{}`, as the core crate's replay reads
+/// it), a sidecar without `updates`, and an expected error rather than a
+/// resolved document: the sets that expect `MISSING_UPDATE_DATA` withhold their
+/// update on purpose. A main input carrying `versionId`, `versionTime` or
+/// `minConf` is refused.
 pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
     check_vector_id(id)?;
     let network_dir = id
@@ -913,32 +1048,35 @@ fn refuse_target_options(vector: &str, path: &Path, input: &Value) -> Result<(),
     }
 }
 
-/// Read a `versionId` tolerantly.
-///
-/// The spec's wire shape is a string, and the regtest vectors encode it that way;
-/// the mutinynet vectors encode it as a JSON number. This tool reads both and
-/// normalizes NEITHER file: a fixture is evidence of what a chain was told, and
-/// rewriting it here would hide an encoding disagreement that belongs upstream.
+/// Read `didDocumentMetadata.versionId`, which DID Resolution defines as a
+/// string. This tool reads it as an ASCII-decimal string and nothing else: a
+/// JSON number is a malformed fixture, not an encoding to tolerate, because a
+/// fixture that disagrees with the wire shape is a defect to fix upstream.
 fn version_id(vector: &str, path: &Path, value: &Value) -> Result<u64, TargetError> {
     match value {
-        Value::String(s) => s.parse::<u64>().map_err(|e| {
-            malformed(
-                vector,
-                path,
-                &format!("`didDocumentMetadata.versionId` is `{s}`, not a number ({e})"),
-            )
-        }),
-        Value::Number(n) => n.as_u64().ok_or_else(|| {
-            malformed(
-                vector,
-                path,
-                &format!("`didDocumentMetadata.versionId` is `{n}`, not a non-negative integer"),
-            )
-        }),
+        Value::String(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+            s.parse::<u64>().map_err(|e| {
+                malformed(
+                    vector,
+                    path,
+                    &format!("`didDocumentMetadata.versionId` is `{s}`, out of range ({e})"),
+                )
+            })
+        }
+        Value::String(s) => Err(malformed(
+            vector,
+            path,
+            &format!("`didDocumentMetadata.versionId` is `{s}`, not a decimal string"),
+        )),
+        Value::Number(n) => Err(malformed(
+            vector,
+            path,
+            &format!("versionId must be a string, found a number (`{n}`)"),
+        )),
         other => Err(malformed(
             vector,
             path,
-            &format!("`didDocumentMetadata.versionId` is `{other}`, expected a string or a number"),
+            &format!("`didDocumentMetadata.versionId` is `{other}`, expected a string"),
         )),
     }
 }
@@ -970,7 +1108,6 @@ fn confirmations(vector: &str, path: &Path, value: &Value) -> Result<Option<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use did_btcr2::document::{InitialDocument, ResolutionOptions};
     use std::collections::BTreeSet;
 
     /// The resolved expectation's fields, for the assertions written before the
@@ -1023,90 +1160,108 @@ mod tests {
         names
     }
 
-    /// The beacon service types declared in a vector's GENESIS document — the
-    /// document as it stood at version 1, which is what the resolver reads before
-    /// it asks for any transaction.
-    ///
-    /// The two id types keep their genesis document in different places, so this
-    /// is two branches on purpose:
-    ///
-    /// - `k1`: nothing on disk holds it. The genesis document is generated
-    ///   deterministically from the key in the identifier, so it is generated
-    ///   here the same way, through the core crate. A generated document that
-    ///   ever grew a non-Singleton beacon would show up here rather than being
-    ///   assumed away.
-    /// - `x1`: the genesis document is supplied out of band, so it is read from
-    ///   the vector's sidecar (or from `other.json`, where some vectors keep it).
-    fn genesis_beacon_types(root: &Path, id: &str, kind: &str) -> Vec<String> {
-        let types = |doc: &Value| -> Vec<String> {
-            let found: Vec<String> = doc["service"]
-                .as_array()
-                .map(|services| {
-                    services
-                        .iter()
-                        .filter_map(|s| s["type"].as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // A genesis document with no readable beacon service would classify
-            // every vector as drivable for want of a disqualifying type — the
-            // check would pass without ever having looked at anything. Every
-            // btcr2 genesis document declares at least one beacon, so an empty
-            // list here means the document was not found where it was looked for.
-            assert!(
-                !found.is_empty(),
-                "{id}: no beacon service types read from the genesis document — \
-                 the classification would then be vacuous"
-            );
-            found
-        };
-
-        let input: Value = serde_json::from_str(
-            &std::fs::read_to_string(root.join(id).join("resolve/input.json"))
-                .unwrap_or_else(|e| panic!("{id}: resolve/input.json must be readable ({e})")),
-        )
-        .unwrap_or_else(|e| panic!("{id}: resolve/input.json must be valid JSON ({e})"));
-
-        if kind == "k1" {
-            let did_str = input["did"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{id}: resolve/input.json must name a DID"));
-            let did = Did::from_str(did_str)
-                .unwrap_or_else(|e| panic!("{id}: `{did_str}` must parse as a DID ({e})"));
-            let genesis = InitialDocument::from_did(&did, &ResolutionOptions::default())
-                .unwrap_or_else(|e| panic!("{id}: genesis document must generate ({e})"));
-            return types(genesis.as_ref());
-        }
-
-        let sidecar_genesis = &input["resolutionOptions"]["sidecar"]["genesisDocument"];
-        if sidecar_genesis.is_object() {
-            return types(sidecar_genesis);
-        }
-        let other: Value = serde_json::from_str(
-            &std::fs::read_to_string(root.join(id).join("other.json"))
-                .unwrap_or_else(|e| panic!("{id}: other.json must be readable ({e})")),
-        )
-        .unwrap_or_else(|e| panic!("{id}: other.json must be valid JSON ({e})"));
-        let other_genesis = &other["genesisDocument"];
-        assert!(
-            other_genesis.is_object(),
-            "{id}: no genesis document in resolve/input.json's sidecar or in other.json — \
-             its beacon types cannot be classified, and guessing would silently widen or \
-             narrow the capture set"
-        );
-        types(other_genesis)
+    /// Where the derived capture rule puts one set.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SetClass {
+        /// In [`DRIVABLE_VECTORS`].
+        Drivable,
+        /// In [`UNSUPPORTED_BEACON_VECTORS`].
+        Unsupported,
+        /// In neither list: no Beacon Signal to capture, or delivered by CAS.
+        Neither,
     }
 
-    /// Recompute both target lists from the vector tree and require them to match
-    /// the constants above.
+    /// A set file as JSON, `None` when absent. A present file that cannot be
+    /// read or parsed panics: skipping it would move the set between classes.
+    fn optional_json(path: &Path) -> Option<Value> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => panic!("{}: could not be read ({e})", path.display()),
+        };
+        Some(
+            serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{}: is not JSON ({e})", path.display())),
+        )
+    }
+
+    /// True when a genesis document declares a CAS or SMT beacon service.
+    fn declares_unsupported_beacon(genesis: &Value) -> bool {
+        genesis["service"].as_array().is_some_and(|services| {
+            services.iter().any(|service| {
+                service["type"]
+                    .as_str()
+                    .is_some_and(|t| UNSUPPORTED_BEACON_TYPES.contains(&t))
+            })
+        })
+    }
+
+    /// The capture rule, stated once, over a set directory
+    /// `<root>/<network>/<k1|x1>/<id>`:
     ///
-    /// This is the whole classification rule, stated in one place: a vector is in
-    /// scope when its `resolve/output.json` versionId is greater than 1, it ships
-    /// no `pending.json`, and no service in its genesis document declares a CAS or
-    /// SMT beacon type; it is foreclosed when it meets the first two conditions
-    /// and fails the third. Same versionId encoding tolerance as `load`. If this
-    /// test fails, the tree gained or lost a vector and the constants need
-    /// re-checking.
+    /// - no `signals.json`: nothing announced on chain, so neither list;
+    /// - a `signals.json` entry carrying `cohort`, or a CAS/SMT beacon in the
+    ///   genesis document of `other.json` or of the resolve sidecar:
+    ///   unsupported;
+    /// - a set expecting no error whose data is served from CAS — an x1 set
+    ///   whose sidecar carries no genesis document, or a set with an `update/`
+    ///   directory and no non-empty sidecar `updates` — neither list;
+    /// - a set expecting an error is never CAS-delivered: what it withholds is
+    ///   the point of the set;
+    /// - everything else: drivable.
+    fn classify_set(set_dir: &Path) -> SetClass {
+        let Some(signals) = optional_json(&set_dir.join("signals.json")) else {
+            return SetClass::Neither;
+        };
+        let input = optional_json(&set_dir.join("resolve/input.json")).unwrap_or_else(|| {
+            panic!(
+                "{}: a set with signals.json must ship resolve/input.json",
+                set_dir.display()
+            )
+        });
+        let output = optional_json(&set_dir.join("resolve/output.json")).unwrap_or_else(|| {
+            panic!(
+                "{}: a set with signals.json must ship resolve/output.json",
+                set_dir.display()
+            )
+        });
+        let other = optional_json(&set_dir.join("other.json")).unwrap_or(Value::Null);
+        let sidecar = &input["resolutionOptions"]["sidecar"];
+
+        let cohort = signals
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| !entry["cohort"].is_null()));
+        if cohort
+            || declares_unsupported_beacon(&other["genesisDocument"])
+            || declares_unsupported_beacon(&sidecar["genesisDocument"])
+        {
+            return SetClass::Unsupported;
+        }
+
+        let positive = output["didResolutionMetadata"]["error"].is_null();
+        if positive {
+            let kind = set_dir
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| panic!("{}: no kind segment", set_dir.display()));
+            if kind == "x1" && sidecar["genesisDocument"].is_null() {
+                return SetClass::Neither;
+            }
+            let sidecar_updates = sidecar["updates"]
+                .as_array()
+                .is_some_and(|updates| !updates.is_empty());
+            if set_dir.join("update").is_dir() && !sidecar_updates {
+                return SetClass::Neither;
+            }
+        }
+        SetClass::Drivable
+    }
+
+    /// Recompute both target lists from the vector tree with [`classify_set`]
+    /// and require them to match the constants above. If this fails, the tree
+    /// gained or lost a set, or a set changed class, and the constants need
+    /// recomputing; the message names the ids on each side.
     #[test]
     fn drivable_set_matches_the_tree() {
         if !test_suite_present() {
@@ -1115,84 +1270,222 @@ mod tests {
         let root = test_suite_root();
         let mut drivable = BTreeSet::new();
         let mut unsupported = BTreeSet::new();
+        let mut seen = 0usize;
 
-        for network_dir in child_dirs(&root) {
-            for kind in child_dirs(&root.join(&network_dir)) {
-                for short_id in child_dirs(&root.join(&network_dir).join(&kind)) {
+        for network_dir in SUITE_NETWORK_DIRS {
+            for kind in ["k1", "x1"] {
+                let kind_dir = root.join(network_dir).join(kind);
+                for short_id in child_dirs(&kind_dir) {
+                    seen += 1;
                     let id = format!("{network_dir}/{kind}/{short_id}");
-                    let vector_dir = root.join(&id);
-                    let output_path = vector_dir.join("resolve/output.json");
-                    if !output_path.exists() {
-                        continue;
-                    }
-                    let output: Value = serde_json::from_str(
-                        &std::fs::read_to_string(&output_path)
-                            .unwrap_or_else(|e| panic!("{id}: resolve/output.json ({e})")),
-                    )
-                    .unwrap_or_else(|e| panic!("{id}: resolve/output.json is not JSON ({e})"));
-
-                    let version = version_id(
-                        &id,
-                        &output_path,
-                        &output["didDocumentMetadata"]["versionId"],
-                    )
-                    .unwrap_or_else(|e| panic!("{e}"));
-                    if version < 2 {
-                        continue;
-                    }
-                    if vector_dir.join("pending.json").exists() {
-                        continue;
-                    }
-
-                    let beacons = genesis_beacon_types(&root, &id, &kind);
-                    if beacons
-                        .iter()
-                        .any(|t| UNSUPPORTED_BEACON_TYPES.contains(&t.as_str()))
-                    {
-                        unsupported.insert(id);
-                    } else {
-                        drivable.insert(id);
+                    match classify_set(&kind_dir.join(&short_id)) {
+                        SetClass::Drivable => {
+                            drivable.insert(id);
+                        }
+                        SetClass::Unsupported => {
+                            unsupported.insert(id);
+                        }
+                        SetClass::Neither => {}
                     }
                 }
             }
         }
-
-        let expected_drivable: BTreeSet<String> =
-            DRIVABLE_VECTORS.iter().map(|s| s.to_string()).collect();
-        let expected_unsupported: BTreeSet<String> = UNSUPPORTED_BEACON_VECTORS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        assert_eq!(
-            drivable, expected_drivable,
-            "the drivable set re-derived from the tree does not match DRIVABLE_VECTORS.\n\
-             re-derived: {drivable:?}\n  declared: {expected_drivable:?}"
+        assert!(
+            seen > 0,
+            "the probe found a corpus but no set was classified"
         );
-        assert_eq!(
-            unsupported, expected_unsupported,
-            "the foreclosed set re-derived from the tree does not match \
-             UNSUPPORTED_BEACON_VECTORS.\nre-derived: {unsupported:?}\n  declared: \
-             {expected_unsupported:?}"
-        );
+
+        let declared =
+            |ids: &[&str]| -> BTreeSet<String> { ids.iter().map(|s| s.to_string()).collect() };
+        for (name, derived, declared) in [
+            ("DRIVABLE_VECTORS", &drivable, declared(DRIVABLE_VECTORS)),
+            (
+                "UNSUPPORTED_BEACON_VECTORS",
+                &unsupported,
+                declared(UNSUPPORTED_BEACON_VECTORS),
+            ),
+        ] {
+            let only_in_tree: Vec<&String> = derived.difference(&declared).collect();
+            let only_declared: Vec<&String> = declared.difference(derived).collect();
+            assert!(
+                only_in_tree.is_empty() && only_declared.is_empty(),
+                "{name} does not match the set re-derived from the tree.\n\
+                 derived but not declared: {only_in_tree:?}\n\
+                 declared but not derived: {only_declared:?}"
+            );
+        }
+    }
+
+    /// A scratch set under `root/id` with a signals record, for the rule tests.
+    fn rule_set(root: &Path, id: &str, signals: Value, sidecar: Option<Value>, output: Value) {
+        write_set(root, id, Some(signals), sidecar, output, None);
     }
 
     #[test]
-    fn drivable_vectors_are_the_seven_ids_in_order() {
-        assert_eq!(
-            DRIVABLE_VECTORS,
-            &[
-                "mutinynet/k1/q5p6w9su",
-                "mutinynet/k1/q5pgeu9z",
-                "mutinynet/x1/q5ugrf3w",
-                "regtest/k1/qgppexmy",
-                "regtest/k1/qgpy0hmm",
-                "regtest/x1/q26jeds9",
-                "regtest/x1/qfl7se8f",
-            ],
-            "the target set is the seven vectors this phase drives, in tree order"
+    fn the_capture_rule_classifies_each_branch() {
+        let root = scratch_suite("rule");
+        let one = || serde_json::json!([entry(Some(1), 0x11, 100, 0xaa, 110)]);
+        let genesis = serde_json::json!({ "service": [{ "type": "SingletonBeacon" }] });
+
+        write_set(
+            &root,
+            "regtest/k1/qnosignal",
+            None,
+            None,
+            positive_output(),
+            None,
         );
-        assert_eq!(UNSUPPORTED_BEACON_VECTORS.len(), 4);
+        assert_eq!(
+            classify_set(&root.join("regtest/k1/qnosignal")),
+            SetClass::Neither
+        );
+
+        rule_set(
+            &root,
+            "regtest/k1/qcohort",
+            serde_json::json!([cohort_entry(0x21)]),
+            None,
+            positive_output(),
+        );
+        assert_eq!(
+            classify_set(&root.join("regtest/k1/qcohort")),
+            SetClass::Unsupported
+        );
+
+        write_set(
+            &root,
+            "regtest/x1/qcasother",
+            Some(one()),
+            Some(serde_json::json!({ "updates": [{}] })),
+            positive_output(),
+            Some(serde_json::json!({
+                "genesisDocument": { "service": [{ "type": "CASBeacon" }] }
+            })),
+        );
+        assert_eq!(
+            classify_set(&root.join("regtest/x1/qcasother")),
+            SetClass::Unsupported
+        );
+
+        rule_set(
+            &root,
+            "regtest/x1/qsmtside",
+            one(),
+            Some(serde_json::json!({
+                "genesisDocument": { "service": [{ "type": "SMTBeacon" }] }
+            })),
+            error_output("INVALID_SIGNAL_DATA"),
+        );
+        assert_eq!(
+            classify_set(&root.join("regtest/x1/qsmtside")),
+            SetClass::Unsupported
+        );
+
+        rule_set(
+            &root,
+            "regtest/x1/qcasgenesis",
+            one(),
+            Some(serde_json::json!({})),
+            positive_output(),
+        );
+        assert_eq!(
+            classify_set(&root.join("regtest/x1/qcasgenesis")),
+            SetClass::Neither,
+            "a positive x1 set whose sidecar carries no genesis document is CAS-delivered"
+        );
+
+        rule_set(
+            &root,
+            "regtest/x1/qnegative",
+            one(),
+            None,
+            error_output("MISSING_UPDATE_DATA"),
+        );
+        assert_eq!(
+            classify_set(&root.join("regtest/x1/qnegative")),
+            SetClass::Drivable,
+            "a set expecting an error is never CAS-delivered"
+        );
+
+        rule_set(
+            &root,
+            "regtest/k1/qcasupdate",
+            one(),
+            Some(serde_json::json!({ "updates": [] })),
+            positive_output(),
+        );
+        std::fs::create_dir_all(root.join("regtest/k1/qcasupdate/update/01"))
+            .expect("the update directory is creatable");
+        assert_eq!(
+            classify_set(&root.join("regtest/k1/qcasupdate")),
+            SetClass::Neither,
+            "a positive set with update/ and no sidecar updates is CAS-delivered"
+        );
+
+        rule_set(
+            &root,
+            "regtest/k1/qsidecar",
+            one(),
+            Some(serde_json::json!({ "updates": [{}] })),
+            positive_output(),
+        );
+        std::fs::create_dir_all(root.join("regtest/k1/qsidecar/update/01"))
+            .expect("the update directory is creatable");
+        assert_eq!(
+            classify_set(&root.join("regtest/k1/qsidecar")),
+            SetClass::Drivable
+        );
+
+        rule_set(
+            &root,
+            "regtest/x1/qsidegen",
+            one(),
+            Some(serde_json::json!({ "genesisDocument": genesis, "updates": [{}] })),
+            positive_output(),
+        );
+        assert_eq!(
+            classify_set(&root.join("regtest/x1/qsidegen")),
+            SetClass::Drivable
+        );
+
+        std::fs::remove_dir_all(&root).expect("the scratch root is removable");
+    }
+
+    /// Network order of the allow-lists: regtest, mutinynet, signet, testnet4.
+    fn list_order(id: &str) -> (usize, &str) {
+        let (network, rest) = id.split_once('/').expect("an id has a network segment");
+        let rank = SUITE_NETWORK_DIRS
+            .iter()
+            .position(|n| *n == network)
+            .unwrap_or_else(|| panic!("{id}: not a suite network"));
+        (rank, rest)
+    }
+
+    #[test]
+    fn drivable_vectors_are_sorted_unique_and_disjoint_from_unsupported() {
+        for (name, list, per_network) in [
+            ("DRIVABLE_VECTORS", DRIVABLE_VECTORS, 35),
+            ("UNSUPPORTED_BEACON_VECTORS", UNSUPPORTED_BEACON_VECTORS, 14),
+        ] {
+            for pair in list.windows(2) {
+                assert!(
+                    list_order(pair[0]) < list_order(pair[1]),
+                    "{name}: `{}` must come before `{}` (network order, then id; no repeats)",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            for network in SUITE_NETWORK_DIRS {
+                let count = list
+                    .iter()
+                    .filter(|id| id.split('/').next() == Some(network))
+                    .count();
+                assert_eq!(count, per_network, "{name}: {network} holds {count} sets");
+            }
+            for id in list {
+                check_vector_id(id).unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+        }
         for id in UNSUPPORTED_BEACON_VECTORS {
             assert!(
                 !DRIVABLE_VECTORS.contains(id),
@@ -1201,20 +1494,33 @@ mod tests {
         }
     }
 
+    /// A set file from the real tree, as JSON.
+    fn tree_json(id: &str, file: &str) -> Value {
+        let path = test_suite_root().join(id).join(file);
+        serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: must be readable ({e})", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{}: must be JSON ({e})", path.display()))
+    }
+
     #[test]
     fn load_reads_a_regtest_target_from_its_own_files() {
         if !test_suite_present() {
             return;
         }
-        let target = load("regtest/k1/qgppexmy").expect("a drivable regtest vector loads");
+        let id = "regtest/k1/qgph7nre";
+        let target = load(id).expect("a drivable regtest set loads");
+        let input = tree_json(id, "resolve/input.json");
+        let metadata = tree_json(id, "resolve/output.json")["didDocumentMetadata"].clone();
 
-        assert_eq!(target.id, "regtest/k1/qgppexmy");
+        assert_eq!(target.id, id);
         assert_eq!(target.network_dir, "regtest");
         assert_eq!(target.network, Network::Regtest);
-        assert!(
-            target.did.encode().starts_with("did:btcr2:k1qgppexmy"),
-            "the DID comes from the vector's own input.json, got {}",
-            target.did.encode()
+        assert_eq!(
+            target.did.encode(),
+            input["did"].as_str().expect("the set names its DID"),
+            "the DID comes from the set's own input.json"
         );
         assert_eq!(
             target.sidecar["updates"]
@@ -1222,51 +1528,124 @@ mod tests {
                 .expect("the sidecar carries an updates array")
                 .len(),
             1,
-            "this vector announces exactly one update"
+            "this set announces exactly one update"
         );
-        assert_eq!(target.expected_version_id(), 2);
-        assert_eq!(target.expected_confirmations(), Some(93));
+        let stated_version: u64 = metadata["versionId"]
+            .as_str()
+            .expect("the set states versionId as a string")
+            .parse()
+            .expect("the stated versionId is decimal");
+        assert_eq!(target.expected_version_id(), stated_version);
+        assert_eq!(
+            target.expected_confirmations(),
+            metadata["confirmations"].as_u64()
+        );
+        assert!(
+            target.expected_confirmations().is_some(),
+            "the set states confirmations"
+        );
         assert!(!target.expected_deactivated());
         assert_eq!(
             target.expected_document()["id"],
             *target.did.encode(),
-            "the expected document is the one the vector states"
+            "the expected document is the one the set states"
+        );
+        assert!(target.signals.is_some(), "the set ships its signals record");
+    }
+
+    #[test]
+    fn load_reads_a_set_that_signals_below_the_current_height() {
+        if !test_suite_present() {
+            return;
+        }
+        let target = load("regtest/k1/qgpqx326").expect("a drivable regtest set loads");
+        assert_eq!(target.expected_version_id(), 2);
+        assert!(target.signals.is_some(), "the set ships its signals record");
+    }
+
+    #[test]
+    fn load_reads_an_allow_listed_set_that_expects_an_error() {
+        if !test_suite_present() {
+            return;
+        }
+        let target = load("regtest/x1/qfuuz6h4").expect("a drivable negative set loads");
+        assert_eq!(
+            target.expected,
+            ExpectedOutcome::Error {
+                code: "MISSING_UPDATE_DATA".to_string()
+            }
+        );
+        assert!(
+            target.signals.is_some(),
+            "a negative set is captured against its signals record"
         );
     }
 
     #[test]
-    fn load_tolerates_a_number_encoded_version_id() {
+    fn load_refuses_a_real_unsupported_set_and_a_real_set_without_signals() {
         if !test_suite_present() {
             return;
         }
-        let target = load("mutinynet/k1/q5p6w9su").expect("a drivable mutinynet vector loads");
-
-        // This vector encodes `versionId` as a JSON number where the regtest
-        // vectors encode it as a string; both must read as 2 without either file
-        // being rewritten.
-        let raw: Value = serde_json::from_str(
-            &std::fs::read_to_string(
-                test_suite_root().join("mutinynet/k1/q5p6w9su/resolve/output.json"),
-            )
-            .expect("the vector's output is readable"),
-        )
-        .expect("the vector's output is JSON");
         assert!(
-            raw["didDocumentMetadata"]["versionId"].is_number(),
-            "this test is only meaningful while the fixture encodes versionId as a number"
+            matches!(
+                load("regtest/x1/qg5kgjm0"),
+                Err(TargetError::UnsupportedBeacon(ref id)) if id == "regtest/x1/qg5kgjm0"
+            ),
+            "a CAS set is refused with its reason"
         );
+        assert!(
+            matches!(
+                load("regtest/k1/qgp45a3y"),
+                Err(TargetError::NotDrivable { ref vector, .. }) if vector == "regtest/k1/qgp45a3y"
+            ),
+            "a set with nothing on chain is not a capture target"
+        );
+    }
 
-        assert_eq!(target.expected_version_id(), 2);
-        assert_eq!(
-            target.expected_confirmations(),
+    #[test]
+    fn load_rejects_a_number_encoded_version_id() {
+        let root = scratch_suite("number-version");
+        let id = "regtest/k1/qnumber";
+        let mut output = positive_output();
+        output["didDocumentMetadata"]["versionId"] = serde_json::json!(2);
+        write_set(
+            &root,
+            id,
+            Some(serde_json::json!([entry(Some(1), 0xb1, 300, 0x11, 310)])),
+            Some(serde_json::json!({})),
+            output,
             None,
-            "the mutinynet vectors state no confirmations"
+        );
+        match load_in(&root, id) {
+            Err(TargetError::MalformedFixture { path, detail, .. }) => {
+                assert!(
+                    path.ends_with("resolve/output.json"),
+                    "names the file: {path}"
+                );
+                assert!(detail.contains("string"), "names the wire shape: {detail}");
+                assert!(detail.contains("number"), "names what it found: {detail}");
+            }
+            other => panic!("a number-encoded versionId must be refused, got {other:?}"),
+        }
+
+        let mut output = positive_output();
+        output["didDocumentMetadata"]["versionId"] = serde_json::json!("+2");
+        write_set(
+            &root,
+            id,
+            Some(serde_json::json!([entry(Some(1), 0xb1, 300, 0x11, 310)])),
+            Some(serde_json::json!({})),
+            output,
+            None,
         );
         assert!(
-            target.expected_deactivated(),
-            "this vector's final update deactivates the DID"
+            matches!(
+                load_in(&root, id),
+                Err(TargetError::MalformedFixture { ref detail, .. }) if detail.contains("decimal")
+            ),
+            "only ASCII decimal digits are a versionId"
         );
-        assert_eq!(target.network, Network::Mutinynet);
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
     }
 
     #[test]
@@ -1328,11 +1707,15 @@ mod tests {
 
     #[test]
     fn a_missing_fixture_names_the_path() {
-        let empty_root = std::env::temp_dir().join(format!(
-            "chain-capture-targets-empty-{}",
-            std::process::id()
-        ));
-        let error = load_from(&empty_root, "regtest/k1/qgppexmy")
+        let root = scratch_suite("missing-fixture");
+        let id = "regtest/k1/qgph7nre";
+        std::fs::create_dir_all(root.join(id)).expect("the set directory is creatable");
+        std::fs::write(
+            root.join(id).join("signals.json"),
+            serde_json::json!([entry(Some(1), 0xc1, 300, 0x11, 310)]).to_string(),
+        )
+        .expect("signals.json is writable");
+        let error = load_from(&root, id)
             .expect_err("an absent fixture must be an error, not an empty target");
         let message = error.to_string();
         assert!(
@@ -1343,10 +1726,14 @@ mod tests {
             message.contains("resolve/input.json"),
             "the message names the missing path: {message}"
         );
+        assert!(message.contains(id), "the message names the set: {message}");
+
+        std::fs::remove_file(root.join(id).join("signals.json")).expect("removable");
         assert!(
-            message.contains("regtest/k1/qgppexmy"),
-            "the message names the vector: {message}"
+            matches!(load_from(&root, id), Err(TargetError::NoSignals { ref vector }) if vector == id),
+            "an allow-listed set with no signals record is refused"
         );
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
     }
 
     #[test]
@@ -1354,20 +1741,21 @@ mod tests {
         if !test_suite_present() {
             return;
         }
-        let regtest = load_all("regtest").expect("every regtest target loads");
-        assert_eq!(regtest.len(), 4);
-        assert!(regtest.iter().all(|t| t.network_dir == "regtest"));
+        for network in SUITE_NETWORK_DIRS {
+            let targets =
+                load_all(network).unwrap_or_else(|e| panic!("every {network} target loads: {e}"));
+            assert_eq!(targets.len(), 35, "{network}");
+            assert!(targets.iter().all(|t| t.network_dir == network));
+            assert!(
+                targets
+                    .iter()
+                    .filter(|t| matches!(t.expected, ExpectedOutcome::Resolved { .. }))
+                    .all(|t| t.expected_confirmations().is_some()),
+                "every positive {network} set pins a confirmations count"
+            );
+        }
         assert!(
-            regtest.iter().all(|t| t.expected_confirmations().is_some()),
-            "every regtest vector pins a confirmations count"
-        );
-
-        let mutinynet = load_all("mutinynet").expect("every mutinynet target loads");
-        assert_eq!(mutinynet.len(), 3);
-        assert!(mutinynet.iter().all(|t| t.network_dir == "mutinynet"));
-
-        assert!(
-            load_all("signet")
+            load_all("mainnet")
                 .expect("an unrepresented network loads nothing")
                 .is_empty()
         );
@@ -1508,7 +1896,7 @@ mod tests {
     /// with its directory (the capture does, before any request), so the scratch
     /// sets below reuse it under every network.
     const REGTEST_DID: &str =
-        "did:btcr2:k1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s";
+        "did:btcr2:k1qgph7nrekhzerkmsktp8l7rdtpxh2mw45xp6e90sjvxszpz6au0grssegjx6z";
 
     /// A scratch suite root unique to one test, removed by the test itself.
     fn scratch_suite(tag: &str) -> PathBuf {
@@ -1704,7 +2092,7 @@ mod tests {
         for (id, network) in [
             ("testnet4/x1/q9pspvd9", Network::TestnetV4),
             ("regtest/k1/qgpepnx0", Network::Regtest),
-            ("mutinynet/k1/q5p6w9su", Network::Mutinynet),
+            ("mutinynet/k1/q5pqhkks", Network::Mutinynet),
         ] {
             write_set(
                 &root,
@@ -1755,7 +2143,7 @@ mod tests {
     #[test]
     fn load_in_refuses_a_set_without_signals() {
         let root = scratch_suite("no-signals");
-        let id = "regtest/k1/qgppexmy";
+        let id = "regtest/k1/qgph7nre";
         write_set(&root, id, None, None, positive_output(), None);
 
         let error = load_in(&root, id).expect_err("a set without signals.json must not load");
@@ -1923,7 +2311,7 @@ mod tests {
     #[test]
     fn load_in_refuses_a_cohort_entry_as_unsupported() {
         let root = scratch_suite("cohort");
-        let id = "mutinynet/x1/q5cfewep";
+        let id = "mutinynet/x1/q5kssq8u";
         let mut member = entry(Some(1), 0xa1, 300, 0x11, 310);
         member["cohort"] = serde_json::json!({ "id": "cas-09", "members": ["a", "b"] });
         write_set(
@@ -2092,7 +2480,7 @@ mod tests {
     #[test]
     fn load_from_reads_signals_when_an_allow_listed_vector_ships_them() {
         let root = scratch_suite("allow-listed");
-        let id = "regtest/k1/qgppexmy";
+        let id = "regtest/k1/qgph7nre";
         write_set(
             &root,
             id,
@@ -2101,20 +2489,35 @@ mod tests {
             positive_output(),
             None,
         );
-        let target = load_from(&root, id).expect("the allow-listed vector loads");
-        assert_eq!(target.signals, None, "no signals.json, no record");
-        assert_eq!(target.expected.confirmations(), Some(11));
+        assert!(
+            matches!(load_from(&root, id), Err(TargetError::NoSignals { .. })),
+            "an allow-listed set is read through the one loader, which needs signals.json"
+        );
 
         std::fs::write(
             root.join(id).join("signals.json"),
             serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)]).to_string(),
         )
         .expect("signals.json is writable");
-        let target = load_from(&root, id).expect("the allow-listed vector loads");
+        let target = load_from(&root, id).expect("the allow-listed set loads");
         assert_eq!(
             target.signals.map(|s| s.recorded_tip),
             Some(310),
-            "a vector that ships signals.json carries its record"
+            "a set that ships signals.json carries its record"
+        );
+        assert_eq!(target.expected.confirmations(), Some(11));
+
+        std::fs::write(
+            root.join(id).join("resolve/output.json"),
+            error_output("INVALID_DID_UPDATE").to_string(),
+        )
+        .expect("the output is writable");
+        let target = load_from(&root, id).expect("an allow-listed negative set loads");
+        assert_eq!(
+            target.expected,
+            ExpectedOutcome::Error {
+                code: "INVALID_DID_UPDATE".to_string()
+            }
         );
         std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
     }
@@ -2168,11 +2571,11 @@ mod tests {
                 other => panic!("{option}: expected a refusal, got {other:?}"),
             }
 
-            let allow_listed = "regtest/k1/qgppexmy";
+            let allow_listed = "regtest/k1/qgph7nre";
             write_set(
                 &root,
                 allow_listed,
-                None,
+                Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
                 Some(serde_json::json!({ "updates": [] })),
                 positive_output(),
                 None,
@@ -2191,14 +2594,31 @@ mod tests {
     }
 
     #[test]
-    fn load_leaves_the_vendor_vectors_without_a_signals_record() {
+    fn every_drivable_target_carries_its_signals_record() {
         if !test_suite_present() {
             return;
         }
+        let mut resolved = 0usize;
+        let mut error = 0usize;
         for id in DRIVABLE_VECTORS {
             let target = load(id).unwrap_or_else(|e| panic!("{id} loads: {e}"));
-            assert!(target.signals.is_none(), "{id} ships no signals.json");
-            assert!(matches!(target.expected, ExpectedOutcome::Resolved { .. }));
+            assert!(
+                target.signals.is_some(),
+                "{id} (expecting {:?}) must carry its signals record",
+                target.expected
+            );
+            if matches!(target.expected, ExpectedOutcome::Resolved { .. }) {
+                resolved += 1;
+            } else if matches!(target.expected, ExpectedOutcome::Error { .. }) {
+                error += 1;
+            }
         }
+        eprintln!("drivable targets: {resolved} resolved, {error} expecting an error");
+        assert!(
+            resolved > 0,
+            "no drivable target expects a resolved document"
+        );
+        assert!(error > 0, "no drivable target expects an error");
+        assert_eq!(resolved + error, DRIVABLE_VECTORS.len());
     }
 }

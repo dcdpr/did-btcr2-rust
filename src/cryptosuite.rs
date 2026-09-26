@@ -916,8 +916,9 @@ mod tests {
             }
         }
         assert!(
-            verified >= 17,
-            "expected at least 17 vendor update proofs from positive update-bearing vectors, verified {verified}"
+            verified >= 156,
+            "expected at least 156 vendor update proofs (every update step of the 27 positive \
+             update-bearing sets on each of four networks), verified {verified}"
         );
 
         // Anti-vacuity: one flipped signature byte must fail.

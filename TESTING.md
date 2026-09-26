@@ -40,10 +40,10 @@ the minted `clean` fixture and the `chain-capture` RUNBOOK at compile time.
 
 | Crate | Tests |
 |---|---|
-| `did-btcr2` | 478 lib + 9 conformance + 1 doctest |
+| `did-btcr2` | 502 lib + 9 conformance + 1 doctest |
 | `did-btcr2-client` | 66 + 1 e2e |
 | `did-btcr2-cli` | 45 + 2 broken-pipe |
-| `chain-capture` | 269 |
+| `chain-capture` | 286 |
 | `did-btcr2-resolver-http` | 62 lib + 9 bin + 47 conformance + 10 fixtures + 12 guard + 11 post + 5 schema + 6 smoke |
 
 Counts are copied from `cargo test` output; re-measure before editing them.
@@ -54,8 +54,9 @@ on-chain replays from a captured fixture.
 
 ## 3. The operation-vector ledger
 
-The upstream vectors live in the `test-suite/` submodule. The accounting unit is
-a **row**: one (vector × assertion kind) pair, not one vector, and for the
+The upstream vectors live in the `test-suite/` submodule: 59 sets on each of
+regtest, mutinynet, signet and testnet4, 236 in all. The accounting unit is a
+**row**: one (vector × assertion kind) pair, not one vector, and for the
 `resolve-option` kind one (vector × `resolve/NN` case) pair. A single vector
 can contribute a driven row for one kind and a skipped row for another — most
 commonly a driven `derivation` row and a skipped `resolve` row.
@@ -69,49 +70,43 @@ walks `test-suite/` only, and the synthetic corpora under `fixtures/layout/`
 | Kind | What it asserts | Driver test (`src/resolver.rs`) |
 |---|---|---|
 | `derivation` | `create/input.json` → encoded DID equals `create/output.json.did` | `op_vectors_create_derives_expected_did` |
-| `genesis-key` | `other.json.genesisKeys.secret` derives `genesisKeys.public`, and every update step signs with that same secret | `op_vectors_create_genesis_key_corroborated` |
+| `genesis-key` | `other.json.genesisKeys.secret` derives `genesisKeys.public`, and every update step signs with the genesis secret or an `other.json.extraKeys` secret whose public key is the one the step's `sourceDocument` names | `op_vectors_create_genesis_key_corroborated` |
 | `resolve` | the resolver FSM resolves the vector's main pair (`resolve/input.json`) to `resolve/output.json` | `op_vectors_resolve_matches_output` |
-| `update-crypto` | each update step's content-bound triple and BIP340 proof re-derive from its own inputs and verify against its source document | `op_vectors_update_signs_to_expected_hashes` |
-| `end-state` | applying every update step in order to the genesis document reproduces `resolve/output.json.didDocument` | `op_vectors_updates_apply_to_expected_end_state` |
+| `update-crypto` | each update step's content-bound triple and BIP340 proof re-derive from its own inputs and verify against its source document; a step over a deactivated source is refused, and the vendor's proof on it is verified instead | `op_vectors_update_signs_to_expected_hashes` |
+| `end-state` | applying the update steps in order to the genesis document reproduces `resolve/output.json.didDocument`; the walk stops at the resolved version, so a step no resolver applies (after deactivation, from a removed beacon, below the current height) is not applied | `op_vectors_updates_apply_to_expected_end_state` |
 | `resolve-option` | one row per `resolve/NN/` case: the resolver, given that case's `resolutionOptions` (`versionId`, `versionTime`, both, `minConf`), produces its `output.json` | `op_vectors_resolve_cases_match_output` |
 
 `resolve` and `resolve-option` share one per-case driver. An output carrying
 `didResolutionMetadata.error` is asserted by **code only** (the `errorMessage`
 is the generating implementation's text). A positive output is asserted on
-`didDocument`, `versionId` (a string, no coercion, except for the pinned
-number-encoded vectors below), `deactivated`, and `confirmations` compared as
-**at least** the recorded value. A set that carries `signals.json` is replayed
-only after the chain fixture's announcements equal that file exactly (txid,
-block height, block hash, signal bytes, and an address whose captured history
-carries the transaction). An unknown child under `resolve/`
-(neither the main pair nor a numbered case) fails discovery loudly.
+`didDocument`, `versionId` (a string, no coercion), `deactivated`, and
+`confirmations` compared as **at least** the recorded value. A set that carries
+`signals.json` is replayed only after the chain fixture's announcements equal
+that file exactly (txid, block height, block hash, signal bytes, and an address
+whose captured history carries the transaction). An unknown child under
+`resolve/` (neither the main pair nor a numbered case) fails discovery loudly.
 
 A `resolve-option` row inherits its set's `resolve` skip reasons: a case of a
-CAS-delivered set is as undeliverable as the main pair. Its `DRIVEN_FLOOR`
-entry is 0, because the current test-suite pin ships no `resolve/NN` case;
-it is raised when the regenerated suite is absorbed.
+CAS-delivered set is as undeliverable as the main pair.
 
 ### The live ledger
 
 `cargo test -p did-btcr2 --lib op_vectors -- --nocapture` prints:
 
 ```
-operation-vector coverage: 22 vectors, 100 rows
+operation-vector coverage: 236 vectors, 1161 rows
   kind            driven  skipped
-  derivation          22        0
-  genesis-key         22        0
-  resolve              4       18
-  update-crypto       17        0
-  end-state           17        0
-  resolve-option       0        0
+  derivation         236        0
+  genesis-key        236        0
+  resolve            164       72
+  update-crypto      108       92
+  end-state          108       92
+  resolve-option      53        0
   skipped rows by reason (a row may carry several):
-    unanchored (pending.json)                                                                       6
-    CAS-aggregated delivery not implemented                                                         9
-    SMT-aggregated delivery not implemented                                                         4
-    resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)                  8
-    update @context predates the spec pin; regenerated upstream, absorbed at the test-suite bump   17
-  fixture defects: 16 vector(s) encode versionId as a JSON number (the specification requires an ASCII string): mutinynet
-  stale update @context: 17 vector(s) predate the spec's pinned update @context (regenerated upstream; Resolve rows skipped under StaleContext until the bump): mutinynet, regtest
+    CAS-aggregated delivery not implemented                                          40
+    SMT-aggregated delivery not implemented                                          40
+    resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)   56
+    the set's expected result is an error; its Resolve row asserts the code         184
 
 minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counted in the upstream ledger above)
   minted/clean-rotating-beacons (minted on mutinynet)
@@ -126,22 +121,20 @@ minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counte
   this coverage is fixture-driven: no live-network test ships in this crate. A real chain is contacted by the capture tool's own validation, and the CLI runbook covers live end-to-end resolve interactively.
 ```
 
-100 rows is 22 vectors × 5 kinds, minus the 10 rows that do not exist: 5 vectors
-are genesis-only and so have no `update-crypto` and no `end-state` row. That is
-also why those two kinds show 17 driven rows rather than 22. The pinned suite
-has no `resolve/NN` case, so `resolve-option` contributes no rows.
+1161 rows is 236 × 3 set-level kinds (`derivation`, `genesis-key`,
+`resolve`), plus 200 `update-crypto` and 200 `end-state` rows (the 50 sets per
+network that ship an `update/` directory; the other 9 are genesis-only), plus
+the 53 `resolve/NN` cases. The 92 skipped rows of each update kind are the 23
+negative sets per network that ship update steps.
 
-### The six skip reasons
+### The four skip reasons
 
 Defined by `SkipReason` (`src/test_vectors.rs`) and derived from each vector's
-own files in `Vector::row_skip_reasons` — the delivery, anchoring and beacon
-rules by `derived_resolve_skip_reasons`, `StaleContext` and `ExpectedError`
-beside them. They are **additive**: a skipped row carries every applicable
-reason, not the first match, which is why the counts above sum to more than
-the 18 skipped rows.
+own files in `Vector::row_skip_reasons` — the delivery and beacon rules by
+`derived_resolve_skip_reasons`, `ExpectedError` beside them. They are
+**additive**: a skipped row carries every applicable reason, not the first
+match, which is why the counts above sum to more than the skipped rows.
 
-- **`Unanchored`** — `pending.json` present: the vector's own generator recorded
-  update steps that were never delivered on chain.
 - **`CasDelivery` / `SmtDelivery`** — the genesis document declares a `CASBeacon`
   / `SMTBeacon` service, or the delivery derived from the set's files is CAS
   (see "Delivery is derived from the files" below). That aggregation is
@@ -150,24 +143,12 @@ the 18 skipped rows.
   beacon, so building the next round of requests returns `Unsupported` before any
   transaction is read. Distinct from the delivery reasons: different problem,
   different code. Both are recorded when both apply.
-- **`StaleContext`** — at least one of the vector's own update files
-  (`update/**/output.json` `signedUpdate` and its `proof`, or the
-  `resolve/input.json` sidecar `updates[*]` and their proofs) carries an
-  `@context` that is not the spec's pinned four-URL array
-  (`did_btcr2::UPDATE_CONTEXT`). The vector predates the pin and is being
-  regenerated upstream. **Resolve kind only**: the `update-crypto` and
-  `end-state` drivers rebuild the update from `input.json` and compare document
-  hashes, never reading the vector's `@context`, so those rows stay driven.
-  Self-clearing — a regenerated vector stops matching the rule and its row is
-  driven again — and pinned at exactly 17 vectors by `STALE_UPDATE_CONTEXT`,
-  asserted in both directions (see below).
 - **`ExpectedError`** — the set's main `resolve/output.json` carries
   `didResolutionMetadata.error`. **`update-crypto` and `end-state` only**: the
   set is built to fail resolution, so its `resolve` row asserts the error code
   and there is no end state to reproduce. `derivation` and `genesis-key` stay
   driven, because `create/` still holds a valid DID. A negative `resolve/NN`
-  case does not make its set negative. No set on the current pin is negative,
-  so the ledger prints no line for it.
+  case does not make its set negative.
 - **`Override(&str)`** — a hand-written one-off. `SKIP_OVERRIDES` is currently
   **empty by design**, so every skip on disk today comes from a derived rule.
   An entry names exactly one row: a `resolve-option` entry names its case, and
@@ -189,14 +170,6 @@ any declaration:
   sidecar `genesisDocument` has a CAS genesis, and update steps without sidecar
   `updates` are CAS announcements.
 
-Where a set still ships `scenario.json` with a non-null `delivery`, discovery
-cross-checks the declaration against the derived value and fails loudly on a
-disagreement, so the unchanged counts above are a real cross-check. While
-`pending.json` is present only the genesis delivery is cross-checked: a pending
-set never ran its anchoring step, so its files cannot show which announcement
-mechanism was intended. A declared `"smt"` requires an `SMTBeacon` in the
-genesis document.
-
 Discovery also parses `signals.json` where a set ships one (a bare array; one
 `recordedTip` across all entries; `update` optional only on a cohort entry; a
 repeated `update` only with `duplicate: true`) and checks cohorts across sets:
@@ -212,95 +185,74 @@ specification code) where a negative vector records a code other than the one
 the specification defines, each citing its upstream thread. A listed row stays
 **driven** and asserts that the resolver emits the specification's code; it is
 not a skip, and `SKIP_OVERRIDES` is never used for code drift. It is guarded in
-both directions, like `NUMBER_ENCODED_VERSION_ID`: an unlisted mismatch fails
-by name as a new divergence, and an entry no driven negative row uses fails,
-telling the reader to delete it. Equal codes and a vector code listed twice
-are rejected as malformed.
+both directions: an unlisted mismatch fails by name as a new divergence, and an
+entry no driven negative row uses fails, telling the reader to delete it. Equal
+codes and a vector code listed twice are rejected as malformed.
 
-The table is **empty** on the current pin, since no vector there records an
-error. The mechanism is proven on the `late-code` synthetic corpus below.
+The table holds one entry: the suite records the late-publishing error as
+`LATE_PUBLISHING_ERROR` where the specification names it `LATE_PUBLISHING`,
+tracked in dcdpr/did-btcr2-js#204. It is used by the main rows of n21
+(`invalid-update-version-skip`) and n28 (`late-publishing`) on every network,
+eight driven rows that assert `LATE_PUBLISHING`;
+`negative_vectors_carry_their_expected_error` pins that set. Once the suite is
+regenerated with the specification's code, the unused-entry guard fails and the
+entry is deleted. The `late-code` synthetic corpus below proves the mechanism
+on its own.
 
 ### The coverage ratchet
 
 `DRIVEN_FLOOR` (`src/test_vectors.rs`) records the minimum driven rows per kind:
 
 ```
-Derivation 22, GenesisKey 22, Resolve 4, UpdateCrypto 17, EndState 17, ResolveOption 0
+Derivation 236, GenesisKey 236, Resolve 164, UpdateCrypto 108, EndState 108, ResolveOption 53
 ```
 
 It is compared with `>=`, so upstream adding vectors raises coverage without
-failing the build. Only a silent coverage **loss** fails.
+failing the build. Only a silent coverage **loss** fails. The floor is a
+minimum, so nothing raises it automatically: re-measure it by hand when the
+corpus grows.
 
-Resolve is 4, not 11, while the stale update `@context` population is parked:
-the four genesis-era rows (`mutinynet/k1/q5puld7y`, `mutinynet/x1/q5g3smvu`,
-`regtest/k1/qgpakaw4`, `regtest/x1/q2fz9mz6`) are driven, and the seven anchored
-past-genesis rows that `fixtures/chain/` fed are skipped under `StaleContext`.
-`resolve_driven_set_is_the_expected_four_ids` pins those four by id. UpdateCrypto
-and EndState stay at 17 because their drivers do not read the vector's
-`@context`; every update-bearing vector is stale and every one of those 34 rows
-is still driven. When the regenerated suite is absorbed, Resolve is re-raised to
-11 or more by hand — the floor is a minimum, so nothing re-raises it
-automatically.
+`resolve_driven_set_is_every_set_outside_the_cas_and_smt_scenarios` says which
+row moved when the Resolve count does: it pins the driven Resolve set, 41 per
+network, as every set except the 14 CAS/SMT-beacon scenarios and the four
+CAS-delivered ones (05, 06, 08, 20).
+`live_vectors_name_the_beacon_types_the_resolver_cannot_query` and
+`live_vectors_derive_exactly_the_cas_delivery_set` pin those two groups by
+scenario on every network.
 
-### The versionId fixture defect
+### `versionId` is read strictly
 
-`NUMBER_ENCODED_VERSION_ID` (`src/test_vectors.rs`) pins the 16 mutinynet
-vectors whose `resolve/output.json.didDocumentMetadata.versionId` is a JSON
-number where the specification requires an ASCII string. This is an **upstream
-fixture defect** — not an implementation choice and not an interop question. No
-regtest vector has it.
+`didDocumentMetadata.versionId` is read only as the ASCII string the
+specification requires (`metadata_version_id`), and an update's
+`targetVersionId` / `sourceVersionId` only as a JSON integer
+(`update_version_number`); either reader panics naming the file and the field
+on the other encoding. `NUMBER_ENCODED_VERSION_ID` is empty, and
+`live_vectors_record_their_version_id_encoding` reads every raw main and
+`resolve/NN` output and fails if a number-encoded `versionId` reappears.
 
-The pin is asserted in both directions: a number-encoded vector that is not
-listed fails by name rather than being absorbed by the encoding-tolerant read,
-and a listed vector that has since been fixed upstream also fails, telling the
-reader to delete the entry.
+### Vendor proofs
 
-### The stale update @context population
-
-`STALE_UPDATE_CONTEXT` (`src/test_vectors.rs`) pins the 17 vectors — every
-vector with an `update/` directory in the vendor suite as checked out — whose
-update files carry an `@context` that predates the spec's pinned array. The
-five without an `update/` directory (`mutinynet/k1/q5puld7y`,
-`mutinynet/x1/q5g3smvu`, `mutinynet/x1/qh66uy2s`, `regtest/k1/qgpakaw4`,
-`regtest/x1/q2fz9mz6`) carry no update and are not stale.
-
-`live_vectors_record_their_update_context` asserts the pin in both directions
-and asserts the count is exactly 17: a stale vector that is not listed fails by
-name rather than being absorbed by the derived skip; a listed vector that is now
-clean fails, telling the reader to delete the entry and re-raise
-`DRIVEN_FLOOR`'s Resolve entry; a partial regeneration trips the count. At the
-test-suite bump this list empties, the count pin drops, and the Resolve floor
-goes back up — the regeneration cannot be absorbed silently. A regenerated
-vector that still carries the old array stays honestly skipped rather than
-failing.
-
-Until the resolver rejects a non-pinned update `@context`, the seven anchored
-Resolve rows parked here would still pass; the skip lands before the reject so
-that no commit is red, and the label becomes literally true once the reject
-lands.
-
-Whether or not those rows are parked,
 `cryptosuite::tests::vendor_update_proofs_verify_under_this_cryptosuite`
 verifies every update-step `proofValue` of every positive, update-bearing
 vector as shipped in `output.json` (the key read from `sourceDocument`), so
 proofs produced by another implementation are checked by this crate's BIP340
-path directly (at least 17). The vectors are selected
-by that rule, not by an id list. A flipped-byte control proves the assertion
-bites.
+path directly: at least 156, every step of the 27 positive update-bearing sets
+on each network. The vectors are selected by that rule, not by an id list. A
+flipped-byte control proves the assertion bites.
 
 ### Synthetic corpora (`fixtures/layout/`)
 
-The regenerated test suite's layout (`resolve/NN/` cases, negative sets,
-`signals.json`, no `scenario.json`/`pending.json`/`funding.json`) is proven
-ahead of the submodule bump on small corpora under `fixtures/layout/`, each
+Small corpora in the suite's layout (`resolve/NN/` cases, negative sets,
+`signals.json`) live under `fixtures/layout/`, each
 `<name>/sets/{network}/{k1|x1}/{id}/` plus an optional
-`<name>/chain/{network}/{k1|x1}/{id}.json`. `fixtures/layout/README.md` records
-every set's provenance and what was copied, derived or hand-written.
+`<name>/chain/{network}/{k1|x1}/{id}.json`. They pin behaviour the checked-out
+suite does not exercise, or not in isolation. `fixtures/layout/README.md`
+records every set's provenance and what was copied, derived or hand-written.
 
 | Corpus | Set | What it proves | Tests |
 |---|---|---|---|
 | `options` | `mutinynet/k1/q5pew2jc` | the main pair plus eleven `resolve/NN` cases (`versionId` ×3, an unreachable `versionId` → `NOT_FOUND`, `versionTime` ×3, both → `INVALID_OPTIONS`, `minConf` too high → v1, `minConf` = a signal's exact count, `versionId` past deactivation → `NOT_FOUND`), driven off a real replayed chain; `confirmations` exactly equal at the pinned tip | `synthetic_options_*` |
-| `late-code` | `regtest/k1/qgph42l3` | a negative set recording `LATE_PUBLISHING_ERROR`: passes only with a `LATE_PUBLISHING_ERROR → LATE_PUBLISHING` entry in the divergence table it is given, fails without one | `synthetic_late_code_*`, `synthetic_unused_divergence_is_reported` |
+| `late-code` | `regtest/k1/qgph42l3` | a negative set recording `LATE_PUBLISHING_ERROR`: passes with the divergence table, fails without it | `synthetic_late_code_*`, `synthetic_unused_divergence_is_reported` |
 | `withheld` | `regtest/k1/qgph42l3` | update steps present, sidecar without them, expected `MISSING_UPDATE_DATA`: classified negative, not CAS | `synthetic_withheld_update_is_negative_not_cas`, `synthetic_negative_sets_skip_update_rows_as_expected_error` |
 | `below-min-conf` | `mutinynet/k1/q5pew2jc` | a positive set with `signals.json` whose main pair expects v1 (every signal below the default `minConf` at its recorded tip): its capture is replayed and cross-checked, and the walk probes, which need a version past genesis, do not run | `synthetic_signals_below_min_conf_resolve_at_genesis`, `walk_probes_apply_only_past_genesis` |
 | `withheld-genesis` | `mutinynet/x1/qh66uy2s` | an external set with no sidecar `genesisDocument` expecting `NOT_FOUND`: classified negative, its Resolve row driven with no genesis source, not left unclassified | `synthetic_withheld_genesis_is_driven_not_unclassified`, `a_positive_external_set_without_a_sidecar_genesis_is_not_drivable` |
@@ -312,7 +264,8 @@ every set's provenance and what was copied, derived or hand-written.
 `options`, `late-code`, `withheld` and `below-min-conf` were reshaped from the
 two minted captures (`minted/clean-rotating-beacons`,
 `minted/late-publishing-fork`); the `shapes` and `withheld-genesis` sets from
-checked-out `test-suite/` sets. Nothing was minted for them.
+sets of the test suite at `19f8d424`, which the checked-out suite no longer
+ships. Nothing was minted for them.
 `synthetic_chain_copies_equal_their_minted_source` holds each chain copy equal
 to its minted source on every chain field, and
 `synthetic_signals_record_the_capture_tip` holds the `options` set's
@@ -326,136 +279,67 @@ No synthetic set carries a signing key. Their `genesis-key`, `update-crypto`
 and `end-state` rows are therefore asserted through classification only; those
 kinds stay driven on the real vectors.
 
-## 4. The 22 upstream vectors
+`fixtures/layout/vendor-19f8d424/` is not a corpus: it holds byte copies of a
+few files of the test suite at `19f8d424`, read by unit tests that need a known
+resolved document (`read_vendor_copy`).
 
-Measured from each vector's own files: `ver` / `conf` / `deact` from
-`resolve/output.json.didDocumentMetadata`; `services` from the resolved
-document; `pending` = `pending.json` present; `sidecar` = `resolve/input.json`
-carries `resolutionOptions.sidecar.genesisDocument`; `delivery` from
-`scenario.json`. `resolve` is whether the resolve row is driven; `parked
-(StaleContext)` marks a row that was driven from `fixtures/chain/` and is
-skipped only until the regenerated suite is absorbed.
+## 4. The 59 upstream scenarios
 
-| Vector | ver | conf | deact | services | pending | sidecar | delivery | resolve |
-|---|---|---|---|---|---|---|---|---|
-| mutinynet/k1/q5p6w9su | 2 | - | true | 3× Singleton | no | - | - | parked (StaleContext) |
-| mutinynet/k1/q5pgeu9z | 2 | - | - | 3× Singleton + DIDCommMessaging | no | - | - | parked (StaleContext) |
-| mutinynet/k1/q5puld7y | 1 | - | - | 3× Singleton | no | - | - | DRIVEN |
-| mutinynet/x1/q425c5wf | 2 | - | - | 3× Singleton + SMT + DWN | no | yes | - | skipped |
-| mutinynet/x1/q4lqu6gr | 2 | - | - | 3× Singleton + SMT + DIDComm | YES | - | genesis=cas | skipped |
-| mutinynet/x1/q4rnhfhv | 2 | - | - | 3× Singleton + SMT + DWN | YES | - | genesis=cas | skipped |
-| mutinynet/x1/q4x4pxl2 | 2 | - | - | 3× Singleton + CAS + DIDComm | YES | - | genesis=cas, announcement=cas | skipped |
-| mutinynet/x1/q550pp4e | 2 | - | - | 3× Singleton + CAS + DWN | no | yes | - | skipped |
-| mutinynet/x1/q59jnwfs | 2 | - | - | 3× Singleton + CAS + DWN | YES | - | genesis=cas, announcement=cas | skipped |
-| mutinynet/x1/q5cfewep | 2 | - | - | 3× Singleton + SMT + DIDComm | no | yes | - | skipped |
-| mutinynet/x1/q5g3smvu | 1 | - | - | 3× Singleton | no | yes | - | DRIVEN |
-| mutinynet/x1/q5m2fh36 | 3 | - | true | 3× Singleton + DIDComm | YES | - | genesis=cas | skipped |
-| mutinynet/x1/q5ugrf3w | 2 | - | - | 3× Singleton + DWN | no | yes | - | parked (StaleContext) |
-| mutinynet/x1/qh66uy2s | 1 | - | - | (none) | no | - | genesis=cas | skipped |
-| mutinynet/x1/qkrrp544 | 2 | - | - | 3× Singleton + CAS + DIDComm | no | yes | - | skipped |
-| mutinynet/x1/qky9e7qz | 4 | - | true | 3× Singleton + DIDComm + DWN | YES | - | genesis=cas | skipped |
-| regtest/k1/qgpakaw4 | 1 | - | - | 3× Singleton | no | - | - | DRIVEN |
-| regtest/k1/qgppexmy | 2 | 93 | - | 3× Singleton | no | - | - | parked (StaleContext) |
-| regtest/k1/qgpy0hmm | 2 | 78 | - | 4× Singleton | no | - | - | parked (StaleContext) |
-| regtest/x1/q26jeds9 | 2 | 65 | - | 2× Singleton | no | yes | - | parked (StaleContext) |
-| regtest/x1/q2fz9mz6 | 1 | - | - | 1× Singleton | no | yes | - | DRIVEN |
-| regtest/x1/qfl7se8f | 2 | 53 | - | 1× Singleton | no | yes | - | parked (StaleContext) |
+Every network ships the same 59 scenarios, each under its own DIDs; the
+scenario is the leading segment of `other.json.scenarioId`. The table gives
+the regtest ids; the other networks' ids are in each network's `README.md`
+under `test-suite/`. `resolve/NN` counts the numbered resolve cases.
 
-### What distinguishes each vector
+| Scenarios | Expected | Class | resolve row | update rows |
+|---|---|---|---|---|
+| 01, 03 | v1 | genesis-only, no chain needed | driven | none |
+| 02, 04, 07, 13–19, 21–24, 26 | v2–v4 | Singleton beacons, captured | driven off the capture | driven |
+| 05 | v1 | external, no sidecar genesis, no beacon | `CasDelivery` | none |
+| 06, 08, 20 | v2–v4 | CAS-delivered updates | `CasDelivery` | driven |
+| 09a/b, 10a/b | v2 | `CASBeacon` | `CasDelivery`, `UnsupportedBeaconType` | driven |
+| 11a/b | v2 | `SMTBeacon`, CAS-delivered update | `CasDelivery`, `SmtDelivery`, `UnsupportedBeaconType` | driven |
+| 12a/b, 25a | v2 | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | driven |
+| 25b, 25c | v1 | `SMTBeacon`, genesis-only | `SmtDelivery`, `UnsupportedBeaconType` | none |
+| n01–n04 | `INVALID_DID` | genesis-only, raised before any request | driven | none |
+| n05, n10–n28 | `MISSING_UPDATE_DATA`, `INVALID_DID_UPDATE`, `LATE_PUBLISHING_ERROR` | Singleton beacons, captured | driven off the capture | `ExpectedError` |
+| n29–n31 | `INVALID_SIGNAL_DATA`, `MISSING_UPDATE_DATA` | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | `ExpectedError` |
 
-Skip reasons below are the derived ones, in the rule's own terms.
+The scenarios with `resolve/NN` cases: 21 (one), 22 (ten on regtest, nine
+elsewhere; regtest's tenth is a `minConf` that holds only at `recordedTip`),
+23 (one, `versionTime`), 24 (one) and 26 (one) — 53 rows over the four
+networks. Every scenario ships `signals.json` except 01, 03, 05 and n01–n04;
+the 14 CAS/SMT-beacon scenarios are all cohort members.
 
-- **mutinynet/k1/q5p6w9su** — the only vector that ends deactivated (parked
-  under `StaleContext` until the regeneration lands); its deactivation
-  short-circuit is exercised against a captured chain once driven.
-- **mutinynet/k1/q5pgeu9z** — the only vector whose resolved document adds a
-  DIDComm endpoint alongside its beacons (parked under `StaleContext` until the
-  regeneration lands): a non-beacon service does not disturb the beacon walk.
-- **mutinynet/k1/q5puld7y** — the only key-based mutinynet vector that stays at
-  version 1; genesis derived from the key, no update step, no sidecar.
-- **mutinynet/x1/q425c5wf** — SMT beacon plus a web-node service, sidecar
-  genesis, no pending updates and no delivery recipe: both its skip reasons
-  (`SmtDelivery`, `UnsupportedBeaconType`) come from the beacon type alone. Its
-  twin `q5cfewep` differs only in pairing the SMT beacon with DIDComm.
-- **mutinynet/x1/q4lqu6gr** — one of the two rows carrying all four skip reasons
-  at once (pending updates, a CAS-delivered genesis, an SMT beacon, and an
-  unqueryable beacon type); pairs its SMT beacon with DIDComm.
-- **mutinynet/x1/q4rnhfhv** — the other all-four-reasons row; identical to
-  `q4lqu6gr` except that its non-beacon service is a web node.
-- **mutinynet/x1/q4x4pxl2** — one of the two vectors whose *announcement* as well
-  as genesis is CAS-aggregated, on top of a CAS beacon and pending updates;
-  pairs with DIDComm.
-- **mutinynet/x1/q550pp4e** — CAS beacon with a sidecar genesis and no pending
-  updates and no recipe: skipped on beacon type alone, the CAS mirror of
-  `q425c5wf`. Pairs its CAS beacon with a web node.
-- **mutinynet/x1/q59jnwfs** — the other CAS-on-both-ends vector; identical to
-  `q4x4pxl2` except that its non-beacon service is a web node.
-- **mutinynet/x1/q5cfewep** — SMT beacon with a sidecar genesis, no pending and
-  no recipe, paired with DIDComm; the DIDComm twin of `q425c5wf`.
-- **mutinynet/x1/q5g3smvu** — the only driven *external* mutinynet vector that
-  never leaves genesis: proof that an out-of-band genesis document resolves at
-  version 1 with no chain data at all.
-- **mutinynet/x1/q5m2fh36** — reaches version 3 through two numbered update steps
-  and ends deactivated; one of only three skipped rows with no unsupported beacon
-  type — it is skipped for pending updates and a CAS-delivered genesis only.
-- **mutinynet/x1/q5ugrf3w** — the only vector whose resolved document carries a
-  web-node service, and the only mutinynet vector that combines a sidecar
-  genesis with an on-chain update (parked under `StaleContext` until the
-  regeneration lands).
-- **mutinynet/x1/qh66uy2s** — the only vector whose resolved document declares no
-  services at all, and the only row with exactly one skip reason: its genesis is
-  CAS-delivered by recipe, with no beacon in the document to say so.
-- **mutinynet/x1/qkrrp544** — CAS beacon with a sidecar genesis, no pending and
-  no recipe, paired with DIDComm; the DIDComm twin of `q550pp4e`.
-- **mutinynet/x1/qky9e7qz** — the deepest chain in the suite: version 4 through
-  three numbered update steps, ending deactivated, and the only vector carrying
-  both a DIDComm endpoint and a web node.
-- **regtest/k1/qgpakaw4** — the only key-based regtest vector at version 1;
-  genesis derived from the key, so it is driven with no chain capture at all.
-- **regtest/k1/qgppexmy** — the earliest-anchored regtest signal (height 666) and
-  therefore the largest stated confirmation count in the suite, 93.
-- **regtest/k1/qgpy0hmm** — the only vector with four Singleton beacons; its 78
-  confirmations were captured against the export's tip, 758.
-- **regtest/x1/q26jeds9** — the only vector with exactly two Singleton beacons;
-  external DID resolved from a sidecar genesis, signal at height 694 for 65
-  confirmations.
-- **regtest/x1/q2fz9mz6** — the smallest document in the suite: one Singleton
-  beacon, externally supplied genesis, no update step.
-- **regtest/x1/qfl7se8f** — the single-beacon update case: one beacon address in
-  its capture, the latest regtest signal (height 706) and the smallest stated
-  confirmation count, 53.
+Regtest ids, by scenario:
 
-### Driven versus skipped
+| Scenario | Id | Scenario | Id | Scenario | Id |
+|---|---|---|---|---|---|
+| 01-k1-base | `k1/qgp45a3y` | 16-x1-beacon-add-then-use | `x1/qt04c7dn` | n10-k1-invalid-update-context-member | `k1/qgp040ju` |
+| 02-k1-sidecar-update | `k1/qgph7nre` | 17-x1-vm-add-rotate-authentication | `x1/qg935lwg` | n11-k1-invalid-update-context-order | `k1/qgpejq0v` |
+| 03-x1-base | `x1/qf5zrqc4` | 18-x1-embedded-invocation-key | `x1/qtrhj3w0` | n12-k1-invalid-update-proof-context | `k1/qgpnkuln` |
+| 04-x1-sidecar-update | `x1/q2z78yxz` | 19-x1-relative-ids | `x1/qtk24dpv` | n13-k1-invalid-update-capability-action | `k1/qgpf5yjw` |
+| 05-x1-no-beacon | `x1/qghp0w22` | 20-k1-cas-update | `k1/qgphrh53` | n14-k1-invalid-update-capability-encoding | `k1/qgpw65qy` |
+| 06-x1-cas-3-updates | `x1/qfgeftze` | 21-k1-deactivate-then-update | `k1/qgpgm6kn` | n15-k1-invalid-update-proof-purpose | `k1/qgp6fp4d` |
+| 07-k1-sidecar-deactivate | `k1/qgpx06u2` | 22-x1-three-updates-resolution-options | `x1/qg4zny9h` | n16-x1-invalid-update-unauthorized-method | `x1/qty0lp74` |
+| 08-x1-cas-update-deactivate | `x1/qtg5vcwk` | 23-k1-duplicate-signal | `k1/qgp0enf0` | n17-k1-invalid-update-unknown-method | `k1/qgp5wcmx` |
+| 09a-x1-cas-update-announcement | `x1/qg5kgjm0` | 24-k1-removed-beacon-signal | `k1/qgpz0cp4` | n18-k1-invalid-update-proof-value | `k1/qgp2ht79` |
+| 09b-…-paired | `x1/qfmlfxut` | 25a-x1-smt-update-no-nonce | `x1/qfqxmcf0` | n19-k1-invalid-update-source-hash | `k1/qgpmreat` |
+| 10a-x1-sidecar-update-cas-announcement | `x1/qgxluz9h` | 25b-x1-smt-nonce-no-update | `x1/qtcszm9j` | n20-k1-invalid-update-target-hash | `k1/qgp3e09g` |
+| 10b-…-paired | `x1/qtxu0aj9` | 25c-x1-smt-empty-index | `x1/q2tyuy6t` | n21-k1-invalid-update-version-skip | `k1/qgpxl5uu` |
+| 11a-x1-cas-update-smt-proof | `x1/qfgm2swr` | 26-k1-signal-below-current-height | `k1/qgpqx326` | n22-k1-invalid-update-patch-missing-path | `k1/qgp5fh0e` |
+| 11b-…-paired | `x1/qfzppzx5` | n01-k1-invalid-did-checksum | `k1/qgp0hy8c` | n23-k1-invalid-update-patch-changes-id | `k1/qgpl0zen` |
+| 12a-x1-sidecar-update-smt-proof | `x1/qfwwah7z` | n02-x1-invalid-did-padding | `x1/qfrgktt6` | n24-k1-invalid-update-patch-invalid-document | `k1/qgpq3zd0` |
+| 12b-…-paired | `x1/qf9ruh87` | n03-k1-invalid-did-network-nibble | `k1/qcp0cg86` | n25-k1-invalid-update-created-after-block | `k1/qgpq4wrg` |
+| 13-k1-update-p2wpkh | `k1/qgpseq0v` | n04-x1-genesis-hash-mismatch | `x1/qgaglc0d` | n26-k1-invalid-update-expires-before-mediantime | `k1/qgp33y4v` |
+| 14-k1-update-p2tr | `k1/qgpw4847` | n05-x1-missing-update-data | `x1/qfuuz6h4` | n27-k1-invalid-update-expires-before-created | `k1/qgpp9e44` |
+| 15-x1-beacon-rotation | `x1/qfaqdrxu` | | | n28-k1-late-publishing | `k1/qgpepnx0` |
+| | | | | n29-x1-smt-proof-hash | `x1/qgncuznq` |
+| | | | | n30-x1-smt-proof-root-id | `x1/qf0zm452` |
+| | | | | n31-x1-smt-proof-withheld | `x1/qttq27ml` |
 
-Four resolve rows are driven: `mutinynet/k1/q5puld7y`, `mutinynet/x1/q5g3smvu`,
-`regtest/k1/qgpakaw4`, `regtest/x1/q2fz9mz6` — the genesis-era vectors, which
-carry no update and so cannot be stale. The other 18 are skipped:
-
-- **11** — a CAS or SMT beacon in the document, and/or an aggregated delivery
-  recipe, and/or a `pending.json` (all mutinynet; these carry `StaleContext`
-  too, since every one has an `update/` directory).
-- **7 newly parked** — plain Singleton beacons, nothing aggregated, nothing
-  pending, formerly driven from `fixtures/chain/`: `q5p6w9su`, `q5pgeu9z`,
-  `q5ugrf3w` on mutinynet and `qgppexmy`, `qgpy0hmm`, `q26jeds9`, `qfl7se8f` on
-  regtest. Skipped under `StaleContext` alone until the regenerated suite is
-  absorbed.
-
-The four regtest rows `qgppexmy`, `qgpy0hmm`, `q26jeds9`, `qfl7se8f` are the
-only skipped resolve rows that are not mutinynet.
-
-The five skip-reason counts attribute to rows exactly:
-
-| Reason | Count | Rows |
-|---|---|---|
-| `Unanchored` | 6 | the 6 rows with `pending` = YES |
-| `SmtDelivery` | 4 | the 4 rows with an SMT beacon (`q425c5wf`, `q4lqu6gr`, `q4rnhfhv`, `q5cfewep`); no vector declares an `smt` delivery recipe |
-| `CasDelivery` | 9 | the 4 rows with a CAS beacon ∪ the 7 rows with a `cas` delivery recipe (`q4x4pxl2` and `q59jnwfs` are in both) |
-| `UnsupportedBeaconType` | 8 | the 4 SMT-beacon rows + the 4 CAS-beacon rows |
-| `StaleContext` | 17 | every vector with an `update/` directory |
-
-Their union is the 18 skipped rows: the 11 the first four reasons cover (each
-of which also carries `StaleContext`), plus the 7 that `StaleContext` alone
-parks.
+`negative_vectors_carry_their_expected_error` pins the 27 negative scenarios
+per network (n01–n05, n10–n31) and checks each one's `resolve/output.json`
+carries its `didResolutionMetadata.error` and no document.
 
 ### `k1` versus `x1`
 
@@ -464,16 +348,17 @@ the key. `x1` is an external DID, whose genesis document must be supplied out of
 band — which is why the external vectors carry
 `resolutionOptions.sidecar.genesisDocument`.
 
-Sidecar presence is **not** what decides whether a vector is driven:
-`q425c5wf`, `q550pp4e`, `q5cfewep` and `qkrrp544` all carry a sidecar genesis and
-are still skipped, on beacon-type grounds.
+Sidecar presence is **not** what decides whether a vector is driven: the
+`SMTBeacon` and `CASBeacon` scenarios with a sidecar genesis (10a/b, 12a/b,
+25a–c, n29–n31) are still skipped, on beacon-type grounds.
 
 ### Update-step layout
 
-`q5m2fh36` has update steps `01 02`; `qky9e7qz` has `01 02 03`; every other
-update-bearing vector has a single flat `update/input.json` +
-`update/output.json` pair. Five vectors are genesis-only with no `update/` at
-all: `q5puld7y`, `q5g3smvu`, `qh66uy2s`, `qgpakaw4`, `q2fz9mz6`.
+Scenarios 08, 15, 16, 17, 21, 23, 24, 26 and n28 have update steps `01 02`;
+06 and 22 have `01 02 03`; every other update-bearing scenario has a single
+flat `update/input.json` + `update/output.json` pair.
+Nine scenarios are genesis-only with no `update/` at all: 01, 03, 05, 25b, 25c
+and n01–n04.
 
 ## 5. Minted scenarios
 
@@ -493,83 +378,66 @@ checked out.
 
 ## 6. Chain fixtures
 
-`fixtures/chain/` holds 9 captures: 7 vendor captures,
-one per anchored past-genesis vector (all seven parked under `StaleContext`
-until the regeneration lands), plus the 2 minted scenarios. `addrs` is the number of beacon
-addresses captured; `signals` is the number of OP_RETURN announcements found.
+`fixtures/chain/` holds 142 captures: 140 vendor captures, one for each of the
+35 captured scenarios on each network (the 15 positive ones 02, 04, 07, 13–19,
+21–24, 26 and the 20 negative ones n05, n10–n28), plus the 2 minted scenarios.
+`ALL_CHAIN_FIXTURES` (`src/test_vectors.rs`) lists them, and the vendor part is
+exactly `chain-capture`'s `DRIVABLE_VECTORS`.
 
-| Fixture | network | endpoint | tip | addrs | signals | signal heights |
-|---|---|---|---|---|---|---|
-| mutinynet/k1/q5p6w9su.json | mutinynet | https://mutinynet.com/api | 3307267 | 3 | 1 | 3190760 |
-| mutinynet/k1/q5pgeu9z.json | mutinynet | https://mutinynet.com/api | 3307267 | 3 | 1 | 3190760 |
-| mutinynet/x1/q5ugrf3w.json | mutinynet | https://mutinynet.com/api | 3307267 | 3 | 1 | 3190760 |
-| regtest/k1/qgppexmy.json | regtest | http://localhost:3000 | 758 | 4 | 1 | 666 |
-| regtest/k1/qgpy0hmm.json | regtest | http://localhost:3000 | 758 | 4 | 1 | 681 |
-| regtest/x1/q26jeds9.json | regtest | http://localhost:3000 | 758 | 2 | 1 | 694 |
-| regtest/x1/qfl7se8f.json | regtest | http://localhost:3000 | 758 | 1 | 1 | 706 |
-| minted/clean-rotating-beacons.json | mutinynet | https://mutinynet.com/api | 3443751 | 4 | 3 | 3443744, 3443745, 3443746 |
-| minted/late-publishing-fork.json | regtest | http://localhost:3000 | 778 | 3 | 2 | 771, 773 |
+| Network | endpoint | captures | tip | addrs | signals |
+|---|---|---|---|---|---|
+| regtest | http://localhost:3000 | 35 | 601 | 3–4 | 1–3 |
+| mutinynet | https://mutinynet.com/api | 35 | 3449794–3449804, per set | 3–4 | 1–3 |
+| signet | https://mempool.space/signet/api | 35 | 323394 | 3–4 | 1–3 |
+| testnet4 | https://mempool.space/testnet4/api | 35 | 153720 | 3–4 | 1–3 |
+| minted/clean-rotating-beacons | https://mutinynet.com/api | 1 | 3443751 | 4 | 3 (3443744, 3443745, 3443746) |
+| minted/late-publishing-fork | http://localhost:3000 | 1 | 778 | 3 | 2 (771, 773) |
 
-The other 4 driven vectors (`q5puld7y`, `q5g3smvu`, `qgpakaw4`, `q2fz9mz6`) are
-genesis-only and need no capture.
+`addrs` is the number of beacon addresses captured; `signals` is the number of
+OP_RETURN announcements found. The other scenarios need no capture: 01, 03 and
+n01–n04 resolve without a chain, and the CAS/SMT scenarios are not driven.
 
-### The vendor regtest captures share one tip
+### Captures pin to each set's `recordedTip`
 
-The four regtest vendor captures share one tip, 758 — the Polar export's tip as
-shipped — and that is exactly what makes the vectors' stated confirmations agree.
-`tip - signal_height + 1` gives 758−666+1 = 93, 758−681+1 = 78, 758−694+1 = 65
-and 758−706+1 = 53, matching the 93 / 78 / 65 / 53 in the vector table.
+Every set records its `recordedTip` in `signals.json`, the chain tip its outputs
+were recorded against. The capture tool reads the chain with the tip pinned to
+that value and writes it as the fixture's `tip_height`, so the replayed
+`confirmations` reproduce what the set records however far the live chain has
+moved. On regtest every set shares 601, the Polar export's tip as shipped; on
+signet and testnet4 every set shares one tip; on mutinynet each set carries its
+own. Every positive output records `confirmations`, compared as at least the
+recorded value; a replayed positive pair that records none fails by name.
 
-Mining on a fresh unpack of that export is how the `late-publishing-fork`
-scenario below was produced (the `clean` scenario now lives on mutinynet); the
-vendor rows replay from their files regardless of what any live chain does. Re-capturing a vendor regtest vector needs a fresh unpack, since its
-`confirmations` only reproduce from the untouched tip.
-
-The three mutinynet captures share tip 3307267 and all announce at height
-3190760. Mutinynet vector outputs state no `confirmations`, so those rows assert
-confirmations by provenance — derived from the most-recently-applied update's
-captured block — rather than against a stated number. Only a main pair is
-checked that way: the latest captured signal is the applied one only for the
-full walk, so a positive `resolve/NN` case that records no `confirmations`
-fails by name.
+To re-capture, see [crates/chain-capture/README.md](./crates/chain-capture/README.md)
+and [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
 
 ### `versionTime` probes need the announcements' blocks
 
 A `versionTime` bound is compared against the announcing block's `mediantime`
 (resolve.md "Process Next Update" step 4, footnote 5), which only a
 `/block/{hash}` body carries. The capture tool records that body for every
-announcement it finds, whether or not the resolve asked for it. The two minted
-captures carry their blocks, so their versionTime probes run. The seven vendor
-captures predate that and hold no `blocks`, so the replay tests' versionTime
-probe skips on each of them — printing `SKIP: … no /block/{hash} body` — and
-the set is pinned in `test_vectors::FIXTURES_WITHOUT_SIGNAL_BLOCKS`, checked in
-both directions by `chain_fixture_signal_block_ledger_is_exact`. Those seven
-cannot be re-captured until the upstream regeneration lands: they are in
-`STALE_UPDATE_CONTEXT`, and a live capture rejects their pre-pin update
-`@context`. Once re-captured, the blocks fill in and the ledger test fails by
-name; delete the id from the list and the probe runs again. The versionTime
-rule itself is covered by the in-memory resolver tests (`version_time_*`) and
-the client's `resolve_evaluates_version_time_against_the_fetched_mediantime`.
+announcement it finds, whether or not the resolve asked for it, and every
+committed capture carries them. A capture missing one fails by name, naming the
+set and the block (`version_time_probe_bound_panics_naming_a_missing_block`).
+The versionTime rule itself is also covered by the in-memory resolver tests
+(`version_time_*`) and the client's
+`resolve_evaluates_version_time_against_the_fetched_mediantime`.
 
 ### `minConf` and the minted captures
 
 The resolver processes a beacon signal only once it has
 `resolutionOptions.minConf` confirmations — six by default — measured as
-`tip - signal_height + 1` against the tip the fixture pins. Every vendor capture
-clears that by a wide margin. The two minted captures are settled: the mint
-tool mines (on regtest) or waits for (on a public chain) `SETTLEMENT_BLOCKS`
-(5) past the last announcement before it captures, so the committed tips
-(3443751 for the clean chain on mutinynet, whose last announcement is at
-3443746; 778 for the fork on regtest, whose last announcement is at 773) give
-the last signal exactly six confirmations, and
+`tip - signal_height + 1` against the tip the fixture pins. The two minted
+captures are settled: the mint tool mines (on regtest) or waits for (on a
+public chain) `SETTLEMENT_BLOCKS` (5) past the last announcement before it
+captures, so the committed tips (3443751 for the clean chain on mutinynet,
+whose last announcement is at 3443746; 778 for the fork on regtest, whose last
+announcement is at 773) give the last signal exactly six confirmations, and
 `minted_chain_sequences_updates_across_rotating_beacons` and
 `minted_fork_raises_late_publishing` run under the default. A re-mint that
 skipped the settling step would stop the walk short under the default and fail
 those replays. Re-mint with the Part 3 commands in
 [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
-
-To re-capture, see [crates/chain-capture/README.md](./crates/chain-capture/README.md)
-and [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).
 
 ### Spec-form fixtures
 
@@ -636,8 +504,8 @@ A resolver step may also return `ResolverState::BlockRequests` — one
 `GET /block/{hash}` per block whose `mediantime` a proof's `expires` check
 needs. The harness serves those from the fixture's optional `blocks` map (key:
 the hash; value: the `/block/{hash}` body) and fails by name with a re-capture
-hint if the map lacks the block. No committed fixture carries the key today: no
-vector or minted proof carries `created` or `expires`.
+hint if the map lacks the block. Every committed capture carries the map; the
+n25–n27 scenarios' proofs carry `created` / `expires`.
 
 Tests worth grepping for:
 
@@ -650,7 +518,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 104 `#[test]` functions; `src/test_vectors.rs` holds 151.
+`src/resolver.rs` holds 123 `#[test]` functions; `src/test_vectors.rs` holds 153.
 
 ## 8. When `test-suite/` is absent
 

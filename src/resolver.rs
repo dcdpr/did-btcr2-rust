@@ -1121,9 +1121,8 @@ mod tests {
     use crate::document::Document;
     use crate::test_vectors::{
         AnnouncementDelivery, AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR,
-        ERROR_CODE_DIVERGENCES, FIXTURES_WITHOUT_SIGNAL_BLOCKS, GenesisDelivery,
-        NUMBER_ENCODED_VERSION_ID, Outcome, RowKey, SKIP_OVERRIDES, SkipOverride, SkipReason,
-        Vector, VectorIdType, confirmations_at_least, confirmations_exact, discover_in,
+        ERROR_CODE_DIVERGENCES, GenesisDelivery, Outcome, RowKey, SKIP_OVERRIDES, SkipOverride,
+        SkipReason, Vector, VectorIdType, confirmations_at_least, confirmations_exact, discover_in,
         expected_driven_with, expected_emitted_code, field_hex, field_nonzero_version_id,
         field_str, field_u64, field_version_id, fixture_announcements, network_dirs_with_vectors,
         parse_outcome, read_chain_fixture, read_chain_fixture_in, read_vendor_copy,
@@ -2219,8 +2218,8 @@ mod tests {
     /// `observed` is filled after the drive, and `reconcile_driven` compares it
     /// with the ledger's expectation for `AssertionKind::Resolve`. The rows that
     /// are NOT driven are enumerated by the vector ledger as
-    /// skipped-with-reason (`Unanchored`, `CasDelivery`, `SmtDelivery`,
-    /// `UnsupportedBeaconType`); its summary table is the place to read the
+    /// skipped-with-reason (`CasDelivery`, `SmtDelivery`,
+    /// `UnsupportedBeaconType`, `ExpectedError`); its summary table is the place to read the
     /// coverage story, not a narrative in this comment.
     ///
     /// Observation-dependent metadata is whitelisted: `deactivated` is asserted
@@ -2229,17 +2228,13 @@ mod tests {
     /// presence/type when present, NEVER by literal value. `confirmations` stays
     /// type-only in the whitelist that runs for EVERY discovered vector, and is
     /// additionally asserted on a driven ON-CHAIN row: as AT LEAST the vector's
-    /// stated number where it states one, and by PROVENANCE (derived from the
-    /// most-recently-applied update's captured block height) on the older
-    /// mutinynet vectors, which state none. It is a fixed input rather than a
+    /// stated number, which every replayed positive pair must state. It is a
+    /// fixed input rather than a
     /// drifting observation because the captured tip is pinned into the
-    /// resolution options. `versionId` carries three separate checks: it is
-    /// READ through `version_id_u64`, which accepts the specification's string
-    /// encoding and the known-defective number encoding and panics on anything
-    /// else; its ENCODING is pinned to `NUMBER_ENCODED_VERSION_ID`, the explicit
-    /// set of known-bad fixtures, in both directions; and on a driven row the
-    /// resolved value is COMPARED against the vector's stated one, as a string
-    /// where the vector encodes it as one. The crate's own emit-a-string /
+    /// resolution options. `versionId` is READ by discovery through the strict
+    /// string reader `metadata_version_id`, which refuses a JSON number by
+    /// path, and on a driven row the resolved value is COMPARED against the
+    /// vector's recorded string. The crate's own emit-a-string /
     /// reject-a-number contract is pinned by the fixture-independent
     /// `DocumentMetadata` round-trip test in `document.rs`.
     ///
@@ -2281,28 +2276,20 @@ mod tests {
     /// The `versionTime` a replay probe resolves at: one second before the
     /// earliest `mediantime` among the blocks confirming the capture's
     /// announcements, which is inside the walk's reach but before its first
-    /// update. `None`, with a `SKIP` line naming the block and the re-capture
-    /// command, when the fixture holds no `/block/{hash}` body to read that
-    /// mediantime from — a capture taken before the tool recorded blocks. The
-    /// set of such fixtures is pinned by `FIXTURES_WITHOUT_SIGNAL_BLOCKS`, so
-    /// the skip is a ledger entry rather than a silent loss, and a re-capture
-    /// turns the probe back on.
-    fn version_time_probe_bound(f: &ChainFixture, id: &str) -> Option<DateTime<Utc>> {
+    /// update.
+    ///
+    /// **Panics** naming the set and the block when the capture holds no
+    /// `/block/{hash}` body for one of its announcements: the capture tool
+    /// records every announcement's block, so a missing one is a defective
+    /// capture, not a probe to skip.
+    fn version_time_probe_bound(f: &ChainFixture, id: &str) -> DateTime<Utc> {
         match f.earliest_signal_mediantime() {
-            Ok(earliest) => Some(ts(earliest - 1)),
-            Err(missing) => {
-                assert!(
-                    FIXTURES_WITHOUT_SIGNAL_BLOCKS.contains(&id),
-                    "{id}: the capture holds no `/block/{missing}` body and is not listed in \
-                     FIXTURES_WITHOUT_SIGNAL_BLOCKS"
-                );
-                eprintln!(
-                    "SKIP: {id}: the versionTime probe compares against block mediantimes and \
-                     the capture holds no `/block/{missing}` body; re-run capture to record the \
-                     announcements' blocks"
-                );
-                None
-            }
+            Ok(earliest) => ts(earliest - 1),
+            Err(missing) => panic!(
+                "{id}: the versionTime probe compares against block mediantimes and the \
+                 capture holds no `/block/{missing}` body; re-run capture to record the \
+                 announcements' blocks"
+            ),
         }
     }
 
@@ -2342,29 +2329,23 @@ mod tests {
     /// The chain snapshot a set's resolves replay, or `None` for a set resolved
     /// with no signals fed.
     ///
-    /// A set that carries `signals.json` always replays its capture, even for a
-    /// genesis-state case: `confirmations: 0` needs the recorded tip. Before
+    /// A set replays a capture exactly when it carries `signals.json`, even for
+    /// a genesis-state case: `confirmations: 0` needs the recorded tip. Before
     /// anything is driven, the announcements that capture serves must equal
     /// `signals.json` exactly ([`signals_match`]), so a replay can never pass on
     /// a chain other than the one the set records. A set without `signals.json`
-    /// keeps the older rule: it replays a capture only when its main pair
-    /// expects a version past genesis.
+    /// records no chain and is resolved with no signals fed.
     fn replay_fixture(vector: &Vector) -> Option<ChainFixture> {
         let id = &vector.id;
-        if let Some(signals) = &vector.signals {
-            let fixture = read_chain_fixture_in(&vector.corpus.chain, id);
-            signals_match(&signals.entries, &fixture_announcements(&fixture)).unwrap_or_else(|e| {
-                panic!(
-                    "{id}: signals.json and the replayed chain disagree — {e}. Re-capture \
-                         the set rather than editing either file"
-                )
-            });
-            return Some(fixture);
-        }
-        vector
-            .expected_version_id()
-            .is_some_and(|version| version > 1)
-            .then(|| read_chain_fixture_in(&vector.corpus.chain, id))
+        let signals = vector.signals.as_ref()?;
+        let fixture = read_chain_fixture_in(&vector.corpus.chain, id);
+        signals_match(&signals.entries, &fixture_announcements(&fixture)).unwrap_or_else(|e| {
+            panic!(
+                "{id}: signals.json and the replayed chain disagree — {e}. Re-capture \
+                     the set rather than editing either file"
+            )
+        });
+        Some(fixture)
     }
 
     /// The resolution options a resolve input asks for: its
@@ -2393,23 +2374,14 @@ mod tests {
     /// content-addressed storage — asserting resolve logic while silently
     /// bypassing the delivery mechanism and leaving no row to mark the gap.
     ///
-    /// Some vectors omit `resolutionOptions.sidecar` entirely (of the driven
-    /// rows, `mutinynet/k1/q5puld7y`): a resolve with nothing supplied out of
-    /// band. Indexing yields `Value::Null`, which does not deserialize, so an
-    /// absent sidecar is normalized to `{}` — the same empty `SidecarData`. That
-    /// is a normalization of the INPUT VALUE, not a second assembly, and the
-    /// capture tool applies the same rule, split the same way on whether the
-    /// set records its signals:
-    ///
-    /// - A set with `signals.json` (`recorded_signals`) may omit the sidecar,
-    ///   replayed or not. The capture tool reads it as `{}` too: for these sets
-    ///   the gate is the signals record, not the sidecar, so an empty sidecar
-    ///   is not vacuous — and a set whose update is withheld on purpose ships
-    ///   none.
-    /// - A replayed set WITHOUT `signals.json` must carry the object. The
-    ///   capture tool refuses an absent sidecar on those sets, because a capture
-    ///   validated against zero updates would pass vacuously, and their beacon
-    ///   signals announce update hashes that are delivered out of band.
+    /// Some vectors omit `resolutionOptions.sidecar` entirely: a resolve with
+    /// nothing supplied out of band. Indexing yields `Value::Null`, which does
+    /// not deserialize, so an absent sidecar is normalized to `{}` — the same
+    /// empty `SidecarData`. That is a normalization of the INPUT VALUE, not a
+    /// second assembly, and the capture tool reads an absent sidecar as `{}`
+    /// too. A replayed set always records its signals ([`replay_fixture`]), so
+    /// the gate is the signals record, not the sidecar: an empty sidecar is not
+    /// vacuous, and a set whose update is withheld on purpose ships none.
     ///
     /// Pinning the replay tip is what makes `confirmations` a fixed input
     /// rather than a moving observation. With no capture there is no tip, as
@@ -2417,17 +2389,10 @@ mod tests {
     fn case_options(
         input: &serde_json::Value,
         fixture: Option<&ChainFixture>,
-        recorded_signals: bool,
         ctx: &str,
     ) -> ResolutionOptions {
         let requested = &input["resolutionOptions"];
         let sidecar_json = requested["sidecar"].clone();
-        assert!(
-            fixture.is_none() || recorded_signals || sidecar_json.is_object(),
-            "{ctx}: a replayed resolve of a set without signals.json must carry a \
-             resolutionOptions.sidecar object — its beacon signals announce update hashes \
-             that are delivered out of band"
-        );
         let sidecar_json = if sidecar_json.is_null() {
             serde_json::json!({})
         } else {
@@ -2503,15 +2468,9 @@ mod tests {
     /// [`version_id_matches`]: as a string when the output encodes it as one.
     /// `deactivated` by value. `confirmations` as AT LEAST the recorded number
     /// ([`confirmations_at_least`]) — a recorded value was taken at the set's
-    /// recorded tip, and a later tip only adds confirmations. A replayed MAIN
-    /// PAIR that records no `confirmations` (the older mutinynet layout) is
-    /// checked by PROVENANCE instead; a positive `resolve/NN/` case must record
-    /// the number, since a case stopping mid-walk did not apply the latest
-    /// signal: the resolver's value must derive from the
-    /// most-recently-applied update's captured block. That is a consistency
-    /// check on a single-signal row, where there is only one height it could
-    /// have used, and a real "did it pick the LATEST?" test on a multi-signal
-    /// chain.
+    /// recorded tip, and a later tip only adds confirmations. A replayed
+    /// positive pair, main or `resolve/NN/`, must record the number: one that
+    /// records none fails by name.
     ///
     /// Observation-dependent `updated` and `created` are never compared by
     /// value.
@@ -2532,10 +2491,7 @@ mod tests {
         let result: Result<ResolutionResult, String> =
             match field_str(&input, "did", &ctx).parse::<Did>() {
                 Err(e) => Err(emitted_code(&Btcr2Error::from(e), &ctx)),
-                Ok(did) => match Document::resolve(
-                    &did,
-                    case_options(&input, fixture, vector.signals.is_some(), &ctx),
-                ) {
+                Ok(did) => match Document::resolve(&did, case_options(&input, fixture, &ctx)) {
                     Err(e) => Err(emitted_code(&e, &ctx)),
                     Ok(resolver) => match fixture {
                         Some(f) => drive_to_resolved_from_capture(resolver, f, id),
@@ -2595,42 +2551,15 @@ mod tests {
                 );
 
                 if let Some(f) = fixture {
-                    match confirmations {
-                        Some(_) => confirmations_at_least(
-                            result.document_metadata.confirmations,
-                            *confirmations,
-                        )
+                    assert!(
+                        confirmations.is_some(),
+                        "{ctx}: a replayed positive resolve must record \
+                         didDocumentMetadata.confirmations"
+                    );
+                    confirmations_at_least(result.document_metadata.confirmations, *confirmations)
                         .unwrap_or_else(|e| {
                             panic!("{ctx}: {e} (replayed at tip {})", f.tip_height)
-                        }),
-                        None => {
-                            // Provenance names the latest signal, which is the
-                            // applied one only for the main pair's full walk; a
-                            // case stopping mid-walk would be checked against
-                            // the wrong block.
-                            assert!(
-                                case_dir == "resolve",
-                                "{ctx}: a positive resolve/NN case must record \
-                                 didDocumentMetadata.confirmations — only the main pair can \
-                                 be checked by provenance from the latest captured signal"
-                            );
-                            let signal = f.latest_signal().unwrap_or_else(|| {
-                                panic!("{ctx}: the captured fixture must carry a beacon signal")
-                            });
-                            let derived = f
-                                .tip_height
-                                .saturating_sub(signal.block_height)
-                                .saturating_add(1);
-                            assert_eq!(
-                                result.document_metadata.confirmations,
-                                Some(derived),
-                                "{ctx}: resolved confirmations must derive from the \
-                                 most-recently-applied update's block ({} at tip {})",
-                                signal.block_height,
-                                f.tip_height
-                            );
-                        }
-                    }
+                        });
                 }
                 result.document_metadata.confirmations
             }
@@ -2653,8 +2582,8 @@ mod tests {
     /// 2. A `versionTime` one second before the earliest announcing block's
     ///    `mediantime` must return version 1 and that same genesis document,
     ///    having issued at least one request against the same capture. It needs
-    ///    the capture's `/block/{hash}` bodies; a capture taken without them
-    ///    skips the probe by name (`FIXTURES_WITHOUT_SIGNAL_BLOCKS`).
+    ///    the capture's `/block/{hash}` bodies, and a capture missing one fails
+    ///    naming the block.
     ///
     /// THERE IS DELIBERATELY NO `versionId = 1` PROBE here, and one must not be
     /// "restored". At `Init` the FSM returns `Resolved` when a `VersionId`
@@ -2688,12 +2617,10 @@ mod tests {
                     "{id}: an expected-error resolve/output.json carries a null didDocument"
                 );
             } else {
-                if !metadata["versionId"].is_number() {
-                    assert!(
-                        metadata["versionId"].is_string(),
-                        "{id}: versionId must be an ASCII string (the specification's encoding)"
-                    );
-                }
+                assert!(
+                    metadata["versionId"].is_string(),
+                    "{id}: versionId must be an ASCII string (the specification's encoding)"
+                );
                 assert!(
                     metadata["deactivated"].is_boolean(),
                     "{id}: deactivated must be a bool"
@@ -2722,37 +2649,6 @@ mod tests {
                 continue;
             }
 
-            // POLICY, not well-formedness — hence below the drive gate, where a
-            // hand-written skip can classify a non-conformant vector instead of
-            // leaving "edit driver code or edit the upstream fixture" as the
-            // only remedies.
-            //
-            // The specification requires didDocumentMetadata.versionId to be an
-            // ASCII string. Some fixtures encode it as a JSON number, a known
-            // upstream defect pinned to an explicit id set and checked in BOTH
-            // directions: an unlisted offender fails as a NEW defect rather than
-            // being absorbed by the encoding-tolerant read, and a listed vector
-            // that is now string-encoded fails saying the list is stale. Keying
-            // this on the network directory instead would auto-forgive a newly
-            // added defective vector and would red on a partial upstream
-            // conformance fix. The ledger's summary reports the running tally.
-            if !vector.is_negative() {
-                let known_bad = NUMBER_ENCODED_VERSION_ID.contains(&id.as_str());
-                assert!(
-                    metadata["versionId"].is_number() == known_bad,
-                    "{id}: {}",
-                    if metadata["versionId"].is_number() {
-                        "NEW versionId encoding defect — resolve/output.json encodes versionId \
-                         as a JSON number, but the specification requires an ASCII string. Fix \
-                         the fixture, or add this id to NUMBER_ENCODED_VERSION_ID to record it \
-                         as known-bad."
-                    } else {
-                        "versionId is now correctly encoded as an ASCII string — delete this id \
-                         from NUMBER_ENCODED_VERSION_ID."
-                    }
-                );
-            }
-
             let fixture = replay_fixture(vector);
             drive_case(
                 vector,
@@ -2772,11 +2668,9 @@ mod tests {
                 // independent producer of the pre-walk state: same DID, same
                 // options, no signals fed, so the resolver applies nothing.
                 let genesis = resolve_with_no_signals(
-                    Document::resolve(
-                        &did,
-                        case_options(&input, Some(f), vector.signals.is_some(), id),
-                    )
-                    .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}")),
+                    Document::resolve(&did, case_options(&input, Some(f), id)).unwrap_or_else(
+                        |e| panic!("{id}: the resolver must accept the vector: {e}"),
+                    ),
                 );
                 let genesis_json = resolved_document_json(&genesis.document, id);
                 assert_eq!(
@@ -2794,36 +2688,34 @@ mod tests {
                 // announcing block's mediantime is inside the walk's reach but
                 // before its first update, so the bound — which the FSM cannot
                 // short-circuit — must hold the answer at genesis.
-                if let Some(bound) = version_time_probe_bound(f, id) {
-                    let options = ResolutionOptions {
-                        version_time: Some(bound),
-                        ..case_options(&input, Some(f), vector.signals.is_some(), id)
-                    };
-                    let probe_resolver = Document::resolve(&did, options).unwrap_or_else(|e| {
-                        panic!("{id}: the resolver must accept the vector: {e}")
-                    });
-                    let (probe, rounds) = drive_capture_rounds(probe_resolver, f, id);
-                    let probe = probe.unwrap_or_else(|e| {
-                        panic!("{id}: the versionTime probe must resolve off the capture: {e}")
-                    });
-                    assert!(
-                        !rounds.is_empty(),
-                        "{id}: the versionTime probe must READ the chain — a bound that resolved \
-                         without issuing a request proves nothing about stopping"
-                    );
-                    assert_eq!(
-                        probe.document_metadata.version_id.get(),
-                        1,
-                        "{id}: a versionTime one second before the earliest announcing block's \
-                         mediantime ({bound}) must resolve to version 1"
-                    );
-                    assert_eq!(
-                        resolved_document_json(&probe.document, id),
-                        genesis_json,
-                        "{id}: a versionTime before the first update must resolve the genesis \
-                         document"
-                    );
-                }
+                let bound = version_time_probe_bound(f, id);
+                let options = ResolutionOptions {
+                    version_time: Some(bound),
+                    ..case_options(&input, Some(f), id)
+                };
+                let probe_resolver = Document::resolve(&did, options)
+                    .unwrap_or_else(|e| panic!("{id}: the resolver must accept the vector: {e}"));
+                let (probe, rounds) = drive_capture_rounds(probe_resolver, f, id);
+                let probe = probe.unwrap_or_else(|e| {
+                    panic!("{id}: the versionTime probe must resolve off the capture: {e}")
+                });
+                assert!(
+                    !rounds.is_empty(),
+                    "{id}: the versionTime probe must READ the chain — a bound that resolved \
+                     without issuing a request proves nothing about stopping"
+                );
+                assert_eq!(
+                    probe.document_metadata.version_id.get(),
+                    1,
+                    "{id}: a versionTime one second before the earliest announcing block's \
+                     mediantime ({bound}) must resolve to version 1"
+                );
+                assert_eq!(
+                    resolved_document_json(&probe.document, id),
+                    genesis_json,
+                    "{id}: a versionTime before the first update must resolve the genesis \
+                     document"
+                );
             }
 
             observed.insert(RowKey::set(id.clone()));
@@ -3088,12 +2980,12 @@ mod tests {
         (input, fixture)
     }
 
-    /// A set that records its signals may omit the sidecar on a replayed
-    /// resolve: it reads as `{}`, as the capture tool reads it.
+    /// A replayed set may omit the sidecar: it reads as `{}`, as the capture
+    /// tool reads it, because the set's signals record is the gate.
     #[test]
     fn case_options_reads_an_absent_sidecar_as_empty_when_signals_are_recorded() {
         let (input, fixture) = replayed_input_without_sidecar();
-        let options = case_options(&input, Some(&fixture), true, OPTIONS_SET);
+        let options = case_options(&input, Some(&fixture), OPTIONS_SET);
         let sidecar = options
             .sidecar_data
             .expect("the sidecar is always supplied");
@@ -3104,26 +2996,12 @@ mod tests {
         assert_eq!(options.chain_tip_height, Some(fixture.tip_height));
     }
 
-    /// A replayed set without `signals.json` still needs the sidecar object,
-    /// as the capture tool requires it of those sets.
-    #[test]
-    fn case_options_refuses_an_absent_sidecar_on_a_replayed_set_without_signals() {
-        let (input, fixture) = replayed_input_without_sidecar();
-        let message = panic_text(|| {
-            case_options(&input, Some(&fixture), false, OPTIONS_SET);
-        });
-        assert!(
-            message.contains("resolutionOptions.sidecar") && message.contains("signals.json"),
-            "the refusal names the missing sidecar and the rule: {message}"
-        );
-    }
-
     /// A resolver reporting fewer confirmations than recorded fails the row.
     #[test]
     fn synthetic_options_fewer_confirmations_than_recorded_fail() {
         let mut vectors = options_vectors();
         *recorded_confirmations(&mut vectors[0].outcome) = Some(7);
-        let message = panic_text(|| drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        let message = panic_text(|| drive_resolve_with(&vectors, &[], &[]));
         assert!(
             message.contains("confirmations") && message.contains('6') && message.contains('7'),
             "the failure names confirmations and both values: {message}"
@@ -3163,13 +3041,43 @@ mod tests {
         );
     }
 
-    /// The main pair with no recorded `confirmations` is still checked by
-    /// provenance, against the latest captured signal.
+    /// A replayed main pair that records no `confirmations` fails by name, as a
+    /// case does: every replayed positive resolve records the number.
     #[test]
-    fn synthetic_options_main_pair_without_confirmations_checks_provenance() {
+    fn synthetic_options_main_pair_without_confirmations_fails_by_name() {
         let mut vectors = options_vectors();
         *recorded_confirmations(&mut vectors[0].outcome) = None;
-        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
+        let message = panic_text(|| drive_resolve_with(&vectors, &[], &[]));
+        assert!(
+            message.contains(OPTIONS_SET)
+                && message.contains("must record didDocumentMetadata.confirmations"),
+            "the failure names the set and the missing member: {message}"
+        );
+    }
+
+    /// A capture missing the `/block/{hash}` body of one of its announcements
+    /// fails the versionTime probe naming the set and the block, rather than
+    /// skipping it.
+    #[test]
+    fn version_time_probe_bound_panics_naming_a_missing_block() {
+        let vectors = options_vectors();
+        let mut fixture = read_chain_fixture_in(&vectors[0].corpus.chain, OPTIONS_SET);
+        version_time_probe_bound(&fixture, OPTIONS_SET);
+        let dropped: Vec<String> = std::mem::take(&mut fixture.blocks).into_keys().collect();
+        assert!(
+            !dropped.is_empty(),
+            "the options capture records its announcements' blocks"
+        );
+        let message = panic_text(|| {
+            version_time_probe_bound(&fixture, OPTIONS_SET);
+        });
+        assert!(
+            message.contains(OPTIONS_SET)
+                && dropped
+                    .iter()
+                    .any(|hash| message.contains(&format!("/block/{hash}"))),
+            "the failure names the set and the missing block: {message}"
+        );
     }
 
     /// A negative case asserts the code: a recorded code the resolver does not
@@ -3244,7 +3152,7 @@ mod tests {
         match case_outcome(&mut vectors, "02") {
             Outcome::Positive {
                 version_id_string, ..
-            } => *version_id_string = Some("02".to_string()),
+            } => *version_id_string = "02".to_string(),
             Outcome::Error { .. } => panic!("resolve/02 is positive"),
         }
         let message =
@@ -3294,16 +3202,6 @@ mod tests {
     /// `fixtures/layout/README.md`).
     const FORK_SET: &str = "regtest/k1/qgph42l3";
 
-    /// A local divergence table mapping the test suite's late-publishing code
-    /// to the specification's. The production table stays empty until a
-    /// checked-out vector records the divergent code.
-    const REHEARSAL_DIVERGENCE: &[CodeDivergence] = &[CodeDivergence {
-        vector_code: "LATE_PUBLISHING_ERROR",
-        spec_code: "LATE_PUBLISHING",
-        issue: "rehearsal: the regenerated test suite records the late-publishing error under a \
-                different code than the specification",
-    }];
-
     /// A negative synthetic corpus, discovered fresh: exactly the fork set.
     fn fork_vectors(corpus: &str) -> Vec<Vector> {
         let vectors = discover_in(&Corpus::synthetic(corpus));
@@ -3328,10 +3226,10 @@ mod tests {
         let vectors = fork_vectors("late-code");
         assert!(vectors[0].is_negative());
         drive_derivation(&vectors, &[]);
-        drive_resolve_with(&vectors, &[], REHEARSAL_DIVERGENCE);
+        drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES);
         check_ledger_invariants(&vectors, &[]);
         assert!(
-            unused_divergences(&vectors, &[], REHEARSAL_DIVERGENCE).is_empty(),
+            unused_divergences(&vectors, &[], ERROR_CODE_DIVERGENCES).is_empty(),
             "the late-code Resolve row uses the entry"
         );
     }
@@ -3342,7 +3240,7 @@ mod tests {
     #[test]
     fn synthetic_late_code_fails_without_its_divergence() {
         let vectors = fork_vectors("late-code");
-        let message = panic_text(|| drive_resolve_with(&vectors, &[], ERROR_CODE_DIVERGENCES));
+        let message = panic_text(|| drive_resolve_with(&vectors, &[], &[]));
         assert!(
             message.contains("expected error LATE_PUBLISHING_ERROR")
                 && message.contains("got LATE_PUBLISHING"),
@@ -3486,7 +3384,7 @@ mod tests {
     /// the guard: the options corpus records no `LATE_PUBLISHING_ERROR`.
     #[test]
     fn synthetic_unused_divergence_is_reported() {
-        let unused = unused_divergences(&options_vectors(), &[], REHEARSAL_DIVERGENCE);
+        let unused = unused_divergences(&options_vectors(), &[], ERROR_CODE_DIVERGENCES);
         assert_eq!(unused.len(), 1, "{unused:?}");
         assert!(unused[0].contains("LATE_PUBLISHING_ERROR"), "{unused:?}");
     }
@@ -4108,31 +4006,31 @@ mod tests {
         const REASON: &str = "stands in for a hand-written skip; the live table is empty";
         const LIVE_OVERRIDE: &[SkipOverride] = &[
             SkipOverride {
-                vector: "regtest/x1/q2fz9mz6",
+                vector: "regtest/k1/qgp45a3y",
                 kind: AssertionKind::Derivation,
                 case: None,
                 reason: REASON,
             },
             SkipOverride {
-                vector: "regtest/k1/qgpakaw4",
+                vector: "regtest/k1/qgp45a3y",
                 kind: AssertionKind::GenesisKey,
                 case: None,
                 reason: REASON,
             },
             SkipOverride {
-                vector: "regtest/k1/qgpakaw4",
+                vector: "regtest/k1/qgp45a3y",
                 kind: AssertionKind::Resolve,
                 case: None,
                 reason: REASON,
             },
             SkipOverride {
-                vector: "mutinynet/x1/q5m2fh36",
+                vector: "regtest/k1/qgph7nre",
                 kind: AssertionKind::UpdateCrypto,
                 case: None,
                 reason: REASON,
             },
             SkipOverride {
-                vector: "mutinynet/x1/q5m2fh36",
+                vector: "regtest/k1/qgph7nre",
                 kind: AssertionKind::EndState,
                 case: None,
                 reason: REASON,
@@ -6572,8 +6470,7 @@ mod tests {
         );
         // Cross-check the fixture's own expected metadata block. `versionId` is
         // an ASCII STRING per the specification; asserting the ENCODING here
-        // keeps a minted fixture from drifting into the number encoding the
-        // upstream mutinynet vectors carry.
+        // keeps a minted fixture from drifting into a number encoding.
         assert_eq!(
             expected["didDocumentMetadata"]["versionId"].as_str(),
             Some("4"),
@@ -6768,27 +6665,25 @@ mod tests {
         }
 
         // --- The time bound, against a real captured block mediantime ---------
-        if let Some(bound) = version_time_probe_bound(&f, id) {
-            let (before, before_rounds) =
-                drive_capture_rounds(resolver_for(None, Some(bound)), &f, id);
-            let before =
-                before.unwrap_or_else(|e| panic!("{id}: the versionTime bound must resolve: {e}"));
-            assert!(
-                !before_rounds.is_empty(),
-                "{id}: the versionTime bound must READ the chain"
-            );
-            assert_eq!(
-                before.document_metadata.version_id.get(),
-                1,
-                "{id}: a versionTime one second before the earliest announcing block's \
-                 mediantime ({bound}) must resolve to version 1"
-            );
-            assert_eq!(
-                resolved_document_json(&before.document, id),
-                genesis_json,
-                "{id}: a versionTime before the first update must resolve the genesis document"
-            );
-        }
+        let bound = version_time_probe_bound(&f, id);
+        let (before, before_rounds) = drive_capture_rounds(resolver_for(None, Some(bound)), &f, id);
+        let before =
+            before.unwrap_or_else(|e| panic!("{id}: the versionTime bound must resolve: {e}"));
+        assert!(
+            !before_rounds.is_empty(),
+            "{id}: the versionTime bound must READ the chain"
+        );
+        assert_eq!(
+            before.document_metadata.version_id.get(),
+            1,
+            "{id}: a versionTime one second before the earliest announcing block's \
+             mediantime ({bound}) must resolve to version 1"
+        );
+        assert_eq!(
+            resolved_document_json(&before.document, id),
+            genesis_json,
+            "{id}: a versionTime before the first update must resolve the genesis document"
+        );
     }
 
     /// The minted late-publishing fork, replayed from the snapshot taken of the

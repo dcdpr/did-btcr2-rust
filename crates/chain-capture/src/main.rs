@@ -52,7 +52,7 @@ enum Command {
         /// Esplora base URL override (no trailing slash). Required for a chain
         /// with no public endpoint, such as a local regtest stack.
         esplora_url: Option<String>,
-        /// Capture a single vector (e.g. `regtest/k1/qgppexmy`) instead of every
+        /// Capture a single vector (e.g. `regtest/k1/qgph7nre`) instead of every
         /// drivable one.
         vector: Option<String>,
         /// A suite root holding `{network}/{k1|x1}/{id}/` sets that carry
@@ -179,7 +179,7 @@ const HELP_TEXT: &str = concat!(
     "                                times, so the chain is never implied.\n",
     "    --esplora-url <url>         Esplora base URL (no trailing slash). Required\n",
     "                                for a chain with no public endpoint (regtest).\n",
-    "    --vector <id>               Capture one vector (e.g. regtest/k1/qgppexmy)\n",
+    "    --vector <id>               Capture one vector (e.g. regtest/k1/qgph7nre)\n",
     "                                instead of every drivable one.\n",
     "    --suite-root <dir>          Read the set named by --vector (required with\n",
     "                                this flag) from <dir>/<network>/<k1|x1>/<id>/,\n",
@@ -728,7 +728,7 @@ mod tests {
             "--network",
             "mutinynet",
             "--vector",
-            "mutinynet/k1/q5p6w9su",
+            "mutinynet/k1/q5pqhkks",
         ]))
         .expect("a capture with a vector id parses");
         let Command::Capture {
@@ -738,7 +738,7 @@ mod tests {
             panic!("expected Capture");
         };
         assert_eq!(network, "mutinynet");
-        assert_eq!(vector, Some("mutinynet/k1/q5p6w9su".to_string()));
+        assert_eq!(vector, Some("mutinynet/k1/q5pqhkks".to_string()));
     }
 
     #[test]

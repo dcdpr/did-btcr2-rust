@@ -711,10 +711,10 @@ mod tests {
     use serde_json::json;
     use std::str::FromStr as _;
 
-    /// A DID from the vendor vectors, so the synthetic targets below carry a real
+    /// The DID of `regtest/k1/qgph7nre`, so the synthetic targets below carry a real
     /// identifier rather than one this test invented.
     const REGTEST_DID: &str =
-        "did:btcr2:k1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s";
+        "did:btcr2:k1qgph7nrekhzerkmsktp8l7rdtpxh2mw45xp6e90sjvxszpz6au0grssegjx6z";
 
     /// A minimal signed update the core crate accepts, targeting `version`.
     ///
@@ -747,7 +747,7 @@ mod tests {
     /// A target that does not need the test-suite submodule to exist.
     fn target(sidecar: Value, expected_confirmations: Option<u64>) -> VectorTarget {
         VectorTarget {
-            id: "regtest/k1/qgppexmy".to_string(),
+            id: "regtest/k1/qgph7nre".to_string(),
             network_dir: "regtest".to_string(),
             network: Network::Regtest,
             did: Did::from_str(REGTEST_DID).expect("a vendor DID parses"),
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn update_hashes_are_sha256_over_the_jcs_canonical_form() {
         let one = update(2, "bitcoin:mmBCLTLMZqUFhiG4vhhaM7EbLRN6h7sCfG");
-        let hashes = update_hashes("regtest/k1/qgppexmy", &sidecar(vec![one.clone()]))
+        let hashes = update_hashes("regtest/k1/qgph7nre", &sidecar(vec![one.clone()]))
             .expect("a well-formed sidecar hashes");
         assert_eq!(hashes.len(), 1);
 
@@ -859,7 +859,7 @@ mod tests {
         // same — the property that makes the announced value reproducible.
         let reordered: Value =
             serde_json::from_str(&jcs).expect("the canonical form is itself JSON");
-        let reordered_hashes = update_hashes("regtest/k1/qgppexmy", &sidecar(vec![reordered]))
+        let reordered_hashes = update_hashes("regtest/k1/qgph7nre", &sidecar(vec![reordered]))
             .expect("the reordered sidecar hashes");
         assert_eq!(reordered_hashes, hashes);
     }
@@ -869,19 +869,19 @@ mod tests {
         if !targets::test_suite_present() {
             return;
         }
-        let loaded = targets::load("regtest/k1/qgppexmy").expect("the vector loads");
+        let loaded = targets::load("regtest/k1/qgph7nre").expect("the vector loads");
         let hashes = update_hashes(&loaded.id, &loaded.sidecar).expect("its sidecar hashes");
         assert_eq!(hashes.len(), 1, "this vector announces one update");
     }
 
     #[test]
     fn a_sidecar_without_updates_is_refused() {
-        let error = update_hashes("regtest/k1/qgppexmy", &json!({}))
+        let error = update_hashes("regtest/k1/qgph7nre", &json!({}))
             .expect_err("a sidecar with no updates must not hash to nothing");
         assert!(matches!(error, ValidateError::UnusableSidecar { .. }));
-        assert!(error.to_string().contains("regtest/k1/qgppexmy"));
+        assert!(error.to_string().contains("regtest/k1/qgph7nre"));
 
-        let error = update_hashes("regtest/k1/qgppexmy", &sidecar(vec![]))
+        let error = update_hashes("regtest/k1/qgph7nre", &sidecar(vec![]))
             .expect_err("an empty updates list must not pass vacuously");
         assert!(error.to_string().contains("empty"), "got: {error}");
     }
@@ -978,7 +978,7 @@ mod tests {
         let expected_hex = hex::encode(update_hashes("v", &target.sidecar).expect("hashes")[0]);
         assert!(matches!(error, ValidateError::MissingSignal { .. }));
         assert!(
-            message.contains("regtest/k1/qgppexmy"),
+            message.contains("regtest/k1/qgph7nre"),
             "names the vector: {message}"
         );
         assert!(message.contains(&expected_hex), "names the hash: {message}");
@@ -1002,7 +1002,7 @@ mod tests {
             matches!(error, ValidateError::UnconfirmedSignal { ref txid, .. } if *txid == "c2".repeat(32)),
             "got: {error}"
         );
-        assert!(error.to_string().contains("regtest/k1/qgppexmy"));
+        assert!(error.to_string().contains("regtest/k1/qgph7nre"));
     }
 
     #[test]
@@ -1017,7 +1017,7 @@ mod tests {
             "got: {error}"
         );
         assert!(
-            message.contains("bcrt1qbeacon") && message.contains("regtest/k1/qgppexmy"),
+            message.contains("bcrt1qbeacon") && message.contains("regtest/k1/qgph7nre"),
             "names the address and the vector: {message}"
         );
     }
@@ -1051,7 +1051,7 @@ mod tests {
             ),
             "got: {error}"
         );
-        for part in ["93", "181", "300", "120", "regtest/k1/qgppexmy"] {
+        for part in ["93", "181", "300", "120", "regtest/k1/qgph7nre"] {
             assert!(
                 message.contains(part),
                 "message must carry {part}: {message}"
@@ -1101,7 +1101,7 @@ mod tests {
             matches!(error, ValidateError::UnorderedAnnouncements { .. }),
             "got: {error}"
         );
-        for part in ["regtest/k1/qgppexmy", "block 120", "block 150", "Re-mint"] {
+        for part in ["regtest/k1/qgph7nre", "block 120", "block 150", "Re-mint"] {
             assert!(
                 message.contains(part),
                 "message must carry {part}: {message}"

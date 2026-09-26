@@ -28,7 +28,7 @@ pub struct ChainFixture {
     /// chains, and each move regenerates these fixtures — so the chain is
     /// fixture DATA, not a constant baked into any reader.
     pub network: String,
-    /// `"regtest/k1/qgppexmy"` or `"minted/clean-rotating-beacons"`.
+    /// `"regtest/k1/qgph7nre"` or `"minted/clean-rotating-beacons"`.
     pub vector: String,
     /// The DID this snapshot resolves.
     pub did: String,
@@ -85,7 +85,7 @@ pub enum FixtureError {
     /// The vector id would escape the fixture root (empty, absolute, or
     /// carrying a `..` segment), so no path is derived from it.
     #[error(
-        "unusable vector id `{0}`: it must be a relative path of plain segments (e.g. `regtest/k1/qgppexmy` or `minted/clean-rotating-beacons`)"
+        "unusable vector id `{0}`: it must be a relative path of plain segments (e.g. `regtest/k1/qgph7nre` or `minted/clean-rotating-beacons`)"
     )]
     UnsafeVectorId(String),
 
@@ -111,7 +111,7 @@ pub fn fixture_root() -> PathBuf {
 
 /// Map a vector id to its fixture file.
 ///
-/// `regtest/k1/qgppexmy` becomes `<root>/regtest/k1/qgppexmy.json`;
+/// `regtest/k1/qgph7nre` becomes `<root>/regtest/k1/qgph7nre.json`;
 /// `minted/clean-rotating-beacons` becomes
 /// `<root>/minted/clean-rotating-beacons.json`.
 ///
@@ -224,8 +224,8 @@ mod tests {
             captured_at: "2026-07-30T01:00:00Z".to_string(),
             endpoint: "http://localhost:3000".to_string(),
             network: "regtest".to_string(),
-            vector: "regtest/k1/qgppexmy".to_string(),
-            did: "did:btcr2:k1qgppexmy".to_string(),
+            vector: "regtest/k1/qgph7nre".to_string(),
+            did: "did:btcr2:k1qgph7nre".to_string(),
             tip_height: 212,
             signals: vec![CapturedSignal {
                 address: "bcrt1qpopulated".to_string(),
@@ -324,9 +324,9 @@ mod tests {
 
     #[test]
     fn fixture_path_mirrors_the_test_suite_tree() {
-        let path = fixture_path_in(&fixture_root(), "regtest/k1/qgppexmy")
+        let path = fixture_path_in(&fixture_root(), "regtest/k1/qgph7nre")
             .expect("a plain vector id is accepted");
-        assert_eq!(path, fixture_root().join("regtest/k1/qgppexmy.json"));
+        assert_eq!(path, fixture_root().join("regtest/k1/qgph7nre.json"));
     }
 
     #[test]
@@ -346,7 +346,7 @@ mod tests {
             "/etc/passwd",
             "../../../etc/x",
             "regtest/../../../etc/x",
-            "./regtest/k1/qgppexmy",
+            "./regtest/k1/qgph7nre",
         ] {
             let error = fixture_path_in(&fixture_root(), bad)
                 .err()
@@ -421,7 +421,7 @@ mod tests {
         let written = write_atomic_in(&root, &fixture).expect("the sample fixture is written");
         assert_eq!(
             written,
-            root.join("regtest/k1/qgppexmy.json"),
+            root.join("regtest/k1/qgph7nre.json"),
             "the write targets the path derived from the fixture's own vector id"
         );
         let body: serde_json::Value =

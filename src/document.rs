@@ -2568,7 +2568,7 @@ mod tests {
         // Re-pointed to a surviving regtest vector so the gated build compiles
         // (test is #[ignore]'d; this read is never asserted against).
         let resolution_options = ResolutionOptions::from_json_string(include_str!(
-            "../test-suite/regtest/k1/qgppexmy/resolve/input.json"
+            "../test-suite/regtest/k1/qgph7nre/resolve/input.json"
         ));
 
         let (did, fsm) = Document::from_did_components(did_components, resolution_options).unwrap();
@@ -2605,7 +2605,7 @@ mod tests {
 
         // Re-pointed to a surviving regtest vector so the gated build compiles.
         let target_doc = Document::from_json_string(include_str!(
-            "../test-suite/regtest/k1/qgppexmy/update/input.json"
+            "../test-suite/regtest/k1/qgph7nre/update/input.json"
         ))
         .unwrap();
         assert_eq!(result.document.hash(), target_doc.hash());

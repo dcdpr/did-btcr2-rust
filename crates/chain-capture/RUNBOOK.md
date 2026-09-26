@@ -21,30 +21,34 @@ Build once up front so a compile does not interleave with the first command:
 cargo build -p chain-capture
 ```
 
-You need: Docker with the `compose` plugin, `unzip`, `curl`, and roughly 300 MB
+You need: Docker with the `compose` plugin, `unzip`, `curl`, and roughly 150 MB
 of free disk for the unpacked regtest chain.
 
 > **Run this on a machine you control, alone.** The Polar export publishes
 > bitcoind's JSON-RPC on `18443` and the Esplora API on `3000` with **no host-IP
 > prefix** (`'18443:18443'`, `'3000:3000'` in its `docker-compose.yml`), so
 > Docker binds them on **all interfaces**, not loopback — the `127.0.0.1` in the
-> commands below is where *you* reach them, not the limit of who can. The RPC
-> credential is `polaruser:polarpass`, published in the export itself. For the
-> duration of a session, anyone who can reach this host can spend the node's
-> wallet and mine on the chain. That is acceptable on a single-user machine with
-> a throwaway regtest chain and worthless coins; it is not acceptable on a shared
-> host, a LAN you do not own, or anything reachable from the internet. If you
-> must run it on such a host, prefix both published ports with `127.0.0.1:` in
-> the unpacked compose file before `docker compose up`.
+> commands below is where *you* reach them, not the limit of who can. The same
+> holds for bitcoind's P2P port (`19444`), its two ZMQ ports (`28334`, `29335`)
+> and electrs's `24224`. Only the Kubo (IPFS) node is published on loopback
+> (`127.0.0.1:5001`, `127.0.0.1:8080`). The RPC credential is
+> `polaruser:polarpass`, published in the export itself. For the duration of a
+> session, anyone who can reach this host can spend the node's wallet and mine
+> on the chain. That is acceptable on a single-user machine with a throwaway
+> regtest chain and worthless coins; it is not acceptable on a shared host, a
+> LAN you do not own, or anything reachable from the internet. If you must run
+> it on such a host, prefix every published port of `backend1` and `electrs`
+> with `127.0.0.1:` in the unpacked compose file before `docker compose up`.
 
 ---
 
 ## Session order
 
-1. **Part 1** — stand the Polar chain up and capture the **four** vendor regtest
-   vectors. Leave the stack **running**.
-2. **Part 2** — capture the **three** vendor mutinynet vectors. Independent of
-   Polar, but do it in the same sitting.
+1. **Part 1** — stand the Polar chain up and capture the **35** drivable
+   regtest sets. Leave the stack **running**.
+2. **Part 2** — capture the **35** drivable sets on each of mutinynet, signet
+   and testnet4, mutinynet first. Independent of Polar, so it can run before
+   Part 1 or while the stack comes up.
 3. **Part 3** — mint the scenarios. As written it is the first rung, on the
    same running Polar chain, and today only `poisoned` (Scenario B) is minted
    there: `clean` has climbed to mutinynet, and the committed
@@ -56,20 +60,21 @@ of free disk for the unpacked regtest chain.
 4. **Part 4** — tear the stack down, delete the unpacked chain, check what
    landed.
 
-**Part 5** — capturing a set that carries `signals.json`, from any checkout of
-the test suite into any output directory — is independent of the four parts
-above and of Polar. It includes the live smoke recipe, which writes only to a
-scratch directory.
+**Part 5** — how a set that carries `signals.json` is captured, what the
+capture checks and what each refusal means — applies to every set in Parts 1
+and 2, since every set the tool captures carries that record. It also covers
+capturing one set from any checkout of the test suite into any output
+directory, and the live smoke recipe, which writes only to a scratch directory.
 
-The four vendor regtest captures were taken against the export's untouched tip
-(758), and every committed capture replays from its own file — nothing in the
-test suite reads a live chain. Part 1 comes before Part 3 when both are done in
-one sitting only because re-capturing those four vectors after mining needs a
-fresh unpack of the export: their stated `confirmations` (93, 78, 65, 53) are
-measured against 758 and stop reproducing once the tip has moved. Those four
-vectors are being regenerated upstream; when that regeneration is absorbed,
-their captures are replaced, and Part 1 is re-run against whatever chain they
-were minted on.
+Every set records its `recordedTip`, the chain tip its outputs were recorded
+against, and every capture pins the resolve to it: the regtest sets to **601**,
+which is the untouched export's own tip. Every committed capture replays from
+its own file — nothing in the test suite reads a live chain. Because the tip is
+pinned, blocks mined after the record do not change what a capture checks: a
+re-capture works as long as the live tip is at or above `recordedTip` and none
+of the set's beacons has an announcement confirmed above it. Part 1 still comes
+before Part 3 in one sitting, so that the regtest captures are taken from the
+export exactly as shipped.
 
 ---
 
@@ -92,24 +97,67 @@ it. Wait a few minutes and re-run the same command; the capture is idempotent.
 
 ---
 
-## Part 1 — regtest vendor vectors
+## Part 1 — regtest sets
 
-Captures four vectors:
+Captures the 35 drivable regtest sets, each at `recordedTip` 601. The
+expected outcome is the set's own `resolve/output.json`; the scenario name is
+the one in `test-suite/regtest/README.md`.
 
-| Vector | `confirmations` |
-|---|---|
-| `regtest/k1/qgppexmy` | 93 |
-| `regtest/k1/qgpy0hmm` | 78 |
-| `regtest/x1/q26jeds9` | 65 |
-| `regtest/x1/qfl7se8f` | 53 |
+| Scenario | Set | Expected outcome |
+|---|---|---|
+| 02-k1-sidecar-update | `regtest/k1/qgph7nre` | versionId 2, confirmations ≥ 319 |
+| 04-x1-sidecar-update | `regtest/x1/q2z78yxz` | versionId 2, confirmations ≥ 319 |
+| 07-k1-sidecar-deactivate | `regtest/k1/qgpx06u2` | versionId 2, deactivated, confirmations ≥ 319 |
+| 13-k1-update-p2wpkh | `regtest/k1/qgpseq0v` | versionId 2, confirmations ≥ 319 |
+| 14-k1-update-p2tr | `regtest/k1/qgpw4847` | versionId 2, confirmations ≥ 319 |
+| 15-x1-beacon-rotation | `regtest/x1/qfaqdrxu` | versionId 3, confirmations ≥ 297 |
+| 16-x1-beacon-add-then-use | `regtest/x1/qt04c7dn` | versionId 3, confirmations ≥ 297 |
+| 17-x1-vm-add-rotate-authentication | `regtest/x1/qg935lwg` | versionId 3, confirmations ≥ 297 |
+| 18-x1-embedded-invocation-key | `regtest/x1/qtrhj3w0` | versionId 2, confirmations ≥ 319 |
+| 19-x1-relative-ids | `regtest/x1/qtk24dpv` | versionId 2, confirmations ≥ 319 |
+| 21-k1-deactivate-then-update | `regtest/k1/qgpgm6kn` | versionId 2, deactivated, confirmations ≥ 319 |
+| 22-x1-three-updates-resolution-options | `regtest/x1/qg4zny9h` | versionId 4, confirmations ≥ 276 |
+| 23-k1-duplicate-signal | `regtest/k1/qgp0enf0` | versionId 3, confirmations ≥ 297 |
+| 24-k1-removed-beacon-signal | `regtest/k1/qgpz0cp4` | versionId 2, confirmations ≥ 319 |
+| 26-k1-signal-below-current-height | `regtest/k1/qgpqx326` | versionId 2, confirmations ≥ 15 |
+| n05-x1-missing-update-data | `regtest/x1/qfuuz6h4` | error `MISSING_UPDATE_DATA` |
+| n10-k1-invalid-update-context-member | `regtest/k1/qgp040ju` | error `INVALID_DID_UPDATE` |
+| n11-k1-invalid-update-context-order | `regtest/k1/qgpejq0v` | error `INVALID_DID_UPDATE` |
+| n12-k1-invalid-update-proof-context | `regtest/k1/qgpnkuln` | error `INVALID_DID_UPDATE` |
+| n13-k1-invalid-update-capability-action | `regtest/k1/qgpf5yjw` | error `INVALID_DID_UPDATE` |
+| n14-k1-invalid-update-capability-encoding | `regtest/k1/qgpw65qy` | error `INVALID_DID_UPDATE` |
+| n15-k1-invalid-update-proof-purpose | `regtest/k1/qgp6fp4d` | error `INVALID_DID_UPDATE` |
+| n16-x1-invalid-update-unauthorized-method | `regtest/x1/qty0lp74` | error `INVALID_DID_UPDATE` |
+| n17-k1-invalid-update-unknown-method | `regtest/k1/qgp5wcmx` | error `INVALID_DID_UPDATE` |
+| n18-k1-invalid-update-proof-value | `regtest/k1/qgp2ht79` | error `INVALID_DID_UPDATE` |
+| n19-k1-invalid-update-source-hash | `regtest/k1/qgpmreat` | error `INVALID_DID_UPDATE` |
+| n20-k1-invalid-update-target-hash | `regtest/k1/qgp3e09g` | error `INVALID_DID_UPDATE` |
+| n21-k1-invalid-update-version-skip | `regtest/k1/qgpxl5uu` | error `LATE_PUBLISHING_ERROR` |
+| n22-k1-invalid-update-patch-missing-path | `regtest/k1/qgp5fh0e` | error `INVALID_DID_UPDATE` |
+| n23-k1-invalid-update-patch-changes-id | `regtest/k1/qgpl0zen` | error `INVALID_DID_UPDATE` |
+| n24-k1-invalid-update-patch-invalid-document | `regtest/k1/qgpq3zd0` | error `INVALID_DID_UPDATE` |
+| n25-k1-invalid-update-created-after-block | `regtest/k1/qgpq4wrg` | error `INVALID_DID_UPDATE` |
+| n26-k1-invalid-update-expires-before-mediantime | `regtest/k1/qgp33y4v` | error `INVALID_DID_UPDATE` |
+| n27-k1-invalid-update-expires-before-created | `regtest/k1/qgpp9e44` | error `INVALID_DID_UPDATE` |
+| n28-k1-late-publishing | `regtest/k1/qgpepnx0` | error `LATE_PUBLISHING_ERROR` |
+
+The 20 sets that expect an error are captured too. For those the gate proves
+that the chain makes the resolve fail with a specification error, and the
+fixture records exactly what the resolver asked for on the way to that failure;
+which code is right is asserted by the conformance harness on the run that
+follows. Of the regenerated regtest sets, the ones with CAS or SMT beacons,
+cohorts, or no beacon signal at all are not captured (see Part 5).
 
 ### 1. Unpack the Polar export OUTSIDE the repository
 
-~18 MB zipped, ~289 MB unpacked, 122 files. None of it is ever committed, so it
-is unpacked to a scratch path rather than anywhere under the working tree.
+~8 MB zipped, ~120 MB unpacked, 179 entries. None of it is ever committed, so
+it is unpacked to a scratch path rather than anywhere under the working tree.
+Unpack into a **fresh** directory: an older export unpacked at the same path
+would leave its chain and index files behind, mixed with the new ones.
 
 ```sh
 unzip -l test-suite/regtest/did-btcr2.polar.zip | head -8
+rm -rf /tmp/btcr2-polar
 mkdir -p /tmp/btcr2-polar
 unzip -q test-suite/regtest/did-btcr2.polar.zip -d /tmp/btcr2-polar
 test -f /tmp/btcr2-polar/docker-compose.yml && echo 'compose file at archive root: OK'
@@ -117,7 +165,8 @@ test -f /tmp/btcr2-polar/docker-compose.yml && echo 'compose file at archive roo
 
 The archive unpacks **flat**: `docker-compose.yml` and `export.json` sit at the
 archive root, next to `volumes/bitcoind/backend1`, which carries the bitcoind
-blocks and the electrs index. The listing step exists so that a future
+blocks and the electrs index, and `volumes/ipfs`, the Kubo node's repository.
+The listing step exists so that a future
 re-packaging that nests everything one level deeper is caught here, instead of
 as a confusing `docker compose` failure two steps later. If the listing shows a
 single top-level directory, point the later `-f` paths inside it.
@@ -141,7 +190,7 @@ that recedes further every day, so on any machine it is permanently in
 gates on exactly that flag: it logs
 
 ```
-WARN waiting for bitcoind sync to finish: 758/758 blocks, verification progress: 100.000%
+WARN waiting for bitcoind sync to finish: 601/601 blocks, verification progress: 100.000%
 ```
 
 forever — announcing that sync is complete while refusing to serve — and never
@@ -151,8 +200,11 @@ resets it.
 `-maxtipage` changes no chain state whatsoever: same tip, same block hash, same
 heights, same `confirmations`. It only stops bitcoind from calling a
 legitimately-old chain "syncing". Mining would also clear the flag, by giving the
-tip a current timestamp, but it moves the tip; use `-maxtipage` so the vendor
-captures stay reproducible from the untouched export.
+tip a current timestamp, but it moves the tip; use `-maxtipage` so the captures
+are taken from the export exactly as shipped. The sed anchors on the last line
+of bitcoind's folded `command:` in the export's compose file
+(`-blockfilterindex=1 -peerblockfilters=1`); if a future export changes that
+line, the `grep` confirmation fails and the anchor needs updating.
 
 ### 3. Start the containers
 
@@ -161,8 +213,12 @@ USERID=$(id -u) GROUPID=$(id -g) \
   docker compose -f /tmp/btcr2-polar/docker-compose.yml up -d
 ```
 
-Two services come up: `polar-n1-backend1` (bitcoind 29.0, regtest, `-txindex=1`)
-and `esplora-electrs`, which serves the Esplora HTTP API. The compose file passes
+Three services come up: `polar-n3-backend1` (bitcoind 30.0, regtest,
+`-txindex=1`), `esplora-electrs`, which serves the Esplora HTTP API, and
+`polar-n3-ipfs` (Kubo, offline, RPC on `127.0.0.1:5001`, gateway on
+`127.0.0.1:8080`), which holds the CAS objects of the sets that use CAS
+delivery. This tool captures no CAS set, so the Kubo node is not used here, but
+it is part of the export and comes up with it. The compose file passes
 `USERID`/`GROUPID` through to bitcoind, which is what keeps the unpacked volume
 readable by the container.
 
@@ -191,10 +247,12 @@ curl -s --user polaruser:polarpass -H 'content-type: application/json' \
   on all interfaces, not just loopback; see the caution at the top of this
   document.
 
-An untouched export reports 758 on both. A higher number means this copy has
-been mined on (a previous Part 3, for instance); that is harmless for minting,
-but the four vendor `confirmations` expectations will not reproduce from it —
-unpack fresh before capturing them.
+An untouched export reports 601 on both, which is every regtest set's
+`recordedTip`. A higher number means this copy has been mined on (a previous
+Part 3, for instance). That is harmless for minting, and the captures pin 601
+whatever the live tip, but unpack fresh before capturing anyway, so that the
+recorded bodies come from the export as shipped. A number below 601 means the
+index is not fully loaded: wait and retry.
 
 ### 5. Capture
 
@@ -206,30 +264,29 @@ cargo run -q -p chain-capture -- \
 `regtest` has no default Esplora endpoint on purpose — there is no hosted one —
 so `--esplora-url` is required and the tool says so if you forget it.
 
-For each vector the tool resolves the DID **for real** through a recording
-transport and then refuses to write unless every one of these holds:
+For each set the tool resolves the DID **for real** through a recording
+transport, with the chain tip pinned to the set's `recordedTip`, and refuses to
+write unless the outcome matches the set's `resolve/output.json` and the
+announcements on chain match its `signals.json` exactly. Part 5, "What a
+capture checks", lists every check and "Refusals, and what to do" every
+refusal.
 
-- the resolved document, `versionId` and `deactivated` flag match the vector's
-  own `resolve/output.json`;
-- every update in the vector's sidecar is announced by an `OP_RETURN` push of
-  its hash in the **last** output of a captured transaction;
-- every matching announcement is confirmed, not sitting in the mempool;
-- the captured tip reproduces the vector's stated `confirmations`.
-
-Only then does it write `fixtures/chain/regtest/<k1|x1>/<short-id>.json`. The
-fixture also carries the `/block/{hash}` header of every block an announcement
-confirmed in, fetched after the resolve, so a replay under a `versionTime`
-bound can read the block's `mediantime`. Every committed capture predates this
-and holds no blocks; re-capturing fills them in (see `TESTING.md`,
-"`versionTime` probes need the announcements' blocks").
+Only then does it write `fixtures/chain/regtest/<k1|x1>/<short-id>.json`, with
+`tip_height` set to the `recordedTip`. The fixture also carries the
+`/block/{hash}` header of every block an announcement confirmed in, fetched
+after the resolve, so a replay under a `versionTime` bound can read the block's
+`mediantime` (see `TESTING.md`, "`versionTime` probes need the announcements'
+blocks").
 
 ### 6. Read the summary
 
-The session table goes to stderr, one row per vector: addresses captured, how
+The session table goes to stderr, one row per set: addresses captured, how
 many of them came back empty (a captured state, not a failure), signals proved,
-the confirmations check, and the fixture path. Below it: which vectors are
-drivable now, each failure with its full cause chain, and the tip the
-`confirmations` were measured against.
+the confirmations check, and the fixture path. A set's `confirmations` is a
+lower bound, so the check reads `N == N ok` or `N >= M ok (at least)`; a set
+that states none, or expects an error, reads `n/a`. Below the table: which sets
+are drivable now, each failure with its full cause chain, and the
+`recordedTip` (or range of them) the `confirmations` were measured against.
 
 A row reading `FAILED, nothing written` means exactly that — nothing was written
 for that vector, and the other rows are unaffected.
@@ -240,8 +297,8 @@ for that vector, and the other rows are unaffected.
 git status --short fixtures/chain/
 ```
 
-Exactly four new files. If any row failed, fix it and re-run the whole capture:
-it is idempotent, and re-capturing a vector that already succeeded rewrites an
+35 new files. If any row failed, fix it and re-run the whole capture: it is
+idempotent, and re-capturing a set that already succeeded rewrites an
 equivalent file.
 
 ### 8. Leave the stack running
@@ -260,7 +317,7 @@ deciding which one you have:
 docker logs --tail 5 esplora-electrs
 ```
 
-*If the log shows `waiting for bitcoind sync to finish: 758/758 blocks,
+*If the log shows `waiting for bitcoind sync to finish: 601/601 blocks,
 verification progress: 100.000%`* — repeating every five seconds, claiming
 completion while refusing to serve — step 2 was skipped or did not take. This is
 the stale-tip `initialblockdownload` latch, it is permanent, and no amount of
@@ -279,8 +336,9 @@ It must read `false`. While it reads `true`, electrs will never serve.
 start. Wait and retry the smoke test; it can take a minute or two.
 
 Prefer `-maxtipage` over mining to fix either one. The upstream README's advice
-to mine six blocks does clear the flag, but mining moves the tip and the vendor
-`confirmations` expectations stop reproducing from this copy of the export.
+to mine six blocks does clear the flag, but mining moves the tip away from the
+export as shipped, and the README itself notes that a set's `minConf`
+sub-vectors hold only at `recordedTip`.
 
 **Port 3000 or 18443 is already in use.**
 Stop the conflicting service and start the stack again. Do not remap the ports:
@@ -300,65 +358,77 @@ sudo chown -R "$(id -u):$(id -g)" /tmp/btcr2-polar
 then retry step 3.
 
 **A row fails with a confirmations mismatch.**
-The message names the vector, the expected value, what the capture yields, the
-tip and the announcement's block height. Report all four vectors' numbers and
-the tip. If all four are off by the **same** constant, this copy of the export
-has been mined on — unpack fresh and retry. If a fresh unpack still disagrees,
-that is an upstream mismatch to raise, not something to work around. Do **not** pin a fabricated tip
-to make the arithmetic come out: the tip is read from the chain, and a
-back-derived tip would make the assertion circular and unable to fail.
+The capture is pinned to the set's `recordedTip`, so mining on this copy does
+not cause it. The count the resolver reports is `recordedTip - blockHeight + 1`
+for the block of the last applied update, and the set's stated count is a lower
+bound on it; a failure means the resolver counts from a later block than the
+set does. Establish which block each side counts from before re-running. Do
+**not** pin a fabricated tip to make the arithmetic come out: a back-derived tip
+would make the assertion circular and unable to fail.
 
-**A row fails with a missing signal.**
-That vector's sidecar update is not announced anywhere on this chain. Re-unpack
-the export into a clean directory and retry the whole of Part 1 before
-concluding anything about the resolver — a partially-synced electrs index
-produces exactly this symptom.
+**A row fails with a signal that is not on chain.**
+An entry in the set's `signals.json` has no announcement at the captured
+addresses. Re-unpack the export into a clean directory and retry the whole of
+Part 1 before concluding anything about the resolver — a partially-synced
+electrs index produces exactly this symptom.
 
-**A row fails with an unconfirmed announcement.**
-Distinct fault, distinct remedy: wait for the block, then re-run the capture. Do
-not mine it yourself.
+**A row fails with an announcement above `recordedTip`, or unconfirmed.**
+Something announced on one of the set's beacons after the set was recorded.
+On a fresh unpack this cannot happen; on a copy that was mined on, unpack fresh.
 
 ---
 
-## Part 2 — mutinynet vendor vectors (live chain)
+## Part 2 — mutinynet, signet and testnet4 sets (live chains)
 
-Captures three vectors: `mutinynet/k1/q5p6w9su`, `mutinynet/k1/q5pgeu9z` and
-`mutinynet/x1/q5ugrf3w`.
+Captures the 35 drivable sets on each public network. Each network's sets are
+listed in `DRIVABLE_VECTORS` in `src/targets.rs` and described in that
+network's `README.md` in the test suite; the scenarios are the same 35 as in
+Part 1, minted again on each chain.
 
-### 1. Capture
+### 1. Capture, mutinynet first
 
-Nothing to stand up. `https://mutinynet.com/api` is the default endpoint for the
-`mutinynet` network, so no `--esplora-url` is needed:
+Nothing to stand up. Each network has a default Esplora endpoint
+(`https://mutinynet.com/api`, `https://mempool.space/signet/api`,
+`https://mempool.space/testnet4/api`), so no `--esplora-url` is needed. Run the
+three one after another, never in parallel: each session is paced on its own,
+and two at once against mempool.space would double the request rate.
 
 ```sh
 cargo run -q -p chain-capture -- capture --network mutinynet
+cargo run -q -p chain-capture -- capture --network signet
+cargo run -q -p chain-capture -- capture --network testnet4
 ```
 
-### 2. What is checked here, and what is not
+A network takes a few minutes: roughly eight paced requests per set, at least
+500 ms apart.
 
-These three vectors state `confirmations: null`, so no confirmations check runs
-for them — the chain is still mining and the vectors never claimed a fixed
-number. Everything else is unchanged: the resolve must reproduce each vector's
-expected document, `versionId` and `deactivated` flag, and every sidecar update
-must be announced by a confirmed `OP_RETURN` in a captured transaction.
+### 2. The pinned tips
 
-### 3. Why this cannot wait
+Every capture is pinned to its set's `recordedTip`. On signet (323394) and
+testnet4 (153720) every set shares one. On mutinynet the sets were recorded
+one after another while the chain moved, so each carries its own, from 3449794
+to 3449805, and the session footer states the range. A mutinynet set's stated
+`confirmations` can sit one below what its own `recordedTip` gives, where the
+count was read a block before the tip was recorded; the set's contract is "at
+least the recorded value", so the capture accepts it.
 
-mutinynet is a live test network **that gets reset**. When it is, these three
-vectors' chain data is gone permanently: nobody holds the transactions, nobody
-holds the keys, and no one can re-capture them. Capture them in the same sitting
-as everything else.
+### 3. Why mutinynet cannot wait
+
+mutinynet is a live test network **that gets reset**. When it is, these sets'
+chain data is gone permanently: nobody holds the transactions, and no one can
+re-capture them. Capture them first, in the same sitting as everything else.
 
 Note the asymmetry with what Part 3 produces. Our own minted scenarios survive a
-reset, because Part 3 exists and can be run again on a fresh chain. The vendor
-vectors' chain data cannot.
+reset, because Part 3 exists and can be run again on a fresh chain. The test
+suite's sets' chain data cannot.
 
 ```sh
 git status --short fixtures/chain/
 ```
 
-Seven new files now: four under `fixtures/chain/regtest/`, three under
-`fixtures/chain/mutinynet/`.
+140 new files now: 35 under each of `fixtures/chain/regtest/`,
+`fixtures/chain/mutinynet/`, `fixtures/chain/signet/` and
+`fixtures/chain/testnet4/`.
 
 ---
 
@@ -637,15 +707,16 @@ rm -rf /tmp/btcr2-polar
 
 ### What lands in the tree
 
-**Nine** fixture files under `fixtures/chain/` — four regtest, three mutinynet,
-two minted — each pretty-printed, so a re-capture produces a reviewable
-line-oriented diff rather than one enormous line.
+**142** fixture files under `fixtures/chain/` — 140 test-suite captures (35 on
+each of regtest, mutinynet, signet and testnet4) and two minted — each
+pretty-printed, so a re-capture produces a reviewable line-oriented diff rather
+than one enormous line.
 
 Nothing else from a session is committed: not the unpacked Polar directory, not
 the key files, not the state files.
 
 ```sh
-find fixtures/chain -name '*.json' | wc -l   # 9
+find fixtures/chain -name '*.json' | wc -l   # 142
 git status --short                           # only fixtures/chain/ paths
 ```
 
@@ -656,18 +727,22 @@ file out of the tree rather than adding another ignore rule.
 
 ### Re-capturing after Part 3
 
-Re-capturing the vendor **regtest** vectors after Part 3 fails the confirmations
-check, because Part 3 moved the tip the vectors' `confirmations` were measured
-against. Unpack the zip again into a clean directory and redo Part 1 from step 1
-on the untouched export.
+Part 3 moves the regtest tip, but the regtest captures are pinned to
+`recordedTip` 601, and Part 3 announces only on its own fresh keys' beacons, so
+a re-capture from the mined-on copy still passes the gates. Prefer a fresh
+unpack anyway (Part 1 from step 1), so that the recorded bodies come from the
+export as shipped.
 
 ---
 
 ## Part 5 — sets that carry signals.json
 
-The regenerated test suite ships a `signals.json` in each set: a bare array of
-the beacon signals the set was recorded against, every entry carrying the same
-`recordedTip`. Such a set is captured from an explicit suite root:
+The test suite ships a `signals.json` in every set with a beacon signal on
+chain: a bare array of the beacon signals the set was recorded against, every
+entry carrying the same `recordedTip`. Every set this tool captures carries
+one; a set without one has nothing on chain to capture. Parts 1 and 2 capture
+such sets from the `test-suite/` submodule. One set can also be captured from
+an explicit suite root:
 
 ```sh
 cargo run -q -p chain-capture -- \
@@ -676,7 +751,7 @@ cargo run -q -p chain-capture -- \
 
 - `--suite-root <dir>` is a checkout of the test suite. The set is read from
   `<dir>/<net>/<k1|x1>/<id>/` and must carry `signals.json`; a set without one
-  is refused, and is captured through the default `test-suite/` tree instead.
+  is refused.
 - `--vector` is required with `--suite-root`, and the id must have the form
   `<network>/<k1|x1>/<id>` with lowercase letters and digits in the last part.
   `--network` must name the directory the set is filed under.
@@ -685,8 +760,9 @@ cargo run -q -p chain-capture -- \
 - The main `resolve/input.json` may omit `resolutionOptions.sidecar`; it is
   read as `{}`, as the conformance harness reads it for a set with
   `signals.json`.
-- signet and testnet4 use their default endpoints, and every session is paced
-  (see "Pacing and rate limits"). regtest needs `--esplora-url`.
+- mutinynet, signet and testnet4 use their default endpoints, and every session
+  against them is paced (see "Pacing and rate limits"). regtest needs
+  `--esplora-url`.
 
 ### The pinned tip
 
@@ -698,10 +774,13 @@ since.
 
 ### What a capture checks
 
-- **The outcome.** For a positive set, the resolved `didDocument`, `versionId`,
-  `deactivated` flag and any stated `confirmations` must match the set's
-  `resolve/output.json`. A negative set (its `resolve/output.json` carries
-  `didResolutionMetadata.error`) is captured when the resolve fails with **any**
+- **The outcome.** For a positive set, the resolved `didDocument`, `versionId`
+  and `deactivated` flag must match the set's `resolve/output.json`, and any
+  stated `confirmations` must be reached: the set's contract is "at least the
+  recorded value" at `recordedTip`, so the resolver's count at the pinned tip
+  must be at or above it. The heights that count derives from are held to
+  `signals.json` exactly by the next check. A negative set (its
+  `resolve/output.json` carries `didResolutionMetadata.error`) is captured when the resolve fails with **any**
   specification error code. A resolve that succeeds, or that fails without a
   code, is refused. The capture does not compare the code: run the conformance
   harness on the new fixture afterwards, and it asserts the code.
@@ -710,7 +789,8 @@ since.
   recorded `blockHeight`, `blockHash` and `signalBytes`, no more and no fewer.
   Each entry's `address` must be one of the captured addresses whose history
   carries its transaction; a transaction that spends from that beacon and pays
-  change to another carries both, so either matches. This replaces the ordering checks that apply to a set without `signals.json`.
+  change to another carries both, so either matches. This replaces the
+  ordering checks that apply to a capture without `signals.json`.
 
 ### Refusals, and what to do
 
@@ -737,8 +817,13 @@ errors before a beacon rotation takes effect never requests the beacons that
 rotation adds. A negative set whose `signals.json` names a signal on such a
 beacon is therefore refused as a signal not on chain, even though the chain is
 correct. No code handles this; such a set is out of scope for capture until a
-set needs it. The regenerated late-publishing set is unaffected: both of its
-signals sit on genesis beacons.
+set needs it.
+
+It does not bite the current corpus. Every negative set's signals sit on its
+genesis beacons, including the late-publishing set's two. The only signals on
+a beacon that an update adds are in positive sets: `beacon-add-then-use`
+(`#newBeacon`) and `signal-below-current-height` (`#lateBeacon`), on every
+network. A positive resolve requests every beacon it adds.
 
 ### Live smoke (scratch only)
 

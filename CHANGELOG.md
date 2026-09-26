@@ -89,12 +89,29 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
 - The default Esplora endpoint for signet is now
   `https://mempool.space/signet/api` (was blockstream.info) for the CLI, the
   HTTP resolver and chain-capture alike.
+- A top-level verification method that carries `publicKeyMultibase` must
+  declare type `Multikey`; any other type is rejected as
+  `InvalidDidDocument`, and an update that produces one is
+  `INVALID_DID_UPDATE`.
+- The conformance suite runs against the regenerated test suite: 236 sets on
+  regtest, mutinynet, signet and testnet4, including negative sets and
+  `resolve/NN` resolution-option cases, replayed off fresh chain captures
+  (140 vendor captures, each pinned to its set's `recordedTip`). The suite's
+  `LATE_PUBLISHING_ERROR` is recorded as a divergence from the
+  specification's `LATE_PUBLISHING` (dcdpr/did-btcr2-js#204), and the
+  resolver is asserted to emit the specification's code.
+- `chain-capture` loads expected-error sets, recomputes its drivable and
+  unsupported-beacon lists from the set files in a test that fails on any
+  drift, and reads `versionId` only as a string.
 
 ### Deprecated
 
 ### Removed
 
 - `resolver::Error::UnconfirmedBeaconTx`.
+- The conformance harness's stale-update-context and unanchored
+  (`pending.json`) skip reasons, its `scenario.json` delivery cross-check, and
+  its number-tolerant `versionId` read; the corpus they served is gone.
 
 ### Fixed
 

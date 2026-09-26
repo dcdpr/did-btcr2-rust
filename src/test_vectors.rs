@@ -30,7 +30,7 @@ pub(crate) fn chain_fixture_root() -> PathBuf {
     PathBuf::from(format!("{}/fixtures/chain", env!("CARGO_MANIFEST_DIR")))
 }
 
-/// `regtest/k1/qgppexmy` -> `<crate>/fixtures/chain/regtest/k1/qgppexmy.json`.
+/// `regtest/k1/qgph7nre` -> `<crate>/fixtures/chain/regtest/k1/qgph7nre.json`.
 pub(crate) fn chain_fixture_path(vector_id: &str) -> PathBuf {
     chain_fixture_root().join(format!("{vector_id}.json"))
 }
@@ -83,13 +83,146 @@ impl Corpus {
 /// by a directory scan, which is the silent-coverage-loss this whole module
 /// exists to prevent. Listing them makes a deletion fail by name.
 pub(crate) const ALL_CHAIN_FIXTURES: &[&str] = &[
-    "regtest/k1/qgppexmy",
-    "regtest/k1/qgpy0hmm",
-    "regtest/x1/q26jeds9",
-    "regtest/x1/qfl7se8f",
-    "mutinynet/k1/q5p6w9su",
-    "mutinynet/k1/q5pgeu9z",
-    "mutinynet/x1/q5ugrf3w",
+    "regtest/k1/qgp040ju",
+    "regtest/k1/qgp0enf0",
+    "regtest/k1/qgp2ht79",
+    "regtest/k1/qgp33y4v",
+    "regtest/k1/qgp3e09g",
+    "regtest/k1/qgp5fh0e",
+    "regtest/k1/qgp5wcmx",
+    "regtest/k1/qgp6fp4d",
+    "regtest/k1/qgpejq0v",
+    "regtest/k1/qgpepnx0",
+    "regtest/k1/qgpf5yjw",
+    "regtest/k1/qgpgm6kn",
+    "regtest/k1/qgph7nre",
+    "regtest/k1/qgpl0zen",
+    "regtest/k1/qgpmreat",
+    "regtest/k1/qgpnkuln",
+    "regtest/k1/qgpp9e44",
+    "regtest/k1/qgpq3zd0",
+    "regtest/k1/qgpq4wrg",
+    "regtest/k1/qgpqx326",
+    "regtest/k1/qgpseq0v",
+    "regtest/k1/qgpw4847",
+    "regtest/k1/qgpw65qy",
+    "regtest/k1/qgpx06u2",
+    "regtest/k1/qgpxl5uu",
+    "regtest/k1/qgpz0cp4",
+    "regtest/x1/q2z78yxz",
+    "regtest/x1/qfaqdrxu",
+    "regtest/x1/qfuuz6h4",
+    "regtest/x1/qg4zny9h",
+    "regtest/x1/qg935lwg",
+    "regtest/x1/qt04c7dn",
+    "regtest/x1/qtk24dpv",
+    "regtest/x1/qtrhj3w0",
+    "regtest/x1/qty0lp74",
+    "mutinynet/k1/q5p08ynf",
+    "mutinynet/k1/q5p0w6a9",
+    "mutinynet/k1/q5p4s0y9",
+    "mutinynet/k1/q5p8svrz",
+    "mutinynet/k1/q5p97uqz",
+    "mutinynet/k1/q5p9uafd",
+    "mutinynet/k1/q5p9zf8s",
+    "mutinynet/k1/q5paaduz",
+    "mutinynet/k1/q5pduhpu",
+    "mutinynet/k1/q5pe44p3",
+    "mutinynet/k1/q5petkk0",
+    "mutinynet/k1/q5pfvsce",
+    "mutinynet/k1/q5pggxe7",
+    "mutinynet/k1/q5pkk6xt",
+    "mutinynet/k1/q5pmrprx",
+    "mutinynet/k1/q5ppjlgm",
+    "mutinynet/k1/q5pqhkks",
+    "mutinynet/k1/q5pqp5tn",
+    "mutinynet/k1/q5pqss3y",
+    "mutinynet/k1/q5pt9ln3",
+    "mutinynet/k1/q5ptfnef",
+    "mutinynet/k1/q5pueuxw",
+    "mutinynet/k1/q5puvng8",
+    "mutinynet/k1/q5py5sz0",
+    "mutinynet/k1/q5pyz053",
+    "mutinynet/k1/q5pzmjfx",
+    "mutinynet/x1/q4d3qyze",
+    "mutinynet/x1/q4nw2tdl",
+    "mutinynet/x1/q4typvtp",
+    "mutinynet/x1/q5pzvvxz",
+    "mutinynet/x1/q5rp7phe",
+    "mutinynet/x1/qhfjzym7",
+    "mutinynet/x1/qhwufjvy",
+    "mutinynet/x1/qk58te4e",
+    "mutinynet/x1/qkj4a5xu",
+    "signet/k1/qyp0nl7q",
+    "signet/k1/qyp2ju95",
+    "signet/k1/qyp3yvm3",
+    "signet/k1/qyp527dr",
+    "signet/k1/qyp5h7kz",
+    "signet/k1/qyp7s8n5",
+    "signet/k1/qypc0v9c",
+    "signet/k1/qypcaw4m",
+    "signet/k1/qypdef8c",
+    "signet/k1/qypdscmf",
+    "signet/k1/qype9x7f",
+    "signet/k1/qyph2fjv",
+    "signet/k1/qyphftn0",
+    "signet/k1/qyphkqcy",
+    "signet/k1/qyphxahc",
+    "signet/k1/qypjcajt",
+    "signet/k1/qypkdal6",
+    "signet/k1/qyplj6cu",
+    "signet/k1/qypljzfn",
+    "signet/k1/qypp2qva",
+    "signet/k1/qyprgq5l",
+    "signet/k1/qypv877a",
+    "signet/k1/qypws7tm",
+    "signet/k1/qypxn45q",
+    "signet/k1/qypxr0l9",
+    "signet/k1/qypyl83s",
+    "signet/x1/q84gyrkg",
+    "signet/x1/q8y5x5f3",
+    "signet/x1/q98uadmd",
+    "signet/x1/q99qwj9u",
+    "signet/x1/q9j6lwt5",
+    "signet/x1/q9rxnv97",
+    "signet/x1/qx6ld2rx",
+    "signet/x1/qxkut6n0",
+    "signet/x1/qyzmtprn",
+    "testnet4/k1/qsp2x348",
+    "testnet4/k1/qsp3k0pq",
+    "testnet4/k1/qsp472vc",
+    "testnet4/k1/qsp622hd",
+    "testnet4/k1/qsp854zk",
+    "testnet4/k1/qsp8g0tw",
+    "testnet4/k1/qsp9820e",
+    "testnet4/k1/qspaj3wh",
+    "testnet4/k1/qspe8u25",
+    "testnet4/k1/qspf02mv",
+    "testnet4/k1/qspk7udk",
+    "testnet4/k1/qspm6rmq",
+    "testnet4/k1/qspmajv6",
+    "testnet4/k1/qspmsf53",
+    "testnet4/k1/qspn3pvr",
+    "testnet4/k1/qspq6yml",
+    "testnet4/k1/qspqm6j2",
+    "testnet4/k1/qspqn994",
+    "testnet4/k1/qspqqxgv",
+    "testnet4/k1/qsps5avm",
+    "testnet4/k1/qsptz2u9",
+    "testnet4/k1/qspurjp5",
+    "testnet4/k1/qspxna3u",
+    "testnet4/k1/qspxpjr0",
+    "testnet4/k1/qspz5wep",
+    "testnet4/k1/qspzu0kw",
+    "testnet4/x1/q359fq2n",
+    "testnet4/x1/qjmhfkyx",
+    "testnet4/x1/qjszxrzd",
+    "testnet4/x1/qjw0t0e4",
+    "testnet4/x1/qnenf7q8",
+    "testnet4/x1/qnwp673e",
+    "testnet4/x1/qsryv830",
+    "testnet4/x1/qsukh94m",
+    "testnet4/x1/qsvpyve8",
     "minted/clean-rotating-beacons",
     "minted/late-publishing-fork",
 ];
@@ -134,26 +267,6 @@ pub(crate) const SYNTHETIC_CHAIN_FIXTURES_AT_EARLIER_TIP: &[(&str, &str, &str, u
     "minted/clean-rotating-beacons",
     3_443_748,
 )];
-
-/// Captures taken before the capture tool recorded the confirming blocks of
-/// the announcements it found. A `versionTime` bound compares against the
-/// block's `mediantime`, which only a `/block/{hash}` body carries, so the
-/// replay tests' versionTime probe cannot run on these and skips, by name,
-/// until they are re-captured. All seven are vendor vectors in
-/// `STALE_UPDATE_CONTEXT`: a live capture rejects their pre-pin update
-/// `@context`, so the re-capture waits on the upstream regeneration first.
-/// Checked in BOTH directions: a listed fixture that now holds its blocks
-/// fails saying the list is stale, and an unlisted fixture missing a block
-/// fails as a new defect rather than being skipped.
-pub(crate) const FIXTURES_WITHOUT_SIGNAL_BLOCKS: &[&str] = &[
-    "regtest/k1/qgppexmy",
-    "regtest/k1/qgpy0hmm",
-    "regtest/x1/q26jeds9",
-    "regtest/x1/qfl7se8f",
-    "mutinynet/k1/q5p6w9su",
-    "mutinynet/k1/q5pgeu9z",
-    "mutinynet/x1/q5ugrf3w",
-];
 
 /// One captured chain snapshot: what the beacon addresses returned, the tip they
 /// were read against, and the signals found in them.
@@ -825,7 +938,7 @@ fn vendor_copy_root() -> PathBuf {
 }
 
 /// Read one in-repository copy of a vendor document, by its path relative to
-/// the test-suite root (e.g. `regtest/k1/qgpakaw4/resolve/output.json`).
+/// the test-suite root (e.g. `regtest/k1/qgp45a3y/resolve/output.json`).
 /// **Panics** when the file is absent or is not JSON.
 ///
 /// Unlike [`read_fixture_or_skip`], this never skips: the copies live in this
@@ -1071,15 +1184,13 @@ pub(crate) fn confirmations_exact(
 
 /// The resolved `versionId` matches an expected positive outcome.
 ///
-/// When the output encodes `versionId` as the ASCII string the specification
-/// requires, the comparison is between strings, with no numeric coercion: a
-/// recorded `"03"` does not match a resolved 3. When the output encodes it as a
-/// JSON number (the known defect pinned by [`NUMBER_ENCODED_VERSION_ID`]), the
-/// numbers are compared. An error outcome never matches.
+/// The output records `versionId` as the ASCII string the specification
+/// requires, and the comparison is between strings, with no numeric coercion: a
+/// recorded `"03"` does not match a resolved 3. An error outcome never matches.
 pub(crate) fn version_id_matches(resolved: u64, expected: &Outcome) -> Result<(), String> {
     match expected {
         Outcome::Positive {
-            version_id_string: Some(recorded),
+            version_id_string: recorded,
             ..
         } => {
             let resolved = resolved.to_string();
@@ -1087,13 +1198,6 @@ pub(crate) fn version_id_matches(resolved: u64, expected: &Outcome) -> Result<()
                 format!("resolved versionId \"{resolved}\" must equal the recorded \"{recorded}\"")
             })
         }
-        Outcome::Positive {
-            version_id: recorded,
-            version_id_string: None,
-            ..
-        } => (resolved == *recorded).then_some(()).ok_or_else(|| {
-            format!("resolved versionId {resolved} must equal the recorded {recorded}")
-        }),
         Outcome::Error { code } => Err(format!(
             "resolved versionId {resolved}, but the output records error {code}"
         )),
@@ -1264,13 +1368,6 @@ fn read_json_at(path: &Path, ctx: &str) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("{ctx}: {} is not valid JSON: {e}", path.display()))
 }
 
-/// Read and parse a JSON file that may legitimately be absent (`scenario.json`,
-/// `signals.json`). Absent yields `None`; present but unreadable or malformed
-/// panics, because a corrupt optional file is still a corrupt file.
-fn read_json_opt(path: &Path, ctx: &str) -> Option<serde_json::Value> {
-    path.is_file().then(|| read_json_at(path, ctx))
-}
-
 /// Map a network name onto a `Network`.
 ///
 /// Two call sites read the same vocabulary from different places — the
@@ -1400,17 +1497,18 @@ pub(crate) fn field_hex(value: &serde_json::Value, path: &str, ctx: &str) -> Vec
     hex::decode(raw).unwrap_or_else(|e| panic!("{ctx}: {path} must be hex, got {raw:?}: {e}"))
 }
 
-/// Read a `versionId`-shaped field through the encoding-tolerant coercion,
-/// naming the vector and the JSON path on failure.
+/// Read one of an update payload's integer version numbers
+/// (`signedUpdate.targetVersionId`, `input.json` `sourceVersionId`) through
+/// [`update_version_number`], naming the vector and the JSON path on failure.
 pub(crate) fn field_version_id(value: &serde_json::Value, path: &str, ctx: &str) -> u64 {
-    version_id_u64(json_at(value, path), &format!("{ctx} {path}"))
+    update_version_number(json_at(value, path), &format!("{ctx} {path}"))
 }
 
-/// Read a `versionId`-shaped field that the crate models as a `NonZeroU64`.
+/// Read an update version number that the crate models as a `NonZeroU64`.
 ///
-/// `version_id_u64` accepts `0`, which the crate's `NonZeroU64` cannot hold, so
-/// a fixture stating `targetVersionId: 0` used to panic bare on
-/// `NonZeroU64::new(..).unwrap()`.
+/// The integer reader accepts `0`, which the crate's `NonZeroU64` cannot hold,
+/// so a fixture stating `targetVersionId: 0` fails here by name rather than on
+/// a bare `NonZeroU64::new(..).unwrap()`.
 pub(crate) fn field_nonzero_version_id(
     value: &serde_json::Value,
     path: &str,
@@ -1421,19 +1519,16 @@ pub(crate) fn field_nonzero_version_id(
         .unwrap_or_else(|| panic!("{ctx}: {path} must be greater than zero, got {raw}"))
 }
 
-/// Read a fixture's `versionId` as a `u64`, accepting either a JSON number or
-/// an ASCII-decimal string.
+/// Read a resolution output's `didDocumentMetadata.versionId` as a `u64`.
 ///
-/// The regtest vectors encode it as `"2"` and the mutinynet vectors as `2`.
-/// Both are read here; the crate's own emit-a-string / reject-a-number contract
-/// is pinned by the `DocumentMetadata` round-trip test in `document.rs`, which
-/// does not depend on fixtures. `ctx` is the vector id, so a bad fixture names
-/// itself.
-pub(crate) fn version_id_u64(value: &serde_json::Value, ctx: &str) -> u64 {
+/// The specification makes it a string, and the vectors record it as one
+/// (`"2"`): only a non-empty ASCII-decimal JSON string that fits `u64` is
+/// accepted. A JSON number, or any other type, is a corrupt fixture and panics
+/// naming `ctx`, so the file at fault names itself. The crate's own
+/// emit-a-string / reject-a-number contract is pinned separately by the
+/// `DocumentMetadata` round-trip test in `document.rs`.
+pub(crate) fn metadata_version_id(value: &serde_json::Value, ctx: &str) -> u64 {
     match value {
-        serde_json::Value::Number(n) => n
-            .as_u64()
-            .unwrap_or_else(|| panic!("{ctx}: versionId must be a non-negative integer, got {n}")),
         serde_json::Value::String(s) => {
             assert!(
                 !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
@@ -1442,9 +1537,29 @@ pub(crate) fn version_id_u64(value: &serde_json::Value, ctx: &str) -> u64 {
             s.parse()
                 .unwrap_or_else(|e| panic!("{ctx}: versionId {s:?} does not fit u64: {e}"))
         }
-        other => {
-            panic!("{ctx}: versionId must be a JSON number or an ASCII-decimal string, got {other}")
+        serde_json::Value::Number(n) => {
+            panic!("{ctx}: versionId must be a string, found a number {n}")
         }
+        other => panic!("{ctx}: versionId must be a string, got {other}"),
+    }
+}
+
+/// Read an update payload's version number (`targetVersionId`,
+/// `sourceVersionId`) as a `u64`.
+///
+/// Unlike the metadata `versionId`, these are JSON integers: the specification's
+/// example writes `"targetVersionId": 2`, and the crate parses the field into a
+/// `NonZeroU64`. Only a JSON number that fits `u64` is accepted; a string, a
+/// float, a negative number, a bool or null panics naming `ctx`.
+pub(crate) fn update_version_number(value: &serde_json::Value, ctx: &str) -> u64 {
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .unwrap_or_else(|| panic!("{ctx}: must be a non-negative JSON integer, got {n}")),
+        serde_json::Value::String(s) => {
+            panic!("{ctx}: must be a JSON integer, found a string {s:?}")
+        }
+        other => panic!("{ctx}: must be a JSON integer, got {other}"),
     }
 }
 
@@ -1452,13 +1567,13 @@ pub(crate) fn version_id_u64(value: &serde_json::Value, ctx: &str) -> u64 {
 /// classification rules consume.
 #[derive(Clone, Debug)]
 pub(crate) struct Vector {
-    /// `"mutinynet/x1/q5m2fh36"` — the row key and the message prefix.
+    /// `"regtest/x1/qfaqdrxu"` — the row key and the message prefix.
     pub(crate) id: String,
     /// `"mutinynet"` / `"regtest"`.
     pub(crate) network_dir: String,
     /// `"k1"` / `"x1"` — the directory segment, kept verbatim for messages.
     pub(crate) kind: String,
-    /// `"q5m2fh36"`.
+    /// `"qfaqdrxu"`.
     pub(crate) short_id: String,
     /// `id_type_from_kind(&kind)`, cross-checked against the vector's own
     /// `create/input.json.idType`. Every branch on "is this vector external?"
@@ -1483,17 +1598,8 @@ pub(crate) struct Vector {
     /// order of the number each names, each with the outcome its own
     /// `output.json` expects. Empty when `resolve/` holds only the main pair.
     pub(crate) resolve_cases: Vec<ResolveCase>,
-    /// At least one update step in this vector's own files —
-    /// `update/**/output.json` `signedUpdate` and its `proof`, or
-    /// `resolve/input.json` sidecar `updates[*]` and their proofs — carries an
-    /// `@context` that is not the pinned BTCR2 Unsigned Update array. Such a
-    /// vector predates the spec's pin and is being regenerated upstream; its
-    /// Resolve row is skipped under `StaleContext` until the regenerated vector
-    /// lands, at which point this flag clears itself.
-    pub(crate) stale_update_context: bool,
     /// How the genesis document and the announcements reach a resolver,
-    /// derived from the files present ([`derive_delivery`]) and cross-checked
-    /// against `scenario.json.delivery` where that declares one.
+    /// derived from the files present ([`derive_delivery`]).
     pub(crate) delivery: Delivery,
     /// Every `type` string in `other.json.genesisDocument.service[]`.
     pub(crate) genesis_service_types: Vec<String>,
@@ -1537,8 +1643,6 @@ pub(crate) struct Delivery {
     pub(crate) announcement: Option<AnnouncementDelivery>,
     /// The main resolve pair expects an error.
     pub(crate) negative: bool,
-    /// `pending.json` is present: the set's updates were never anchored.
-    pub(crate) pending: bool,
 }
 
 /// Derive a set's delivery mechanisms from the files it ships.
@@ -1557,7 +1661,6 @@ pub(crate) fn derive_delivery(
     has_sidecar_genesis_document: bool,
     has_update_steps: bool,
     sidecar_has_updates: bool,
-    pending: bool,
 ) -> Delivery {
     let genesis = match id_type {
         VectorIdType::Key => GenesisDelivery::Deterministic,
@@ -1575,75 +1678,7 @@ pub(crate) fn derive_delivery(
         genesis,
         announcement,
         negative,
-        pending,
     }
-}
-
-/// Cross-check a derived delivery against the `delivery` object a
-/// `scenario.json` declares. `declared_genesis` / `declared_announcement` are
-/// the object's members as strings; an absent member declares "not CAS".
-///
-/// A declared `"cas"` must match a derived CAS delivery and vice versa, for
-/// the genesis document always and for the announcements only when the set is
-/// not pending: a pending set never ran its anchoring step, so its files cannot
-/// show which announcement mechanism was intended. A declared `"smt"` requires
-/// an `SMTBeacon` in the genesis document.
-pub(crate) fn cross_check_scenario(
-    derived: &Delivery,
-    declared_genesis: Option<&str>,
-    declared_announcement: Option<&str>,
-    genesis_service_types: &[String],
-) -> Result<(), String> {
-    let genesis_cas = derived.genesis == GenesisDelivery::Cas;
-    if (declared_genesis == Some("cas")) != genesis_cas {
-        return Err(format!(
-            "scenario.json declares genesis delivery {declared_genesis:?} but the files show \
-             {:?} — the files and scenario.json disagree",
-            derived.genesis
-        ));
-    }
-    if !derived.pending {
-        let announcement_cas = derived.announcement == Some(AnnouncementDelivery::Cas);
-        if (declared_announcement == Some("cas")) != announcement_cas {
-            return Err(format!(
-                "scenario.json declares announcement delivery {declared_announcement:?} but the \
-                 files show {:?} — the files and scenario.json disagree",
-                derived.announcement
-            ));
-        }
-    }
-    for declared in [declared_genesis, declared_announcement]
-        .into_iter()
-        .flatten()
-    {
-        if declared == "smt" && !genesis_service_types.iter().any(|t| t == "SMTBeacon") {
-            return Err(format!(
-                "scenario.json declares SMT delivery but the genesis document declares no \
-                 SMTBeacon (services: {genesis_service_types:?}) — the files and scenario.json \
-                 disagree"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Cross-check a derived delivery against a whole `scenario.json`: a null or
-/// absent `delivery` declares nothing and is not checked.
-pub(crate) fn check_scenario_delivery(
-    derived: &Delivery,
-    scenario: &serde_json::Value,
-    genesis_service_types: &[String],
-) -> Result<(), String> {
-    let declared = &scenario["delivery"];
-    if declared.is_null() {
-        return Ok(());
-    }
-    cross_check_scenario(
-        derived,
-        declared["genesis"].as_str(),
-        declared["announcement"].as_str(),
-        genesis_service_types,
-    )
 }
 
 /// The outcome a resolve `output.json` expects.
@@ -1651,13 +1686,11 @@ pub(crate) fn check_scenario_delivery(
 pub(crate) enum Outcome {
     /// A resolved document, described by `didDocumentMetadata`.
     Positive {
-        /// `didDocumentMetadata.versionId`, read from either encoding.
+        /// `didDocumentMetadata.versionId`, as a number.
         version_id: u64,
-        /// The same field verbatim when it is the ASCII string the
-        /// specification requires; `None` when the fixture encodes it as a
-        /// JSON number, a known upstream defect that the coverage summary
-        /// reports.
-        version_id_string: Option<String>,
+        /// The same field verbatim, the ASCII string the specification
+        /// requires. Compared as a string, so a recorded `"03"` is not 3.
+        version_id_string: String,
         /// `didDocumentMetadata.deactivated`.
         deactivated: bool,
         /// `didDocumentMetadata.confirmations`; `None` when absent or null.
@@ -1683,7 +1716,7 @@ pub(crate) struct ResolveCase {
 ///
 /// An output carrying `didResolutionMetadata.error` is an expected error, and
 /// its code must be a string. Anything else is a resolved document, whose
-/// `versionId` is read through [`version_id_u64`] (either encoding),
+/// `versionId` is read through [`metadata_version_id`] (a string only),
 /// `deactivated` must be a bool, and `confirmations`, when present and non-null,
 /// must be a non-negative integer.
 pub(crate) fn parse_outcome(output: &serde_json::Value, ctx: &str) -> Outcome {
@@ -1702,12 +1735,16 @@ pub(crate) fn parse_outcome(output: &serde_json::Value, ctx: &str) -> Outcome {
             )
         })),
     };
+    let version_id = metadata_version_id(
+        version_id_node,
+        &format!("{ctx} didDocumentMetadata.versionId"),
+    );
     Outcome::Positive {
-        version_id: version_id_u64(
-            version_id_node,
-            &format!("{ctx} didDocumentMetadata.versionId"),
-        ),
-        version_id_string: version_id_node.as_str().map(str::to_string),
+        version_id,
+        version_id_string: version_id_node
+            .as_str()
+            .expect("metadata_version_id accepted only a string")
+            .to_string(),
         deactivated: field_bool(output, "didDocumentMetadata.deactivated", ctx),
         confirmations,
     }
@@ -1728,21 +1765,6 @@ impl Vector {
             Outcome::Positive { version_id, .. } => Some(*version_id),
             Outcome::Error { .. } => None,
         }
-    }
-
-    /// The main resolve pair's `versionId` is a JSON number rather than the
-    /// ASCII string the specification requires. Recorded so the coverage
-    /// summary can report it: the coercion reads either encoding, but a
-    /// silently-absorbed fixture defect is exactly the kind of gap this ledger
-    /// exists to surface. Clears itself when the fixtures are corrected.
-    pub(crate) fn version_id_is_number(&self) -> bool {
-        matches!(
-            self.outcome,
-            Outcome::Positive {
-                version_id_string: None,
-                ..
-            }
-        )
     }
 
     /// The main resolve pair expects an error rather than a document.
@@ -1786,9 +1808,9 @@ const KNOWN_OPERATION_DIRS: &[&str] = &["create", "resolve", "update"];
 /// Recognized operation sub-directories are exactly `create/`, `resolve/` and
 /// `update/`; anything else (a future `revoke/` or `recover/`) is an operation
 /// we do not model and must fail loud rather than be silently ignored.
-/// Unknown *flat sibling files* are deliberately NOT policed — the vector
-/// generator ships `scenario.json`, `funding.json` and `pending.json` as
-/// metadata, and an unknown-file rule would go red on pure generator output.
+/// Unknown *flat sibling files* are deliberately NOT policed: they are
+/// generator metadata the harness does not read, and an unknown-file rule
+/// would go red on pure generator output.
 ///
 /// Pure over entry names on purpose: every rejection path is unit-testable
 /// without mutating a checked-in fixture.
@@ -2043,36 +2065,6 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                 let has_sidecar_genesis_document =
                     !resolve_input["resolutionOptions"]["sidecar"]["genesisDocument"].is_null();
 
-                // Every update the vector carries — the signed output of each
-                // update step, and the sidecar copies the resolve step feeds
-                // back in — must carry the spec's pinned `@context` on the
-                // update and on its proof. A vector with no update steps and
-                // no sidecar updates has nothing to be stale about.
-                let pinned = serde_json::json!(crate::update::UPDATE_CONTEXT);
-                let mut stale_update_context = false;
-                for step in update_layout.step_prefixes() {
-                    let ctx = format!("{id}/{step}/output.json");
-                    if let Some(output) =
-                        read_json_opt(&vector_path.join(&step).join("output.json"), &ctx)
-                    {
-                        let signed_update = &output["signedUpdate"];
-                        if signed_update["@context"] != pinned
-                            || signed_update["proof"]["@context"] != pinned
-                        {
-                            stale_update_context = true;
-                        }
-                    }
-                }
-                if let Some(updates) =
-                    resolve_input["resolutionOptions"]["sidecar"]["updates"].as_array()
-                {
-                    for update in updates {
-                        if update["@context"] != pinned || update["proof"]["@context"] != pinned {
-                            stale_update_context = true;
-                        }
-                    }
-                }
-
                 let other = read_json_at(&vector_path.join("other.json"), &id);
                 let genesis_service_types: Vec<String> = other["genesisDocument"]["service"]
                     .as_array()
@@ -2087,25 +2079,14 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                     .then(|| field_str(&other, "scenarioId", &format!("{id}/other.json")))
                     .map(str::to_string);
 
-                // Delivery comes from the files. Where a `scenario.json`
-                // declares one (the regtest sets ship none, and `delivery` is
-                // `null` on 9 mutinynet sets) the two must agree, so a silent
-                // reclassification cannot shrink the ledger.
+                // Delivery comes from the files alone.
                 let delivery = derive_delivery(
                     id_type,
                     matches!(outcome, Outcome::Error { .. }),
                     has_sidecar_genesis_document,
                     update_layout != UpdateLayout::None,
                     resolve_input["resolutionOptions"]["sidecar"]["updates"].is_array(),
-                    vector_path.join("pending.json").is_file(),
                 );
-                if let Some(scenario) = read_json_opt(
-                    &vector_path.join("scenario.json"),
-                    &format!("{id}/scenario.json"),
-                ) {
-                    check_scenario_delivery(&delivery, &scenario, &genesis_service_types)
-                        .unwrap_or_else(|msg| panic!("{id}: {msg}"));
-                }
 
                 let signals_path = vector_path.join("signals.json");
                 let signals = signals_path.is_file().then(|| {
@@ -2128,7 +2109,6 @@ pub(crate) fn discover_in(corpus: &Corpus) -> Vec<Vector> {
                     update_layout,
                     outcome,
                     resolve_cases,
-                    stale_update_context,
                     delivery,
                     genesis_service_types,
                     has_sidecar_genesis_document,
@@ -2206,7 +2186,7 @@ impl fmt::Display for AssertionKind {
 /// ledger derives the keys it expects; the two sets are compared per kind.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RowKey {
-    /// The set's id, e.g. `"mutinynet/x1/q5m2fh36"`.
+    /// The set's id, e.g. `"regtest/x1/qfaqdrxu"`.
     pub(crate) vector: String,
     /// The `resolve/NN` case name for a resolve-option row; `None` otherwise.
     pub(crate) case: Option<String>,
@@ -2254,7 +2234,7 @@ impl fmt::Display for RowKey {
 /// input.
 ///
 /// There is deliberately no derived reason for "this vector is v2+ but its
-/// chain data cannot be captured" any more. If a new v2+ Singleton, non-pending
+/// chain data cannot be captured" any more. If a new v2+ Singleton
 /// vector arrives whose beacon transactions are gone — a mutinynet reset, say —
 /// it becomes a driven row with no fixture and `read_chain_fixture` panics. The
 /// remedy is a `SKIP_OVERRIDES` entry with the reason stated, not resurrecting
@@ -2263,8 +2243,6 @@ impl fmt::Display for RowKey {
 /// future v2 vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum SkipReason {
-    /// `pending.json`: the vector's updates are not fully anchored on chain.
-    Unanchored,
     /// The vector's genesis document or delivery recipe uses CAS aggregation.
     CasDelivery,
     /// The vector's genesis document or delivery recipe uses SMT aggregation.
@@ -2276,16 +2254,6 @@ pub(crate) enum SkipReason {
     /// an announcement is DELIVERED — a different problem fixed in different
     /// code. Both are recorded when both apply.
     UnsupportedBeaconType,
-    /// The vector's update `@context` predates the spec's pin; regenerated
-    /// upstream and absorbed when the regenerated suite is bumped. Applies to
-    /// the Resolve kind and the set's resolve-option cases only: the
-    /// UpdateCrypto and EndState drivers rebuild the
-    /// update from `input.json` and compare document hashes, so those rows
-    /// stay driven. Until the resolver rejects a non-pinned `@context`, the
-    /// rows parked here would still pass; the skip lands before the reject so
-    /// that no commit is ever red, and the label becomes literally true once
-    /// the reject lands.
-    StaleContext,
     /// The set's main `resolve/output.json` carries
     /// `didResolutionMetadata.error`. Applies to UpdateCrypto and EndState: the
     /// set is built to fail resolution, so its Resolve row asserts the error
@@ -2299,15 +2267,10 @@ pub(crate) enum SkipReason {
 impl fmt::Display for SkipReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unanchored => f.write_str("unanchored (pending.json)"),
             Self::CasDelivery => f.write_str("CAS-aggregated delivery not implemented"),
             Self::SmtDelivery => f.write_str("SMT-aggregated delivery not implemented"),
             Self::UnsupportedBeaconType => f.write_str(
                 "resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)",
-            ),
-            Self::StaleContext => f.write_str(
-                "update @context predates the spec pin; regenerated upstream, absorbed at the \
-                 test-suite bump",
             ),
             Self::ExpectedError => f.write_str(
                 "the set's expected result is an error; its Resolve row asserts the code",
@@ -2327,7 +2290,7 @@ impl fmt::Display for SkipReason {
 /// driven. Both sides must move together or the override would turn the suite
 /// red instead of yielding a stated skip.
 pub(crate) struct SkipOverride {
-    /// The set's id, e.g. `"mutinynet/x1/qh66uy2s"`.
+    /// The set's id, e.g. `"regtest/x1/qghp0w22"`.
     pub(crate) vector: &'static str,
     /// The assertion this entry suppresses.
     pub(crate) kind: AssertionKind,
@@ -2346,40 +2309,14 @@ pub(crate) struct SkipOverride {
 /// suite fails — additions cannot hide, and neither can removals.
 pub(crate) const SKIP_OVERRIDES: &[SkipOverride] = &[];
 
-/// The vectors whose `resolve/output.json.didDocumentMetadata.versionId` is a
-/// JSON number rather than the ASCII string the specification requires.
+/// The vectors whose `didDocumentMetadata.versionId` is a JSON number rather
+/// than the ASCII string the specification requires.
 ///
-/// A known upstream fixture defect, pinned to an explicit id set and asserted in
-/// BOTH directions:
-/// - a number-encoded vector NOT listed here is a NEW defect and fails by name,
-///   instead of being absorbed by the encoding-tolerant read;
-/// - a listed vector that is now string-encoded also fails, telling the reader
-///   to delete the entry.
-///
-/// The second direction is the point. Keying this on the network directory
-/// instead would auto-forgive a newly added defective vector AND go red on a
-/// partial upstream conformance fix with a message reading as though the
-/// now-conformant fixture were at fault — blocking exactly the improvement the
-/// check exists to encourage. Correcting a fixture (upstream's or ours) costs a
-/// one-line edit here, which is the intended forcing function.
-pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[
-    "mutinynet/k1/q5p6w9su",
-    "mutinynet/k1/q5pgeu9z",
-    "mutinynet/k1/q5puld7y",
-    "mutinynet/x1/q425c5wf",
-    "mutinynet/x1/q4lqu6gr",
-    "mutinynet/x1/q4rnhfhv",
-    "mutinynet/x1/q4x4pxl2",
-    "mutinynet/x1/q550pp4e",
-    "mutinynet/x1/q59jnwfs",
-    "mutinynet/x1/q5cfewep",
-    "mutinynet/x1/q5g3smvu",
-    "mutinynet/x1/q5m2fh36",
-    "mutinynet/x1/q5ugrf3w",
-    "mutinynet/x1/qh66uy2s",
-    "mutinynet/x1/qkrrp544",
-    "mutinynet/x1/qky9e7qz",
-];
+/// Empty, and expected to stay so: the corpus encodes every `versionId` as a
+/// string. Its guard, `live_vectors_record_their_version_id_encoding`, reads
+/// the raw output files and fails if a number-encoded vector reappears, which
+/// discovery would already refuse through [`metadata_version_id`].
+pub(crate) const NUMBER_ENCODED_VERSION_ID: &[&str] = &[];
 
 /// An error code a test vector records where the specification names a different one.
 pub(crate) struct CodeDivergence {
@@ -2394,7 +2331,7 @@ pub(crate) struct CodeDivergence {
 /// The error codes where a vector and the specification disagree, each with
 /// the upstream thread tracking the reconciliation.
 ///
-/// Pinned in BOTH directions, like [`NUMBER_ENCODED_VERSION_ID`]:
+/// Pinned in BOTH directions:
 /// - a negative row whose emitted code differs from its vector's code and is
 ///   not listed here fails as a NEW divergence, instead of being absorbed;
 /// - a listed entry that no driven negative case uses fails too
@@ -2405,10 +2342,16 @@ pub(crate) struct CodeDivergence {
 /// `SKIP_OVERRIDES` must never be used for code drift, because a skipped row
 /// asserts nothing and a later regression in the emitted code would pass.
 ///
-/// Empty on the current test-suite pin, because no vector there records an
-/// error. It is expected to gain its first entry when the regenerated test
-/// suite, which ships negative sets, is absorbed.
-pub(crate) const ERROR_CODE_DIVERGENCES: &[CodeDivergence] = &[];
+/// The test suite records the late-publishing error under the code
+/// `LATE_PUBLISHING_ERROR`, where the specification names it `LATE_PUBLISHING`.
+/// Once the suite is regenerated with the specification's code, no driven row
+/// records `LATE_PUBLISHING_ERROR` any more and [`unused_divergences`] fails,
+/// telling the reader to drop the entry.
+pub(crate) const ERROR_CODE_DIVERGENCES: &[CodeDivergence] = &[CodeDivergence {
+    vector_code: "LATE_PUBLISHING_ERROR",
+    spec_code: "LATE_PUBLISHING",
+    issue: "dcdpr/did-btcr2-js#204",
+}];
 
 /// The code the resolver must emit for a row whose vector records
 /// `vector_code`: the specification's code when the pair is listed in
@@ -2485,46 +2428,6 @@ pub(crate) fn malformed_divergences(divergences: &[CodeDivergence]) -> Vec<Strin
     rows
 }
 
-/// The vectors whose update files carry an `@context` that predates the spec's
-/// pinned BTCR2 Unsigned Update array — every vector with an `update/`
-/// directory in the vendor suite as checked out today.
-///
-/// The upstream suite is being regenerated with the pinned array. Until that
-/// lands, these vectors' Resolve rows are skipped under
-/// [`SkipReason::StaleContext`]; the population is pinned to an explicit id set
-/// and asserted in BOTH directions:
-/// - a stale vector NOT listed here is a NEW pre-pin vector and fails by name,
-///   instead of being absorbed by the derived skip;
-/// - a listed vector that is now clean also fails, telling the reader to delete
-///   the entry and re-raise [`DRIVEN_FLOOR`]'s Resolve entry.
-///
-/// The second direction is the point. A derived skip with no pin would absorb
-/// the regeneration silently — a regenerated vector clears the rule, its row
-/// is driven, and nobody re-raises the floor. With the pin, the bump trips
-/// this list (and the count check on it) until the regeneration is absorbed
-/// deliberately; a regenerated vector that still carries the old array stays
-/// honestly skipped rather than failing. At the bump this list should empty
-/// and the guard flip to "none expected".
-pub(crate) const STALE_UPDATE_CONTEXT: &[&str] = &[
-    "mutinynet/k1/q5p6w9su",
-    "mutinynet/k1/q5pgeu9z",
-    "mutinynet/x1/q425c5wf",
-    "mutinynet/x1/q4lqu6gr",
-    "mutinynet/x1/q4rnhfhv",
-    "mutinynet/x1/q4x4pxl2",
-    "mutinynet/x1/q550pp4e",
-    "mutinynet/x1/q59jnwfs",
-    "mutinynet/x1/q5cfewep",
-    "mutinynet/x1/q5m2fh36",
-    "mutinynet/x1/q5ugrf3w",
-    "mutinynet/x1/qkrrp544",
-    "mutinynet/x1/qky9e7qz",
-    "regtest/k1/qgppexmy",
-    "regtest/k1/qgpy0hmm",
-    "regtest/x1/q26jeds9",
-    "regtest/x1/qfl7se8f",
-];
-
 /// The number of rows each assertion kind must drive, at minimum.
 ///
 /// A coverage ratchet, not a census: `reconcile_driven_with` passes trivially
@@ -2538,18 +2441,11 @@ pub(crate) const STALE_UPDATE_CONTEXT: &[&str] = &[
 /// loss — an upstream vector losing its sidecar genesis document, or a deleted
 /// capture — must fail here rather than shrink coverage quietly.
 ///
-/// Four Resolve rows are driven today: the genesis-era vectors
-/// `mutinynet/k1/q5puld7y`, `mutinynet/x1/q5g3smvu`, `regtest/k1/qgpakaw4`
-/// and `regtest/x1/q2fz9mz6`. The seven anchored past-genesis rows that were
-/// driven from `fixtures/chain/` are parked under [`SkipReason::StaleContext`]
-/// while the upstream suite is regenerated with the pinned update `@context`;
-/// re-raise this entry to 11 or more when the regenerated suite is absorbed
-/// and [`STALE_UPDATE_CONTEXT`] empties. UpdateCrypto and EndState are
-/// unaffected: their drivers never read the vector's `@context`.
-///
-/// ResolveOption is 0: the current test-suite pin ships no `resolve/NN` case,
-/// so there is nothing to drive yet. Raise it when the regenerated suite, which
-/// does ship such cases, is absorbed.
+/// The counts are the rows the regenerated corpus drives on its four networks
+/// (regtest, mutinynet, signet and testnet4). Resolve counts both genesis-era
+/// sets, which resolve without a chain, and past-genesis sets, which replay
+/// their captured snapshot from `fixtures/chain/`; ResolveOption counts the
+/// `resolve/NN` cases.
 ///
 /// Compared with `>=`, so upstream ADDING vectors raises coverage without
 /// failing; only silent coverage LOSS fails.
@@ -2559,31 +2455,29 @@ pub(crate) const STALE_UPDATE_CONTEXT: &[&str] = &[
 /// otherwise trip the ratchet, which is the very failure mode that makes the
 /// escape hatch unusable.
 pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
-    (AssertionKind::Derivation, 22),
-    (AssertionKind::GenesisKey, 22),
-    (AssertionKind::Resolve, 4),
-    (AssertionKind::UpdateCrypto, 17),
-    (AssertionKind::EndState, 17),
-    (AssertionKind::ResolveOption, 0),
+    (AssertionKind::Derivation, 236),
+    (AssertionKind::GenesisKey, 236),
+    (AssertionKind::Resolve, 164),
+    (AssertionKind::UpdateCrypto, 108),
+    (AssertionKind::EndState, 108),
+    (AssertionKind::ResolveOption, 53),
 ];
 
 /// Derive the reasons a vector's `resolve` row cannot be driven, from the
 /// vector's own files.
 ///
-/// Three rules, all additive — a row keeps every reason that applies:
-/// 1. `pending.json` present            -> `Unanchored`
-/// 2. a `CASBeacon` / `SMTBeacon` service in the genesis document
+/// Two rules, both additive — a row keeps every reason that applies:
+/// 1. a `CASBeacon` / `SMTBeacon` service in the genesis document
 ///    -> `CasDelivery` / `SmtDelivery`, AND `UnsupportedBeaconType`
-/// 3. the derived genesis or announcement delivery is CAS -> `CasDelivery`
+/// 2. the derived genesis or announcement delivery is CAS -> `CasDelivery`
 ///
-/// Rule 3 reads the delivery [`derive_delivery`] reads off the files (an
+/// Rule 2 reads the delivery [`derive_delivery`] reads off the files (an
 /// external set with no sidecar genesis document; update steps with no sidecar
-/// updates), which discovery has already cross-checked against any
-/// `scenario.json` declaration. It is what accounts for the genesis-era vector
-/// whose genesis document is CAS-delivered while it carries no beacon-type
-/// signal at all (empty `service`, no `pending.json`, expected `versionId` 1).
+/// updates). It is what accounts for a set whose genesis document is
+/// CAS-delivered while it carries no beacon-type signal at all (an empty
+/// `service` array).
 ///
-/// Rule 2 applies to every set, negative sets included, and is what makes the
+/// Rule 1 applies to every set, negative sets included, and is what makes the
 /// aggregation milestone's target set mechanically derivable: a CAS or SMT
 /// beacon in the genesis document blocks resolve twice over — the delivery
 /// mechanism is unimplemented, and the resolver refuses to issue a request for
@@ -2595,26 +2489,13 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
 /// driven from its captured chain snapshot, so "past genesis" is no longer a
 /// reason to skip; see [`SkipReason`] for the escape route a v2+ vector whose
 /// chain data cannot be captured takes instead.
-///
-/// A fourth rule lives in [`Vector::skip_reasons_with`] rather than here,
-/// because it reads a field this function's unit-tested signature does not
-/// carry:
-/// 4. any update step's `@context` (or its proof's) is not the pinned array
-///    -> `StaleContext` (Resolve and resolve-option only) — from the vector's
-///    own update files
-///    (`update/**/output.json`, `resolve/input.json` sidecar `updates`).
 pub(crate) fn derived_resolve_skip_reasons(
     delivery: &Delivery,
     genesis_service_types: &[String],
 ) -> BTreeSet<SkipReason> {
     let mut reasons = BTreeSet::new();
 
-    // Rule 1: the vector's own generator recorded undelivered update steps.
-    if delivery.pending {
-        reasons.insert(SkipReason::Unanchored);
-    }
-
-    // Rule 2: the genesis document's beacon services, by their wire strings.
+    // Rule 1: the genesis document's beacon services, by their wire strings.
     // A CAS or SMT beacon blocks resolve TWICE over: the delivery mechanism is
     // unimplemented, AND the resolver refuses to issue a request for that beacon
     // type at all. Recording both keeps each downstream target set precise.
@@ -2635,7 +2516,7 @@ pub(crate) fn derived_resolve_skip_reasons(
         }
     }
 
-    // Rule 3: a CAS delivery the files show.
+    // Rule 2: a CAS delivery the files show.
     if delivery.genesis == GenesisDelivery::Cas
         || delivery.announcement == Some(AnnouncementDelivery::Cas)
     {
@@ -2757,13 +2638,13 @@ impl Vector {
     ///
     /// Derived reasons by kind:
     /// - `Resolve` and `ResolveOption`: the delivery, anchoring and beacon
-    ///   rules of [`derived_resolve_skip_reasons`], plus `StaleContext`. A
+    ///   rules of [`derived_resolve_skip_reasons`]. A
     ///   resolve case inherits exactly its set's reasons: a case of a
     ///   CAS-delivered set is as undeliverable as the main pair.
     /// - `UpdateCrypto` and `EndState`: `ExpectedError` when the set's main
     ///   resolve pair expects an error. The delivery reasons say nothing about
-    ///   whether a patch sequence reproduces a document, so an unanchored set
-    ///   still drives both.
+    ///   whether a patch sequence reproduces a document, so a CAS-delivered
+    ///   set still drives both.
     /// - `Derivation` and `GenesisKey`: none.
     ///
     /// An override applies when it names this set, this kind and this case.
@@ -2780,13 +2661,6 @@ impl Vector {
                     &self.delivery,
                     &self.genesis_service_types,
                 ));
-                // Rule 4: a pre-pin update `@context`, from the vector's own
-                // update files. The update-crypto and end-state drivers never
-                // read the vector's `@context` (they rebuild the update and
-                // compare document hashes), so those rows are genuinely driven.
-                if self.stale_update_context {
-                    reasons.insert(SkipReason::StaleContext);
-                }
             }
             AssertionKind::UpdateCrypto | AssertionKind::EndState => {
                 if self.is_negative() {
@@ -3090,42 +2964,6 @@ pub(crate) fn render_summary_with(vectors: &[Vector], overrides: &[SkipOverride]
         out.push_str(&format!("    {:<width$}{count:>5}\n", reason.to_string()));
     }
 
-    // Known upstream fixture defect: the specification requires
-    // didDocumentMetadata.versionId to be an ASCII string. Reported on every
-    // green run so it cannot be absorbed silently, and self-clearing once the
-    // fixtures are corrected.
-    let defective: Vec<&Vector> = vectors
-        .iter()
-        .filter(|v| v.version_id_is_number())
-        .collect();
-    if defective.is_empty() {
-        out.push_str("  fixture defects: none\n");
-    } else {
-        let networks: BTreeSet<&str> = defective.iter().map(|v| v.network_dir.as_str()).collect();
-        out.push_str(&format!(
-            "  fixture defects: {} vector(s) encode versionId as a JSON number \
-             (the specification requires an ASCII string): {}\n",
-            defective.len(),
-            networks.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-    }
-
-    // Vectors whose update @context predates the spec's pin. Their Resolve
-    // rows are parked under `StaleContext` while the upstream suite is
-    // regenerated; named on every run so the parked coverage is visible, and
-    // self-clearing once the regenerated vectors land.
-    let stale: Vec<&Vector> = vectors.iter().filter(|v| v.stale_update_context).collect();
-    if stale.is_empty() {
-        out.push_str("  stale update @context: none\n");
-    } else {
-        let networks: BTreeSet<&str> = stale.iter().map(|v| v.network_dir.as_str()).collect();
-        out.push_str(&format!(
-            "  stale update @context: {} vector(s) predate the spec's pinned update @context \
-             (regenerated upstream; Resolve rows skipped under StaleContext until the bump): {}\n",
-            stale.len(),
-            networks.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-    }
     out
 }
 
@@ -3429,7 +3267,11 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 fn field_readers_name_the_vector_and_the_path() {
     let value = serde_json::json!({
         "genesisKeys": { "secret": "0a0b", "public": 7 },
-        "signedUpdate": { "targetVersionId": "2", "zeroVersionId": 0 },
+        "signedUpdate": {
+            "targetVersionId": 2,
+            "stringVersionId": "2",
+            "zeroVersionId": 0,
+        },
         "deactivated": true,
     });
 
@@ -3446,8 +3288,9 @@ fn field_readers_name_the_vector_and_the_path() {
         2
     );
 
-    // A wrong type, an absent path and a zero `versionId` each name themselves.
-    let cases: [(&str, &dyn Fn()); 3] = [
+    // A wrong type, an absent path, a zero version number and a
+    // string-encoded version number each name themselves.
+    let cases: [(&str, &dyn Fn()); 5] = [
         ("genesisKeys.public", &|| {
             field_str(&value, "genesisKeys.public", "regtest/k1/qgpakaw4");
         }),
@@ -3456,6 +3299,20 @@ fn field_readers_name_the_vector_and_the_path() {
         }),
         ("signedUpdate.zeroVersionId", &|| {
             field_nonzero_version_id(&value, "signedUpdate.zeroVersionId", "regtest/k1/qgpakaw4");
+        }),
+        ("signedUpdate.stringVersionId", &|| {
+            field_version_id(
+                &value,
+                "signedUpdate.stringVersionId",
+                "regtest/k1/qgpakaw4",
+            );
+        }),
+        ("signedUpdate.stringVersionId", &|| {
+            field_nonzero_version_id(
+                &value,
+                "signedUpdate.stringVersionId",
+                "regtest/k1/qgpakaw4",
+            );
         }),
     ];
     for (path, reader) in cases {
@@ -3469,36 +3326,82 @@ fn field_readers_name_the_vector_and_the_path() {
     }
 }
 
-/// The regtest vectors encode `versionId` as a string and the mutinynet
-/// vectors as a number; both are read.
+/// `didDocumentMetadata.versionId` is read from an ASCII-decimal string, and a
+/// JSON number is refused: the specification makes the field a string.
 #[test]
-fn version_id_accepts_number_and_ascii_string() {
-    assert_eq!(version_id_u64(&serde_json::json!(3), "ctx"), 3);
-    assert_eq!(version_id_u64(&serde_json::json!("3"), "ctx"), 3);
+fn metadata_version_id_accepts_ascii_string_and_rejects_number() {
+    assert_eq!(metadata_version_id(&serde_json::json!("3"), "ctx"), 3);
+    let payload = std::panic::catch_unwind(|| {
+        metadata_version_id(&serde_json::json!(3), "regtest/k1/qgpakaw4")
+    })
+    .expect_err("a number-encoded versionId must be rejected");
+    let message = panic_message(payload);
+    assert!(
+        message.contains("regtest/k1/qgpakaw4") && message.contains("must be a string"),
+        "{message}"
+    );
 }
 
-/// The coercion is permissive about the ENCODING only — anything that is not a
-/// non-negative integer in either encoding is a corrupt fixture and panics.
+/// Anything but a non-empty ASCII-decimal string is a corrupt `versionId` and
+/// panics naming the context.
 #[test]
-fn version_id_rejects_non_integer_forms() {
+fn metadata_version_id_rejects_non_decimal_forms() {
     for bad in [
-        serde_json::json!(1.5),
         serde_json::json!(""),
         serde_json::json!("v2"),
+        serde_json::json!("-1"),
+        serde_json::json!(1.5),
         serde_json::json!(true),
         serde_json::json!(null),
     ] {
-        let result = std::panic::catch_unwind(|| version_id_u64(&bad, "ctx"));
+        let payload = std::panic::catch_unwind(|| metadata_version_id(&bad, "ctx-marker"))
+            .expect_err("a non-decimal versionId must be rejected, not coerced");
         assert!(
-            result.is_err(),
-            "versionId {bad} must be rejected, not coerced"
+            panic_message(payload).contains("ctx-marker"),
+            "versionId {bad} must be rejected naming the context"
+        );
+    }
+}
+
+/// An update's version numbers are read from a JSON integer, and a string is
+/// refused: the crate parses `targetVersionId` into a `NonZeroU64`.
+#[test]
+fn update_version_number_accepts_integer_and_rejects_string() {
+    assert_eq!(update_version_number(&serde_json::json!(3), "ctx"), 3);
+    let payload = std::panic::catch_unwind(|| {
+        update_version_number(&serde_json::json!("3"), "regtest/k1/qgpakaw4")
+    })
+    .expect_err("a string-encoded version number must be rejected");
+    let message = panic_message(payload);
+    assert!(
+        message.contains("regtest/k1/qgpakaw4") && message.contains("integer"),
+        "{message}"
+    );
+}
+
+/// Anything but a non-negative JSON integer is a corrupt version number and
+/// panics naming the context.
+#[test]
+fn update_version_number_rejects_non_integer_forms() {
+    for bad in [
+        serde_json::json!(1.5),
+        serde_json::json!(-1),
+        serde_json::json!(true),
+        serde_json::json!(null),
+    ] {
+        let payload = std::panic::catch_unwind(|| update_version_number(&bad, "ctx-marker"))
+            .expect_err("a non-integer version number must be rejected, not coerced");
+        assert!(
+            panic_message(payload).contains("ctx-marker"),
+            "version number {bad} must be rejected naming the context"
         );
     }
 }
 
 /// The present/absent probe and the discovery walk agree, and discovery is
-/// content-based: `signet/` ships only documentation and contributes nothing,
-/// and no dot-prefixed entry (notably `.git`) is ever treated as a network.
+/// content-based: exactly the four networks the suite ships vectors for are
+/// found, and no dot-prefixed entry (notably `.git`) is ever treated as a
+/// network.
 #[test]
 fn test_suite_probe_matches_network_dirs() {
     if !test_suite_checked_out() {
@@ -3509,17 +3412,12 @@ fn test_suite_probe_matches_network_dirs() {
         return;
     }
     let dirs = network_dirs_with_vectors();
-    assert!(
-        dirs.iter().any(|d| d == "regtest"),
-        "regtest ships vector directories: {dirs:?}"
-    );
-    assert!(
-        dirs.iter().any(|d| d == "mutinynet"),
-        "mutinynet ships vector directories: {dirs:?}"
-    );
-    assert!(
-        !dirs.iter().any(|d| d == "signet"),
-        "signet ships only README + TODO and must contribute no vectors: {dirs:?}"
+    let mut sorted = dirs.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        ["mutinynet", "regtest", "signet", "testnet4"],
+        "the suite ships vector directories on exactly these four networks"
     );
     assert!(
         !dirs.iter().any(|d| d.starts_with('.')),
@@ -3530,7 +3428,7 @@ fn test_suite_probe_matches_network_dirs() {
 /// The JSON wrapper reads and parses a real fixture.
 #[test]
 fn read_fixture_json_parses_a_known_fixture() {
-    let Some(value) = read_fixture_json("regtest/k1/qgpakaw4/create/output.json") else {
+    let Some(value) = read_fixture_json("regtest/k1/qgp45a3y/create/output.json") else {
         return;
     };
     assert!(
@@ -3755,25 +3653,44 @@ fn outcome_reads_a_positive_document() {
         parse_outcome(&output, "ctx"),
         Outcome::Positive {
             version_id: 3,
-            version_id_string: Some("3".into()),
+            version_id_string: "3".into(),
             deactivated: false,
             confirmations: Some(7),
         }
     );
 }
 
-/// A number-encoded `versionId` is still read, with no string recorded, and an
-/// absent `confirmations` is `None`.
+/// A number-encoded `versionId` is refused, naming the file and saying it must
+/// be a string; the specification makes it one.
 #[test]
-fn outcome_reads_a_number_encoded_version_id() {
+fn outcome_rejects_a_number_encoded_version_id() {
     let output = serde_json::json!({
         "didDocumentMetadata": { "versionId": 2, "deactivated": true },
+    });
+    let payload = std::panic::catch_unwind(|| {
+        parse_outcome(&output, "regtest/k1/qgpakaw4/resolve/output.json")
+    })
+    .expect_err("a number-encoded versionId must panic, not be coerced");
+    let message = panic_message(payload);
+    assert!(
+        message.contains("regtest/k1/qgpakaw4/resolve/output.json")
+            && message.contains("didDocumentMetadata.versionId")
+            && message.contains("must be a string"),
+        "{message}"
+    );
+}
+
+/// An absent `confirmations` reads as `None`.
+#[test]
+fn outcome_reads_an_absent_confirmations_as_none() {
+    let output = serde_json::json!({
+        "didDocumentMetadata": { "versionId": "2", "deactivated": true },
     });
     assert_eq!(
         parse_outcome(&output, "ctx"),
         Outcome::Positive {
             version_id: 2,
-            version_id_string: None,
+            version_id_string: "2".into(),
             deactivated: true,
             confirmations: None,
         }
@@ -3814,24 +3731,21 @@ fn outcome_rejects_malformed_fields_by_name() {
     }
 }
 
-/// The accessors over the main outcome: a positive set has a version and says
-/// whether it was number-encoded; a negative set has neither.
+/// The accessors over the main outcome: a positive set has a version; a
+/// negative set has none.
 #[test]
 fn outcome_accessors_track_the_main_pair() {
     let mut v = synthetic_vector("regtest/k1/qgpakaw4", "k1");
     assert_eq!(v.expected_version_id(), Some(1));
-    assert!(!v.version_id_is_number());
     assert!(!v.is_negative());
 
-    v.outcome = positive_outcome(4, false);
+    v.outcome = positive_outcome(4);
     assert_eq!(v.expected_version_id(), Some(4));
-    assert!(v.version_id_is_number());
 
     v.outcome = Outcome::Error {
         code: "INVALID_DID".into(),
     };
     assert_eq!(v.expected_version_id(), None);
-    assert!(!v.version_id_is_number());
     assert!(v.is_negative());
 }
 
@@ -3876,10 +3790,17 @@ fn discovery_finds_every_vector_directory() {
             "network directory {network_dir} was probed as holding vectors but contributed none"
         );
     }
-    assert!(
-        !vectors.iter().any(|v| v.network_dir == "signet"),
-        "signet ships no vector directories"
-    );
+    // Every network ships the same 59 scenarios, each under its own ids.
+    for network_dir in ["regtest", "mutinynet", "signet", "testnet4"] {
+        assert_eq!(
+            vectors
+                .iter()
+                .filter(|v| v.network_dir == network_dir)
+                .count(),
+            59,
+            "{network_dir} ships 59 sets"
+        );
+    }
     for pair in vectors.windows(2) {
         assert!(
             pair[0].id < pair[1].id,
@@ -3912,74 +3833,75 @@ fn discovery_finds_every_vector_directory() {
 
     // Update layouts.
     assert_eq!(
-        by_id("mutinynet/x1/q5m2fh36").update_layout,
+        by_id("regtest/x1/qfaqdrxu").update_layout,
         UpdateLayout::Numbered(vec!["01".into(), "02".into()])
     );
     assert_eq!(
-        by_id("mutinynet/x1/qky9e7qz").update_layout,
+        by_id("regtest/x1/qg4zny9h").update_layout,
         UpdateLayout::Numbered(vec!["01".into(), "02".into(), "03".into()])
     );
     assert_eq!(
-        by_id("regtest/k1/qgpakaw4").update_layout,
+        by_id("regtest/k1/qgp45a3y").update_layout,
         UpdateLayout::None
     );
     assert_eq!(
-        by_id("mutinynet/k1/q5p6w9su").update_layout,
+        by_id("regtest/k1/qgph7nre").update_layout,
         UpdateLayout::Flat
     );
 
-    // Genesis-only CAS-delivered vector: no update, no pending, CAS genesis,
+    // Genesis-only CAS-delivered vector: no update, CAS genesis,
     // and no sidecar genesis document to resolve from.
-    let qh66uy2s = by_id("mutinynet/x1/qh66uy2s");
-    assert_eq!(qh66uy2s.expected_version_id(), Some(1));
-    assert!(!qh66uy2s.delivery.pending);
-    assert_eq!(qh66uy2s.delivery.genesis, GenesisDelivery::Cas);
-    assert_eq!(qh66uy2s.delivery.announcement, None);
-    assert!(!qh66uy2s.has_sidecar_genesis_document);
+    let qghp0w22 = by_id("regtest/x1/qghp0w22");
+    assert_eq!(qghp0w22.expected_version_id(), Some(1));
+    assert_eq!(qghp0w22.delivery.genesis, GenesisDelivery::Cas);
+    assert_eq!(qghp0w22.delivery.announcement, None);
+    assert!(!qghp0w22.has_sidecar_genesis_document);
 
-    // versionId is coerced from BOTH encodings: regtest ships a string, the
-    // mutinynet vectors a number.
-    assert_eq!(by_id("regtest/k1/qgpakaw4").expected_version_id(), Some(1));
-    assert_eq!(
-        by_id("mutinynet/x1/qky9e7qz").expected_version_id(),
-        Some(4)
-    );
+    // versionId is read from its string encoding.
+    assert_eq!(by_id("regtest/k1/qgp45a3y").expected_version_id(), Some(1));
+    assert_eq!(by_id("regtest/x1/qg4zny9h").expected_version_id(), Some(4));
 
     // Beacon service types are collected from other.json.genesisDocument.
     assert!(
-        by_id("mutinynet/x1/q425c5wf")
+        by_id("regtest/x1/qfwwah7z")
             .genesis_service_types
             .iter()
             .any(|t| t == "SMTBeacon"),
-        "q425c5wf declares an SMT beacon in its genesis document"
+        "qfwwah7z declares an SMT beacon in its genesis document"
     );
     // Update steps with no sidecar updates are CAS-announced; with them, the
     // sidecar delivers them, and a key-based genesis is deterministic.
     assert_eq!(
-        by_id("mutinynet/x1/q4x4pxl2").delivery.announcement,
+        by_id("regtest/x1/qfgeftze").delivery.announcement,
         Some(AnnouncementDelivery::Cas)
     );
-    let qgppexmy = by_id("regtest/k1/qgppexmy");
-    assert_eq!(qgppexmy.delivery.genesis, GenesisDelivery::Deterministic);
+    let qgph7nre = by_id("regtest/k1/qgph7nre");
+    assert_eq!(qgph7nre.delivery.genesis, GenesisDelivery::Deterministic);
     assert_eq!(
-        qgppexmy.delivery.announcement,
+        qgph7nre.delivery.announcement,
         Some(AnnouncementDelivery::Sidecar)
     );
-    // The mutinynet sets name their scenario; the checked-out suite ships no
-    // signals.json.
+    // Every set names its scenario, and a set that anchors an update ships its
+    // signals record while a genesis-only one does not.
     assert!(
-        by_id("mutinynet/x1/qh66uy2s").scenario_id.is_some(),
-        "mutinynet sets carry other.json.scenarioId"
+        vectors.iter().all(|v| v.scenario_id.is_some()),
+        "every set carries other.json.scenarioId"
     );
-    assert!(vectors.iter().all(|v| v.signals.is_none()));
+    assert!(qgph7nre.signals.is_some(), "qgph7nre ships signals.json");
+    assert!(
+        by_id("regtest/k1/qgp45a3y").signals.is_none(),
+        "qgp45a3y is genesis-only and ships no signals.json"
+    );
     // The directory name maps to a Network, and the id-type segment is kept.
-    assert_eq!(by_id("mutinynet/x1/q5ugrf3w").network, Network::Mutinynet);
-    assert_eq!(by_id("mutinynet/x1/q5ugrf3w").kind, "x1");
+    assert_eq!(by_id("mutinynet/x1/q4typvtp").network, Network::Mutinynet);
+    assert_eq!(by_id("mutinynet/x1/q4typvtp").kind, "x1");
+    assert_eq!(by_id("signet/k1/qyp5h7kz").network, Network::Signet);
+    assert_eq!(by_id("testnet4/k1/qspz5wep").network, Network::TestnetV4);
     // short_id is the leaf segment of the id.
-    assert_eq!(by_id("regtest/k1/qgpakaw4").short_id, "qgpakaw4");
+    assert_eq!(by_id("regtest/k1/qgp45a3y").short_id, "qgp45a3y");
     // step_prefixes() is the shape every update-walking driver iterates.
     assert_eq!(
-        by_id("mutinynet/x1/q5m2fh36").update_layout.step_prefixes(),
+        by_id("regtest/x1/qfaqdrxu").update_layout.step_prefixes(),
         vec!["update/01".to_string(), "update/02".to_string()]
     );
 }
@@ -4003,9 +3925,8 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
         corpus: Corpus::test_suite(),
         dir: test_suite_root().join(id),
         update_layout: UpdateLayout::None,
-        outcome: positive_outcome(1, true),
+        outcome: positive_outcome(1),
         resolve_cases: Vec::new(),
-        stale_update_context: false,
         delivery: Delivery {
             genesis: match id_type_from_kind(kind) {
                 VectorIdType::Key => GenesisDelivery::Deterministic,
@@ -4013,7 +3934,6 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
             },
             announcement: None,
             negative: false,
-            pending: false,
         },
         signals: None,
         scenario_id: None,
@@ -4023,85 +3943,70 @@ fn synthetic_vector(id: &str, kind: &str) -> Vector {
 }
 
 /// A resolved-document outcome at `version`, not deactivated, with no
-/// confirmations; `as_string` chooses the specification's ASCII-string
-/// `versionId` over the JSON-number encoding some fixtures carry.
-fn positive_outcome(version: u64, as_string: bool) -> Outcome {
+/// confirmations, recording `versionId` as the specification's ASCII string.
+fn positive_outcome(version: u64) -> Outcome {
     Outcome::Positive {
         version_id: version,
-        version_id_string: as_string.then(|| version.to_string()),
+        version_id_string: version.to_string(),
         deactivated: false,
         confirmations: None,
     }
 }
 
 /// A positive set's delivery, for the classification tests.
-fn delivery_of(
-    genesis: GenesisDelivery,
-    announcement: Option<AnnouncementDelivery>,
-    pending: bool,
-) -> Delivery {
+fn delivery_of(genesis: GenesisDelivery, announcement: Option<AnnouncementDelivery>) -> Delivery {
     Delivery {
         genesis,
         announcement,
         negative: false,
-        pending,
     }
 }
 
-/// Each of the three derived rules fires on its own input, and they accumulate
+/// Each of the two derived rules fires on its own input, and they accumulate
 /// rather than electing a first-match winner.
 #[test]
-fn derived_reasons_cover_the_three_rules() {
+fn derived_reasons_cover_the_two_rules() {
     use AnnouncementDelivery as A;
     use GenesisDelivery as G;
 
     // Nothing applies: an anchored, sidecar-delivered vector.
     assert_eq!(
-        derived_resolve_skip_reasons(&delivery_of(G::Sidecar, Some(A::Sidecar), false), &[]),
+        derived_resolve_skip_reasons(&delivery_of(G::Sidecar, Some(A::Sidecar)), &[]),
         BTreeSet::new()
     );
-    // Rule 1 alone.
+    // Rule 2 alone — the `qh66uy2s` shape: genesis-era, but CAS-delivered.
     assert_eq!(
-        derived_resolve_skip_reasons(&delivery_of(G::Deterministic, None, true), &[]),
-        BTreeSet::from([SkipReason::Unanchored])
-    );
-    // Rule 3 alone — the `qh66uy2s` shape: genesis-era, but CAS-delivered.
-    assert_eq!(
-        derived_resolve_skip_reasons(&delivery_of(G::Cas, None, false), &[]),
+        derived_resolve_skip_reasons(&delivery_of(G::Cas, None), &[]),
         BTreeSet::from([SkipReason::CasDelivery])
     );
-    // Rule 3 on the announcements alone.
+    // Rule 2 on the announcements alone.
     assert_eq!(
-        derived_resolve_skip_reasons(&delivery_of(G::Deterministic, Some(A::Cas), false), &[]),
+        derived_resolve_skip_reasons(&delivery_of(G::Deterministic, Some(A::Cas)), &[]),
         BTreeSet::from([SkipReason::CasDelivery])
     );
-    // Rules 1, 2 and 3 together, with the duplicate CAS signal collapsing.
+    // Rules 1 and 2 together, with the duplicate CAS signal collapsing.
     assert_eq!(
         derived_resolve_skip_reasons(
-            &delivery_of(G::Cas, Some(A::Cas), true),
+            &delivery_of(G::Cas, Some(A::Cas)),
             &["SingletonBeacon".into(), "CASBeacon".into()]
         ),
-        BTreeSet::from([
-            SkipReason::Unanchored,
-            SkipReason::CasDelivery,
-            SkipReason::UnsupportedBeaconType,
-        ])
+        BTreeSet::from([SkipReason::CasDelivery, SkipReason::UnsupportedBeaconType])
     );
-    // Rule 2 on the beacon type, with `SingletonBeacon` contributing nothing.
+    // Rule 1 on the beacon type, with `SingletonBeacon` contributing nothing.
     // An SMT beacon in the genesis document blocks resolve twice over: the
     // delivery mechanism is unimplemented, AND the resolver will not issue a
     // request for that beacon type at all.
     assert_eq!(
         derived_resolve_skip_reasons(
-            &delivery_of(G::Sidecar, None, false),
+            &delivery_of(G::Sidecar, None),
             &["SingletonBeacon".into(), "SMTBeacon".into()]
         ),
         BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType,])
     );
-    // Rule 2 applies to a negative set too: its beacons are what they are.
+    // Rule 1 applies to a negative set too: its beacons are what they are.
     let negative = Delivery {
         negative: true,
-        ..delivery_of(G::Sidecar, Some(A::Sidecar), false)
+        ..delivery_of(G::Sidecar, Some(A::Sidecar))
     };
     assert_eq!(
         derived_resolve_skip_reasons(&negative, &["SMTBeacon".into()]),
@@ -4109,20 +4014,24 @@ fn derived_reasons_cover_the_three_rules() {
     );
 }
 
-/// The anchoring and delivery reasons say nothing about whether a patch
-/// sequence reproduces a document, so they scope to the resolve kinds — an
-/// unanchored, CAS-delivered vector still drives its update assertions.
+/// The delivery and beacon reasons say nothing about whether a patch
+/// sequence reproduces a document, so they scope to the resolve kinds — a
+/// CAS-delivered, SMT-beaconed vector still drives its update assertions.
 #[test]
 fn delivery_reasons_scope_to_resolve_only() {
     let mut v = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
-    v.delivery.pending = true;
     v.delivery.genesis = GenesisDelivery::Cas;
-    v.outcome = positive_outcome(3, true);
+    v.genesis_service_types = vec!["SMTBeacon".into()];
+    v.outcome = positive_outcome(3);
     v.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
 
     assert_eq!(
         v.skip_reasons_with(AssertionKind::Resolve, &[]),
-        BTreeSet::from([SkipReason::Unanchored, SkipReason::CasDelivery])
+        BTreeSet::from([
+            SkipReason::CasDelivery,
+            SkipReason::SmtDelivery,
+            SkipReason::UnsupportedBeaconType,
+        ])
     );
     for kind in [
         AssertionKind::Derivation,
@@ -4172,7 +4081,7 @@ fn applicable_kinds_track_the_update_layout() {
     // A numbered resolve case makes the resolve-option kind apply too.
     v.resolve_cases = vec![ResolveCase {
         name: "01".into(),
-        outcome: positive_outcome(1, true),
+        outcome: positive_outcome(1),
     }];
     assert_eq!(v.applicable_kinds(), AssertionKind::ALL.to_vec());
 }
@@ -4205,9 +4114,9 @@ fn resolve_drivability_requires_a_genesis_source_for_external_vectors() {
 
     // Past genesis is no longer a drivability condition on either id type: the
     // beacon signals come from a captured chain snapshot.
-    key_based.outcome = positive_outcome(2, true);
+    key_based.outcome = positive_outcome(2);
     assert!(key_based.is_drivable(AssertionKind::Resolve));
-    external.outcome = positive_outcome(2, true);
+    external.outcome = positive_outcome(2);
     assert!(external.is_drivable(AssertionKind::Resolve));
 }
 
@@ -4284,137 +4193,79 @@ fn live_vectors_classify_without_overrides() {
 
     // Genesis-era, anchored, no beacon-type signal: classified solely by the
     // delivery rule, and therefore not an unclassified row.
-    let qh66uy2s = by_id("mutinynet/x1/qh66uy2s");
+    let qghp0w22 = by_id("regtest/x1/qghp0w22");
     assert_eq!(
-        qh66uy2s.skip_reasons_with(AssertionKind::Resolve, &[]),
+        qghp0w22.skip_reasons_with(AssertionKind::Resolve, &[]),
         BTreeSet::from([SkipReason::CasDelivery])
     );
-    assert!(!qh66uy2s.should_drive_with(AssertionKind::Resolve, &[]));
+    assert!(!qghp0w22.should_drive_with(AssertionKind::Resolve, &[]));
 
-    // A pending, multi-update vector still drives both update assertions.
-    let q5m2fh36 = by_id("mutinynet/x1/q5m2fh36");
-    assert!(q5m2fh36.should_drive_with(AssertionKind::UpdateCrypto, &[]));
-    assert!(q5m2fh36.should_drive_with(AssertionKind::EndState, &[]));
-    assert!(!q5m2fh36.should_drive_with(AssertionKind::Resolve, &[]));
+    // A CAS-delivered, multi-update vector still drives both update assertions.
+    let qfgeftze = by_id("regtest/x1/qfgeftze");
+    assert!(qfgeftze.should_drive_with(AssertionKind::UpdateCrypto, &[]));
+    assert!(qfgeftze.should_drive_with(AssertionKind::EndState, &[]));
+    assert!(!qfgeftze.should_drive_with(AssertionKind::Resolve, &[]));
 }
 
-/// The `versionId` encoding defect on disk is pinned to an explicit id set, in
-/// both directions: an unlisted number-encoded vector is a NEW defect, and a
-/// listed vector that is now string-encoded means the list is stale.
+/// No vector encodes `didDocumentMetadata.versionId` as a number, and
+/// [`NUMBER_ENCODED_VERSION_ID`] is empty.
 ///
-/// A number-encoded vector reaching this test unlisted would otherwise be
-/// absorbed silently by the encoding-tolerant coercion, and an upstream (or our
-/// own) conformance fix must not read as though the corrected fixture were at
-/// fault.
+/// Reads the raw main and `resolve/NN` output files rather than the parsed
+/// outcome, so the guard stands on its own and does not lean on the strict
+/// reader it backs up.
 #[test]
 fn live_vectors_record_their_version_id_encoding() {
-    if !test_suite_checked_out() {
-        eprintln!(
-            "SKIP: test-suite submodule absent; \
-             run `git submodule update --init --recursive` to enable"
-        );
-        return;
-    }
-    let vectors = discover_in(&Corpus::test_suite());
-    assert!(!vectors.is_empty());
-
-    // Vacuity guard: the list describes vectors that exist.
-    for listed in NUMBER_ENCODED_VERSION_ID {
-        assert!(
-            vectors.iter().any(|v| v.id == *listed),
-            "{listed} is listed in NUMBER_ENCODED_VERSION_ID but was not discovered — \
-             the vector was renamed or removed upstream; delete the entry"
-        );
-    }
-
-    for v in &vectors {
-        let known_bad = NUMBER_ENCODED_VERSION_ID.contains(&v.id.as_str());
-        assert!(
-            v.version_id_is_number() == known_bad,
-            "{}: {}",
-            v.id,
-            if v.version_id_is_number() {
-                "NEW versionId encoding defect — resolve/output.json encodes versionId as a \
-                 JSON number, but the specification requires an ASCII string. Fix the fixture, \
-                 or add this id to NUMBER_ENCODED_VERSION_ID to record it as known-bad."
-            } else {
-                "versionId is now correctly encoded as an ASCII string — delete this id from \
-                 NUMBER_ENCODED_VERSION_ID."
-            }
-        );
-    }
-}
-
-/// The stale update `@context` population is exactly `STALE_UPDATE_CONTEXT`,
-/// in both directions: a stale vector not listed is a new pre-pin vector, and
-/// a listed vector that is now clean means the list is stale. The count is
-/// pinned too, so a partial regeneration trips this rather than being absorbed
-/// by the derived skip while `DRIVEN_FLOOR`'s Resolve entry stays lowered.
-#[test]
-fn live_vectors_record_their_update_context() {
-    if !test_suite_checked_out() {
-        eprintln!(
-            "SKIP: test-suite submodule absent; \
-             run `git submodule update --init --recursive` to enable"
-        );
-        return;
-    }
-    let vectors = discover_in(&Corpus::test_suite());
-    assert!(!vectors.is_empty());
-
-    assert_eq!(
-        STALE_UPDATE_CONTEXT.len(),
-        17,
-        "the stale update @context population is pinned at 17 vectors — every vector with \
-         an update/ directory in the vendor suite as checked out; when the regenerated suite \
-         is absorbed, empty the list, re-raise DRIVEN_FLOOR's Resolve entry, and drop this pin"
+    assert!(
+        NUMBER_ENCODED_VERSION_ID.is_empty(),
+        "no number-encoded versionId is expected: {NUMBER_ENCODED_VERSION_ID:?}"
     );
-
-    // Vacuity guard: the list describes vectors that exist.
-    for listed in STALE_UPDATE_CONTEXT {
-        assert!(
-            vectors.iter().any(|v| v.id == *listed),
-            "{listed} is listed in STALE_UPDATE_CONTEXT but was not discovered — \
-             the vector was renamed or removed upstream; delete the entry"
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
         );
+        return;
     }
+    let vectors = discover_in(&Corpus::test_suite());
+    assert!(!vectors.is_empty());
 
+    let mut number_encoded = Vec::new();
     for v in &vectors {
-        let listed = STALE_UPDATE_CONTEXT.contains(&v.id.as_str());
-        assert!(
-            v.stale_update_context == listed,
-            "{}: {}",
-            v.id,
-            if v.stale_update_context {
-                "NEW vector carrying the pre-pin update @context — add this id to \
-                 STALE_UPDATE_CONTEXT, or fix the fixture"
-            } else {
-                "update @context is now the pinned array — delete this id from \
-                 STALE_UPDATE_CONTEXT and re-raise DRIVEN_FLOOR's Resolve entry"
-            }
+        let outputs = std::iter::once("resolve/output.json".to_string()).chain(
+            v.resolve_cases
+                .iter()
+                .map(|c| format!("resolve/{}/output.json", c.name)),
         );
+        for rel in outputs {
+            if v.fixture(&rel)["didDocumentMetadata"]["versionId"].is_number() {
+                number_encoded.push(format!("{}/{rel}", v.id));
+            }
+        }
     }
+    assert!(
+        number_encoded.is_empty(),
+        "these outputs encode didDocumentMetadata.versionId as a JSON number, but the \
+         specification requires an ASCII string: {number_encoded:?}"
+    );
 }
 
 /// Three synthetic vectors spanning the shapes the ledger has to tell apart: a
-/// fully drivable genesis-era vector, an unanchored multi-update vector, and a
-/// genesis-era vector classified solely by its delivery declaration.
+/// fully drivable genesis-era vector, a multi-update vector whose genesis
+/// document declares an SMT beacon, and a genesis-era vector classified solely
+/// by its delivery.
 fn synthetic_ledger() -> Vec<Vector> {
     let genesis_era = synthetic_vector("regtest/k1/qgpakaw4", "k1");
 
     let mut multi_update = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
     multi_update.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
-    multi_update.delivery.pending = true;
+    multi_update.genesis_service_types = vec!["SMTBeacon".into()];
     multi_update.delivery.genesis = GenesisDelivery::Cas;
-    // Both mutinynet members carry the number-encoded versionId the live
-    // mutinynet fixtures carry, so the summary's defect line has a non-empty
-    // case to report.
-    multi_update.outcome = positive_outcome(3, false);
+    multi_update.outcome = positive_outcome(3);
 
     let mut cas_genesis = synthetic_vector("mutinynet/x1/qh66uy2s", "x1");
     cas_genesis.has_sidecar_genesis_document = false;
     cas_genesis.delivery.genesis = GenesisDelivery::Cas;
-    cas_genesis.outcome = positive_outcome(1, false);
+    cas_genesis.outcome = positive_outcome(1);
 
     vec![genesis_era, multi_update, cas_genesis]
 }
@@ -4595,136 +4446,16 @@ fn summary_names_every_assertion_kind() {
         );
     }
     assert!(summary.contains("skipped rows by reason"), "{summary}");
-    for reason in [SkipReason::Unanchored, SkipReason::CasDelivery] {
+    for reason in [
+        SkipReason::CasDelivery,
+        SkipReason::SmtDelivery,
+        SkipReason::UnsupportedBeaconType,
+    ] {
         assert!(
             summary.contains(&reason.to_string()),
             "{reason} applies to the synthetic ledger and must be broken out:\n{summary}"
         );
     }
-}
-
-/// The summary reports the fixture defect the coercion papers over, so a green
-/// run says out loud that some vectors are non-conformant on this field.
-#[test]
-fn summary_reports_the_version_id_fixture_defect() {
-    let ledger = synthetic_ledger();
-    let defective = ledger.iter().filter(|v| v.version_id_is_number()).count();
-    assert_eq!(defective, 2, "the fixture must exercise the non-empty case");
-
-    let summary = render_summary_with(&ledger, &[]);
-    assert!(summary.contains("fixture defects: 2"), "{summary}");
-    assert!(
-        summary.contains("versionId") && summary.contains("JSON number"),
-        "{summary}"
-    );
-    assert!(summary.contains("mutinynet"), "{summary}");
-
-    let clean: Vec<Vector> = ledger
-        .into_iter()
-        .map(|mut v| {
-            let version = v
-                .expected_version_id()
-                .expect("the synthetic ledger is positive");
-            v.outcome = positive_outcome(version, true);
-            v
-        })
-        .collect();
-    assert!(
-        render_summary_with(&clean, &[]).contains("fixture defects: none"),
-        "a clean ledger says so explicitly rather than omitting the line"
-    );
-}
-
-/// The summary names the stale update `@context` population on every run, so
-/// a green run says out loud how many Resolve rows are parked and why; and it
-/// says "none" rather than omitting the line once the population empties.
-#[test]
-fn summary_reports_stale_context() {
-    let ledger: Vec<Vector> = synthetic_ledger()
-        .into_iter()
-        .map(|mut v| {
-            v.stale_update_context = true;
-            v
-        })
-        .collect();
-    let stale = ledger.iter().filter(|v| v.stale_update_context).count();
-    assert_eq!(stale, 3, "the fixture must exercise the non-empty case");
-
-    let summary = render_summary_with(&ledger, &[]);
-    assert!(summary.contains("stale update @context: 3"), "{summary}");
-    assert!(
-        summary.contains("StaleContext") && summary.contains("regenerated upstream"),
-        "{summary}"
-    );
-    assert!(
-        summary.contains("mutinynet, regtest"),
-        "both networks in the ledger are named:\n{summary}"
-    );
-    assert!(
-        summary.contains(&SkipReason::StaleContext.to_string()),
-        "the reason is broken out in the skipped-rows table:\n{summary}"
-    );
-
-    let clean: Vec<Vector> = ledger
-        .into_iter()
-        .map(|mut v| {
-            v.stale_update_context = false;
-            v
-        })
-        .collect();
-    let summary = render_summary_with(&clean, &[]);
-    assert!(
-        summary.contains("stale update @context: none"),
-        "a clean ledger says so explicitly rather than omitting the line:\n{summary}"
-    );
-    assert!(
-        !summary.contains(&SkipReason::StaleContext.to_string()),
-        "no row carries the reason once the population is empty:\n{summary}"
-    );
-}
-
-/// `StaleContext` parks the Resolve row only. The update-crypto and end-state
-/// drivers rebuild the update from `input.json` and compare document hashes,
-/// never reading the vector's `@context`, so skipping them would hide rows
-/// whose assertion passes.
-#[test]
-fn stale_context_applies_to_the_resolve_kind_only() {
-    let mut v = synthetic_vector("regtest/k1/qgppexmy", "k1");
-    v.update_layout = UpdateLayout::Flat;
-    v.outcome = positive_outcome(2, true);
-    v.stale_update_context = true;
-
-    assert!(
-        v.skip_reasons_with(AssertionKind::Resolve, &[])
-            .contains(&SkipReason::StaleContext),
-        "a stale vector's resolve row is parked"
-    );
-    assert!(
-        !v.should_drive_with(AssertionKind::Resolve, &[]),
-        "a parked row is not driven"
-    );
-    for kind in [
-        AssertionKind::Derivation,
-        AssertionKind::GenesisKey,
-        AssertionKind::UpdateCrypto,
-        AssertionKind::EndState,
-    ] {
-        assert!(
-            !v.skip_reasons_with(kind, &[])
-                .contains(&SkipReason::StaleContext),
-            "{kind} must not inherit the resolve-scoped StaleContext reason"
-        );
-        assert!(
-            v.should_drive_with(kind, &[]),
-            "{kind} stays driven on a stale vector"
-        );
-    }
-
-    v.stale_update_context = false;
-    assert!(
-        v.skip_reasons_with(AssertionKind::Resolve, &[]).is_empty(),
-        "the rule clears itself with the flag"
-    );
 }
 
 /// A hand-written skip on a row a derived rule already covers is reported: the
@@ -4845,9 +4576,9 @@ fn chain_fixture_envelope(
 /// `test-suite/` submodule.
 #[test]
 fn chain_fixture_path_lands_under_the_in_crate_tree() {
-    let path = chain_fixture_path("regtest/k1/qgppexmy");
+    let path = chain_fixture_path("regtest/k1/qgph7nre");
     assert!(
-        path.ends_with("fixtures/chain/regtest/k1/qgppexmy.json"),
+        path.ends_with("fixtures/chain/regtest/k1/qgph7nre.json"),
         "unexpected fixture path: {}",
         path.display()
     );
@@ -4867,7 +4598,7 @@ fn chain_fixture_path_lands_under_the_in_crate_tree() {
 /// least one signal.
 #[test]
 fn chain_fixture_reads_a_captured_vendor_snapshot() {
-    let fixture = read_chain_fixture("regtest/k1/qgppexmy");
+    let fixture = read_chain_fixture("regtest/k1/qgph7nre");
 
     assert_eq!(fixture.network, "regtest");
     assert_eq!(fixture.endpoint, "http://localhost:3000");
@@ -4890,7 +4621,7 @@ fn chain_fixture_reads_a_captured_vendor_snapshot() {
 /// it must deserialize as an empty vector under a present key.
 #[test]
 fn chain_fixture_addresses_keep_captured_and_empty_keys() {
-    let fixture = read_chain_fixture("regtest/k1/qgppexmy");
+    let fixture = read_chain_fixture("regtest/k1/qgph7nre");
 
     assert!(
         fixture.addresses.len() > 1,
@@ -4910,7 +4641,7 @@ fn chain_fixture_addresses_keep_captured_and_empty_keys() {
 /// minted one.
 #[test]
 fn chain_fixture_minted_only_fields_are_absent_on_a_vendor_capture() {
-    let vendor = read_chain_fixture("regtest/k1/qgppexmy");
+    let vendor = read_chain_fixture("regtest/k1/qgph7nre");
     assert!(
         vendor.sidecar.is_none(),
         "a vendor capture ships no sidecar"
@@ -5356,39 +5087,6 @@ fn synthetic_signals_record_the_capture_tip() {
     }
 }
 
-/// The signal-block ledger is exact in both directions: every committed
-/// capture that lacks a `/block/{hash}` body for one of its announcements is
-/// listed in `FIXTURES_WITHOUT_SIGNAL_BLOCKS`, and every listed capture still
-/// lacks one. A re-capture that fills the blocks in fails here saying the
-/// list is stale — which is the moment the versionTime probes start running
-/// on that fixture — and a new capture missing blocks fails as a new defect.
-#[test]
-fn chain_fixture_signal_block_ledger_is_exact() {
-    for id in ALL_CHAIN_FIXTURES {
-        let fixture = read_chain_fixture(id);
-        let listed = FIXTURES_WITHOUT_SIGNAL_BLOCKS.contains(id);
-        match fixture.earliest_signal_mediantime() {
-            Ok(_) => assert!(
-                !listed,
-                "{id}: the capture now holds every announcement's block — delete it from \
-                 FIXTURES_WITHOUT_SIGNAL_BLOCKS so its versionTime probes run"
-            ),
-            Err(missing) => assert!(
-                listed,
-                "{id}: the capture holds no `/block/{missing}` body for one of its announcements; \
-                 re-run capture, or add the id to FIXTURES_WITHOUT_SIGNAL_BLOCKS to record it as \
-                 known-incomplete"
-            ),
-        }
-    }
-    for listed in FIXTURES_WITHOUT_SIGNAL_BLOCKS {
-        assert!(
-            ALL_CHAIN_FIXTURES.contains(listed),
-            "{listed} is listed in FIXTURES_WITHOUT_SIGNAL_BLOCKS but is not a committed fixture"
-        );
-    }
-}
-
 /// `signal_block_hashes` reads each signal's confirming block off its address
 /// body, and `earliest_signal_mediantime` is the minimum over the `/block`
 /// bodies for those hashes — or names the first hash the fixture lacks.
@@ -5451,14 +5149,14 @@ fn chain_fixture_signal_blocks_and_earliest_mediantime() {
 fn unsupported_beacon_type_is_recorded_alongside_the_delivery_reason() {
     assert_eq!(
         derived_resolve_skip_reasons(
-            &delivery_of(GenesisDelivery::Sidecar, None, false),
+            &delivery_of(GenesisDelivery::Sidecar, None),
             &["SingletonBeacon".into(), "SMTBeacon".into()]
         ),
         BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType])
     );
     assert_eq!(
         derived_resolve_skip_reasons(
-            &delivery_of(GenesisDelivery::Sidecar, None, false),
+            &delivery_of(GenesisDelivery::Sidecar, None),
             &["CASBeacon".into()]
         ),
         BTreeSet::from([SkipReason::CasDelivery, SkipReason::UnsupportedBeaconType])
@@ -5472,7 +5170,7 @@ fn unsupported_beacon_type_is_recorded_alongside_the_delivery_reason() {
 fn unsupported_beacon_type_ignores_singleton_and_non_beacon_services() {
     assert_eq!(
         derived_resolve_skip_reasons(
-            &delivery_of(GenesisDelivery::Sidecar, None, false),
+            &delivery_of(GenesisDelivery::Sidecar, None),
             &[
                 "SingletonBeacon".into(),
                 "DIDCommMessaging".into(),
@@ -5490,17 +5188,55 @@ fn unsupported_beacon_type_ignores_singleton_and_non_beacon_services() {
 fn unsupported_beacon_type_does_not_follow_from_a_delivery_declaration() {
     assert_eq!(
         derived_resolve_skip_reasons(
-            &delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas), false),
+            &delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas)),
             &[]
         ),
         BTreeSet::from([SkipReason::CasDelivery])
     );
 }
 
+/// The scenario number of a discovered set: the leading segment of its
+/// `other.json.scenarioId` (`09a` for `09a-x1-cas-update-announcement`). Every
+/// network ships the same scenarios under different ids, so the corpus pins
+/// below name scenarios and check them on every network.
+fn scenario_number(v: &Vector) -> &str {
+    let id = v
+        .scenario_id
+        .as_deref()
+        .unwrap_or_else(|| panic!("{}: other.json must name its scenario", v.id));
+    id.split('-').next().unwrap_or(id)
+}
+
+/// The networks the checked-out suite ships vectors for.
+const LIVE_NETWORKS: [&str; 4] = ["mutinynet", "regtest", "signet", "testnet4"];
+
+/// `(network, scenario)` pairs for every live network and each named scenario.
+fn on_every_network(scenarios: &[&str]) -> BTreeSet<(String, String)> {
+    LIVE_NETWORKS
+        .iter()
+        .flat_map(|n| {
+            scenarios
+                .iter()
+                .map(move |s| (n.to_string(), s.to_string()))
+        })
+        .collect()
+}
+
+/// The scenarios whose genesis document declares a CAS or SMT beacon.
+const CAS_OR_SMT_BEACON_SCENARIOS: [&str; 14] = [
+    "09a", "09b", "10a", "10b", "11a", "11b", "12a", "12b", "25a", "25b", "25c", "n29", "n30",
+    "n31",
+];
+
+/// The scenarios whose genesis or updates are CAS-delivered while their genesis
+/// document declares no CAS or SMT beacon.
+const CAS_DELIVERY_ONLY_SCENARIOS: [&str; 4] = ["05", "06", "08", "20"];
+
 /// The reason fires on exactly the discovered vectors whose genesis document
-/// declares a CAS or SMT beacon, and on no others. Pinned as an exact id set so
-/// an upstream vector gaining or losing such a beacon fails by name rather than
-/// quietly moving the aggregation milestone's target set.
+/// declares a CAS or SMT beacon, and on no others. Pinned as an exact scenario
+/// set on every network so an upstream vector gaining or losing such a beacon
+/// fails by name rather than quietly moving the aggregation milestone's target
+/// set.
 #[test]
 fn live_vectors_name_the_beacon_types_the_resolver_cannot_query() {
     if !test_suite_checked_out() {
@@ -5513,33 +5249,21 @@ fn live_vectors_name_the_beacon_types_the_resolver_cannot_query() {
     let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
 
-    let observed: BTreeSet<String> = vectors
+    let observed: BTreeSet<(String, String)> = vectors
         .iter()
         .filter(|v| {
             v.skip_reasons_with(AssertionKind::Resolve, &[])
                 .contains(&SkipReason::UnsupportedBeaconType)
         })
-        .map(|v| v.id.clone())
+        .map(|v| (v.network_dir.clone(), scenario_number(v).to_string()))
         .collect();
 
-    let expected: BTreeSet<String> = [
-        "mutinynet/x1/q425c5wf",
-        "mutinynet/x1/q4lqu6gr",
-        "mutinynet/x1/q4rnhfhv",
-        "mutinynet/x1/q4x4pxl2",
-        "mutinynet/x1/q550pp4e",
-        "mutinynet/x1/q59jnwfs",
-        "mutinynet/x1/q5cfewep",
-        "mutinynet/x1/qkrrp544",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
-
     assert_eq!(
-        observed, expected,
-        "the vectors whose genesis document declares a CAS or SMT beacon"
+        observed,
+        on_every_network(&CAS_OR_SMT_BEACON_SCENARIOS),
+        "the scenarios whose genesis document declares a CAS or SMT beacon"
     );
+    assert_eq!(observed.len(), 56, "14 scenarios on each of four networks");
 
     // And the reason scopes to Resolve, like every other derived reason.
     for v in &vectors {
@@ -5559,21 +5283,16 @@ fn live_vectors_name_the_beacon_types_the_resolver_cannot_query() {
     }
 }
 
-/// The rows the resolve driver is expected to drive, pinned BY ID.
+/// The rows the resolve driver is expected to drive, pinned BY SCENARIO on
+/// every network: every set except the CAS/SMT-beacon ones and the
+/// CAS-delivered ones, 41 per network.
 ///
 /// [`DRIVEN_FLOOR`] alone would say only that the number moved. This says WHICH
-/// row moved: the four genesis-era rows are driven; the seven anchored
-/// past-genesis rows fed from `fixtures/chain/` (`mutinynet/k1/q5p6w9su`,
-/// `mutinynet/k1/q5pgeu9z`, `mutinynet/x1/q5ugrf3w`, `regtest/k1/qgppexmy`,
-/// `regtest/k1/qgpy0hmm`, `regtest/x1/q26jeds9`, `regtest/x1/qfl7se8f`) are
-/// parked under [`SkipReason::StaleContext`] and return here when the
-/// regenerated suite is absorbed. A vector losing its sidecar genesis
-/// document, gaining a `pending.json`, clearing its stale `@context` early, or
-/// an upstream vector arriving with a shape the rules classify differently
-/// fails here naming the difference, instead of being absorbed by a `>=`
-/// ratchet.
+/// row moved. A vector losing its sidecar genesis document, or an upstream
+/// vector arriving with a shape the rules classify differently, fails here
+/// naming the difference, instead of being absorbed by a `>=` ratchet.
 #[test]
-fn resolve_driven_set_is_the_expected_four_ids() {
+fn resolve_driven_set_is_every_set_outside_the_cas_and_smt_scenarios() {
     if !test_suite_checked_out() {
         eprintln!(
             "SKIP: test-suite submodule absent; \
@@ -5586,16 +5305,15 @@ fn resolve_driven_set_is_the_expected_four_ids() {
 
     let observed = expected_driven_with(AssertionKind::Resolve, &vectors, &[]);
 
-    let expected: BTreeSet<RowKey> = [
-        // Genesis-era, driven since the offline harness landed.
-        "mutinynet/k1/q5puld7y",
-        "mutinynet/x1/q5g3smvu",
-        "regtest/k1/qgpakaw4",
-        "regtest/x1/q2fz9mz6",
-    ]
-    .into_iter()
-    .map(RowKey::set)
-    .collect();
+    let expected: BTreeSet<RowKey> = vectors
+        .iter()
+        .filter(|v| {
+            let scenario = scenario_number(v);
+            !CAS_OR_SMT_BEACON_SCENARIOS.contains(&scenario)
+                && !CAS_DELIVERY_ONLY_SCENARIOS.contains(&scenario)
+        })
+        .map(|v| RowKey::set(v.id.clone()))
+        .collect();
 
     let missing: Vec<&RowKey> = expected.difference(&observed).collect();
     let extra: Vec<&RowKey> = observed.difference(&expected).collect();
@@ -5604,11 +5322,21 @@ fn resolve_driven_set_is_the_expected_four_ids() {
         "the resolve driven set moved.\n  \
          expected but not driven ({}): {missing:?}\n  \
          driven but not expected ({}): {extra:?}\n  \
-         Update this list together with DRIVEN_FLOOR, or restore the row.",
+         Update the scenario lists together with DRIVEN_FLOOR, or restore the row.",
         missing.len(),
         extra.len(),
     );
-    assert_eq!(observed.len(), 4, "the floor and this list must agree");
+    for network in LIVE_NETWORKS {
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|row| row.vector.starts_with(&format!("{network}/")))
+                .count(),
+            41,
+            "{network} drives 41 resolve rows"
+        );
+    }
+    assert_eq!(observed.len(), 164, "the floor and this set must agree");
 }
 
 /// `Override` stays LAST in the derived ordering: `PartialOrd`/`Ord` are derived
@@ -5619,11 +5347,9 @@ fn override_still_sorts_after_every_derived_reason() {
     let ordered: Vec<SkipReason> = BTreeSet::from([
         SkipReason::Override("a one-off"),
         SkipReason::ExpectedError,
-        SkipReason::StaleContext,
         SkipReason::UnsupportedBeaconType,
         SkipReason::SmtDelivery,
         SkipReason::CasDelivery,
-        SkipReason::Unanchored,
     ])
     .into_iter()
     .collect();
@@ -5631,11 +5357,9 @@ fn override_still_sorts_after_every_derived_reason() {
     assert_eq!(
         ordered,
         vec![
-            SkipReason::Unanchored,
             SkipReason::CasDelivery,
             SkipReason::SmtDelivery,
             SkipReason::UnsupportedBeaconType,
-            SkipReason::StaleContext,
             SkipReason::ExpectedError,
             SkipReason::Override("a one-off"),
         ]
@@ -5648,7 +5372,7 @@ fn override_still_sorts_after_every_derived_reason() {
 fn positive_case(name: &str) -> ResolveCase {
     ResolveCase {
         name: name.to_string(),
-        outcome: positive_outcome(1, true),
+        outcome: positive_outcome(1),
     }
 }
 
@@ -5714,7 +5438,7 @@ fn resolve_option_has_one_row_per_case() {
 
 /// A resolve case inherits exactly its set's derived Resolve reasons: a case of
 /// a set with a CAS beacon is as undeliverable as the main pair, and so is a
-/// case of a stale or pending set.
+/// case of a set whose genesis document is CAS-delivered.
 #[test]
 fn resolve_option_inherits_the_sets_resolve_reasons() {
     let mut v = synthetic_vector("mutinynet/x1/q4lqu6gr", "x1");
@@ -5733,15 +5457,18 @@ fn resolve_option_inherits_the_sets_resolve_reasons() {
         assert!(!v.should_drive_row_with(AssertionKind::ResolveOption, Some(case), &[]));
     }
 
-    v.genesis_service_types.clear();
-    v.stale_update_context = true;
-    v.delivery.pending = true;
+    v.genesis_service_types = vec!["SMTBeacon".into()];
+    v.delivery.genesis = GenesisDelivery::Cas;
     assert_eq!(
         v.row_skip_reasons(AssertionKind::ResolveOption, Some("01"), &[]),
-        BTreeSet::from([SkipReason::Unanchored, SkipReason::StaleContext])
+        BTreeSet::from([
+            SkipReason::CasDelivery,
+            SkipReason::SmtDelivery,
+            SkipReason::UnsupportedBeaconType,
+        ])
     );
 
-    // Summary: two skipped resolve-option rows, each counted under both reasons.
+    // Summary: two skipped resolve-option rows, each counted under every reason.
     let summary = render_summary_with(std::slice::from_ref(&v), &[]);
     assert!(
         summary
@@ -5919,8 +5646,7 @@ fn expected_error_never_applies_to_a_positive_set() {
     let mut v = synthetic_vector("mutinynet/x1/q5m2fh36", "x1");
     v.update_layout = UpdateLayout::Numbered(vec!["01".into(), "02".into()]);
     v.resolve_cases = vec![positive_case("01")];
-    v.delivery.pending = true;
-    v.stale_update_context = true;
+    v.delivery.genesis = GenesisDelivery::Cas;
     v.genesis_service_types = vec!["CASBeacon".into()];
     // A negative resolve CASE does not make the set negative: only the main
     // pair decides.
@@ -6035,7 +5761,7 @@ fn divergence_used_by_a_driven_resolve_case_is_not_reported() {
     v.resolve_cases = vec![
         ResolveCase {
             name: "01".into(),
-            outcome: positive_outcome(1, true),
+            outcome: positive_outcome(1),
         },
         ResolveCase {
             name: "02".into(),
@@ -6590,12 +6316,12 @@ fn cohorts_reject_a_member_recording_another_txid() {
 /// updates with no sidecar copies do not.
 #[test]
 fn delivery_negative_skips_the_file_shape_cas_rules() {
-    let external = derive_delivery(VectorIdType::External, true, false, true, false, false);
+    let external = derive_delivery(VectorIdType::External, true, false, true, false);
     assert!(external.negative);
     assert_eq!(external.genesis, GenesisDelivery::Sidecar);
     assert_eq!(external.announcement, Some(AnnouncementDelivery::Sidecar));
 
-    let key = derive_delivery(VectorIdType::Key, true, false, false, false, false);
+    let key = derive_delivery(VectorIdType::Key, true, false, false, false);
     assert_eq!(key.genesis, GenesisDelivery::Deterministic);
     assert_eq!(key.announcement, None);
 }
@@ -6604,11 +6330,11 @@ fn delivery_negative_skips_the_file_shape_cas_rules() {
 /// with one, the sidecar delivers it.
 #[test]
 fn delivery_external_genesis_follows_the_sidecar() {
-    let cas = derive_delivery(VectorIdType::External, false, false, false, false, false);
+    let cas = derive_delivery(VectorIdType::External, false, false, false, false);
     assert_eq!(cas.genesis, GenesisDelivery::Cas);
     assert!(!cas.negative);
 
-    let sidecar = derive_delivery(VectorIdType::External, false, true, false, false, false);
+    let sidecar = derive_delivery(VectorIdType::External, false, true, false, false);
     assert_eq!(sidecar.genesis, GenesisDelivery::Sidecar);
 }
 
@@ -6616,122 +6342,29 @@ fn delivery_external_genesis_follows_the_sidecar() {
 /// sidecar delivers them; with no update steps there is no announcement.
 #[test]
 fn delivery_announcement_follows_the_sidecar_updates() {
-    let cas = derive_delivery(VectorIdType::Key, false, false, true, false, false);
+    let cas = derive_delivery(VectorIdType::Key, false, false, true, false);
     assert_eq!(cas.announcement, Some(AnnouncementDelivery::Cas));
 
-    let sidecar = derive_delivery(VectorIdType::Key, false, false, true, true, false);
+    let sidecar = derive_delivery(VectorIdType::Key, false, false, true, true);
     assert_eq!(sidecar.announcement, Some(AnnouncementDelivery::Sidecar));
 
-    let none = derive_delivery(VectorIdType::Key, false, false, false, true, false);
+    let none = derive_delivery(VectorIdType::Key, false, false, false, true);
     assert_eq!(none.announcement, None);
 }
 
-/// A key-based genesis is deterministic whatever the sidecar says, and
-/// `pending` is carried through.
+/// A key-based genesis is deterministic whatever the sidecar says.
 #[test]
 fn delivery_key_genesis_is_deterministic() {
     for has_sidecar_genesis in [false, true] {
-        let d = derive_delivery(
-            VectorIdType::Key,
-            false,
-            has_sidecar_genesis,
-            false,
-            false,
-            true,
-        );
+        let d = derive_delivery(VectorIdType::Key, false, has_sidecar_genesis, false, false);
         assert_eq!(d.genesis, GenesisDelivery::Deterministic);
-        assert!(d.pending);
     }
 }
 
-/// A declared CAS genesis the files do not show, and a CAS genesis the files
-/// show but the scenario does not declare, both disagree.
-#[test]
-fn delivery_cross_check_rejects_a_genesis_disagreement() {
-    use GenesisDelivery as G;
-    for derived in [G::Deterministic, G::Sidecar] {
-        let err = cross_check_scenario(&delivery_of(derived, None, false), Some("cas"), None, &[])
-            .expect_err("declared CAS genesis vs a non-CAS derivation");
-        assert!(err.contains("disagree") && err.contains("cas"), "{err}");
-    }
-    cross_check_scenario(&delivery_of(G::Cas, None, false), None, None, &[])
-        .expect_err("a derived CAS genesis the scenario does not declare");
-    cross_check_scenario(&delivery_of(G::Cas, None, false), Some("cas"), None, &[])
-        .expect("agreement passes");
-}
-
-/// On an anchored set a declared CAS announcement must be what the files show.
-#[test]
-fn delivery_cross_check_rejects_an_announcement_disagreement_when_anchored() {
-    let derived = delivery_of(GenesisDelivery::Cas, None, false);
-    let err = cross_check_scenario(&derived, Some("cas"), Some("cas"), &[])
-        .expect_err("declared CAS announcement vs no announcement");
-    assert!(
-        err.contains("announcement") && err.contains("disagree"),
-        "{err}"
-    );
-}
-
-/// A pending set never anchored its updates, so only its genesis delivery is
-/// cross-checked: the same disagreement passes, and a genesis disagreement
-/// still fails.
-#[test]
-fn delivery_cross_check_checks_genesis_only_when_pending() {
-    let derived = delivery_of(GenesisDelivery::Cas, None, true);
-    cross_check_scenario(&derived, Some("cas"), Some("cas"), &[])
-        .expect("the announcement of a pending set is not cross-checked");
-    let derived = delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas), true);
-    cross_check_scenario(&derived, Some("cas"), None, &[]).expect("nor is an undeclared one");
-    let derived = delivery_of(GenesisDelivery::Sidecar, None, true);
-    cross_check_scenario(&derived, Some("cas"), None, &[])
-        .expect_err("the genesis of a pending set still is");
-}
-
-/// A null or absent `delivery` declares nothing and is not checked, even where
-/// the files show CAS delivery.
-#[test]
-fn delivery_cross_check_skips_a_null_declaration() {
-    let derived = delivery_of(GenesisDelivery::Cas, Some(AnnouncementDelivery::Cas), false);
-    for scenario in [
-        serde_json::json!({ "delivery": null }),
-        serde_json::json!({}),
-    ] {
-        check_scenario_delivery(&derived, &scenario, &[]).expect("nothing is declared");
-    }
-    check_scenario_delivery(
-        &derived,
-        &serde_json::json!({ "delivery": { "genesis": "cas", "announcement": "cas" } }),
-        &[],
-    )
-    .expect("a matching declaration passes through the whole-file entry point");
-    check_scenario_delivery(
-        &delivery_of(GenesisDelivery::Sidecar, None, false),
-        &serde_json::json!({ "delivery": { "genesis": "cas" } }),
-        &[],
-    )
-    .expect_err("a disagreeing one fails through it");
-}
-
-/// A declared SMT delivery needs an SMT beacon in the genesis document.
-#[test]
-fn delivery_cross_check_smt_requires_an_smt_beacon() {
-    let derived = delivery_of(
-        GenesisDelivery::Sidecar,
-        Some(AnnouncementDelivery::Sidecar),
-        false,
-    );
-    let err = cross_check_scenario(&derived, None, Some("smt"), &["SingletonBeacon".into()])
-        .expect_err("SMT declared with no SMT beacon");
-    assert!(err.contains("SMTBeacon"), "{err}");
-    cross_check_scenario(&derived, None, Some("smt"), &["SMTBeacon".into()])
-        .expect("SMT declared with an SMT beacon");
-}
-
-/// The derived CAS delivery set on the checked-out suite, pinned by id: the
-/// seven external sets whose files show a CAS genesis, plus the two whose
-/// genesis document declares a `CASBeacon`. Every declaring `scenario.json` was
-/// cross-checked against these at discovery, so this pin is the cross-check's
-/// observable result.
+/// The derived CAS delivery set on the checked-out suite, pinned by scenario on
+/// every network: the four sets whose files alone show CAS delivery (05, 06, 08,
+/// 20), plus the six whose genesis document declares a `CASBeacon` or whose
+/// updates carry no sidecar (09a/b, 10a/b, 11a/b).
 #[test]
 fn live_vectors_derive_exactly_the_cas_delivery_set() {
     if !test_suite_checked_out() {
@@ -6744,38 +6377,45 @@ fn live_vectors_derive_exactly_the_cas_delivery_set() {
     let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
 
-    let observed: BTreeSet<String> = vectors
+    let observed: BTreeSet<(String, String)> = vectors
         .iter()
         .filter(|v| {
             v.skip_reasons_with(AssertionKind::Resolve, &[])
                 .contains(&SkipReason::CasDelivery)
         })
-        .map(|v| v.id.clone())
+        .map(|v| (v.network_dir.clone(), scenario_number(v).to_string()))
         .collect();
-    let expected: BTreeSet<String> = [
-        "mutinynet/x1/q4lqu6gr",
-        "mutinynet/x1/q4rnhfhv",
-        "mutinynet/x1/q4x4pxl2",
-        "mutinynet/x1/q550pp4e",
-        "mutinynet/x1/q59jnwfs",
-        "mutinynet/x1/q5m2fh36",
-        "mutinynet/x1/qh66uy2s",
-        "mutinynet/x1/qkrrp544",
-        "mutinynet/x1/qky9e7qz",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
     assert_eq!(
-        observed, expected,
+        observed,
+        on_every_network(&[
+            "05", "06", "08", "20", "09a", "09b", "10a", "10b", "11a", "11b"
+        ]),
         "the sets whose files (or genesis beacons) show CAS delivery"
     );
+
+    // The four CAS-delivery-only scenarios carry that reason and no other.
+    for v in vectors
+        .iter()
+        .filter(|v| CAS_DELIVERY_ONLY_SCENARIOS.contains(&scenario_number(v)))
+    {
+        assert_eq!(
+            v.skip_reasons_with(AssertionKind::Resolve, &[]),
+            BTreeSet::from([SkipReason::CasDelivery]),
+            "{}",
+            v.id
+        );
+    }
 }
 
-/// No set of the checked-out suite expects an error, so a negative set leaking
-/// in fails here by name rather than as a driver failure.
+/// The suite ships its negative sets, exactly the named scenarios on every
+/// network, and each one's `resolve/output.json` records the error code it
+/// expects in `didResolutionMetadata.error`.
+///
+/// A negative scenario whose output lost its code would parse as positive and
+/// drop out of the observed set, failing the scenario comparison by name; the
+/// raw read then checks the code and the absent document on the file itself.
 #[test]
-fn no_live_vector_is_negative() {
+fn negative_vectors_carry_their_expected_error() {
     if !test_suite_checked_out() {
         eprintln!(
             "SKIP: test-suite submodule absent; \
@@ -6785,15 +6425,65 @@ fn no_live_vector_is_negative() {
     }
     let vectors = discover_in(&Corpus::test_suite());
     assert!(!vectors.is_empty());
-    let negative: Vec<&str> = vectors
+
+    let negative: Vec<&Vector> = vectors.iter().filter(|v| v.is_negative()).collect();
+    let observed: BTreeSet<(String, String)> = negative
         .iter()
-        .filter(|v| v.is_negative())
-        .map(|v| v.id.as_str())
+        .map(|v| (v.network_dir.clone(), scenario_number(v).to_string()))
         .collect();
-    assert!(
-        negative.is_empty(),
-        "the checked-out suite ships no negative set, but these expect an error: {negative:?}"
+    let scenarios: Vec<String> = (1..=5).chain(10..=31).map(|n| format!("n{n:02}")).collect();
+    let scenarios: Vec<&str> = scenarios.iter().map(String::as_str).collect();
+    assert_eq!(
+        observed,
+        on_every_network(&scenarios),
+        "the negative scenarios are n01-n05 and n10-n31 on every network"
     );
+    assert_eq!(
+        negative.len(),
+        108,
+        "27 negative sets on each of four networks"
+    );
+
+    for v in &negative {
+        let output = v.fixture("resolve/output.json");
+        let code = &output["didResolutionMetadata"]["error"];
+        assert!(
+            code.as_str().is_some_and(|c| !c.is_empty()),
+            "{}: resolve/output.json must carry didResolutionMetadata.error, found {code}",
+            v.id
+        );
+        assert!(
+            output["didDocument"].is_null(),
+            "{}: a negative output carries no didDocument",
+            v.id
+        );
+    }
+
+    // The one recorded code that diverges from the specification is carried by
+    // n21 and n28 on every network, and each of those rows is driven, so the
+    // divergence entry asserts the specification's code on all eight.
+    let late: BTreeSet<(String, String)> = negative
+        .iter()
+        .filter(|v| {
+            ERROR_CODE_DIVERGENCES
+                .iter()
+                .any(|d| matches!(&v.outcome, Outcome::Error { code } if code == d.vector_code))
+        })
+        .map(|v| (v.network_dir.clone(), scenario_number(v).to_string()))
+        .collect();
+    assert_eq!(late, on_every_network(&["n21", "n28"]));
+    let driven = expected_driven_with(AssertionKind::Resolve, &vectors, &[]);
+    for (network, scenario) in &late {
+        let v = negative
+            .iter()
+            .find(|v| &v.network_dir == network && scenario_number(v) == scenario)
+            .expect("the set was just observed");
+        assert!(
+            driven.contains(&RowKey::set(v.id.clone())),
+            "{}: its Resolve row is driven",
+            v.id
+        );
+    }
 }
 
 // --- Synthetic shape corpora ---------------------------------------------------
@@ -6828,17 +6518,7 @@ fn shapes_corpus_classifies_from_files() {
     for v in &vectors {
         assert_eq!(v.corpus, corpus, "{}", v.id);
         assert!(v.dir.starts_with(&corpus.sets), "{}", v.id);
-        assert!(
-            !v.delivery.pending,
-            "{}: the layout ships no pending.json",
-            v.id
-        );
         assert!(!v.is_negative(), "{}", v.id);
-        assert!(
-            !v.version_id_is_number(),
-            "{}: versionId is the ASCII string the specification requires",
-            v.id
-        );
     }
     let by_id = |want: &str| {
         vectors
@@ -6847,9 +6527,7 @@ fn shapes_corpus_classifies_from_files() {
             .unwrap_or_else(|| panic!("{want} must be discovered"))
     };
 
-    // The exact reasons each set's files derive. The copied update @context
-    // predates the pin, so the two sets with update steps also carry
-    // StaleContext.
+    // The exact reasons each set's files derive.
     let reasons = |id: &str| by_id(id).skip_reasons_with(AssertionKind::Resolve, &[]);
     assert_eq!(
         reasons("mutinynet/x1/qh66uy2s"),
@@ -6857,15 +6535,11 @@ fn shapes_corpus_classifies_from_files() {
     );
     assert_eq!(
         reasons("regtest/k1/qgppexmy"),
-        BTreeSet::from([SkipReason::CasDelivery, SkipReason::StaleContext])
+        BTreeSet::from([SkipReason::CasDelivery])
     );
     assert_eq!(
         reasons("mutinynet/x1/q5cfewep"),
-        BTreeSet::from([
-            SkipReason::SmtDelivery,
-            SkipReason::UnsupportedBeaconType,
-            SkipReason::StaleContext,
-        ])
+        BTreeSet::from([SkipReason::SmtDelivery, SkipReason::UnsupportedBeaconType])
     );
     assert_eq!(
         reasons("mutinynet/x1/q425c5wf"),
@@ -6945,6 +6619,55 @@ fn shapes_bad_cohort_member_fails_discovery() {
     );
 }
 
+/// Copy the directory tree at `from` to `to`, creating `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Discovery refuses a set whose main `resolve/output.json` encodes
+/// `didDocumentMetadata.versionId` as a JSON number, naming the file and saying
+/// the field must be a string.
+#[test]
+fn discovery_rejects_a_number_encoded_version_id_by_path() {
+    let root = std::env::temp_dir().join(format!(
+        "did-btcr2-number-version-id-{}",
+        std::process::id()
+    ));
+    let set = "mutinynet/x1/qh66uy2s";
+    copy_tree(
+        &Corpus::synthetic("shapes").sets.join(set),
+        &root.join("sets").join(set),
+    );
+    let output_path = root.join("sets").join(set).join("resolve/output.json");
+    let mut output = read_json_at(&output_path, "the copied output");
+    output["didDocumentMetadata"]["versionId"] = serde_json::json!(2);
+    std::fs::write(&output_path, output.to_string()).unwrap();
+
+    let corpus = Corpus {
+        sets: root.join("sets"),
+        chain: root.join("chain"),
+    };
+    let payload = std::panic::catch_unwind(|| discover_in(&corpus))
+        .expect_err("discovery over a number-encoded versionId must fail");
+    let message = panic_message(payload);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(
+        message.contains(&format!("{set}/resolve/output.json"))
+            && message.contains("didDocumentMetadata.versionId")
+            && message.contains("string"),
+        "the message names the file, the field and the required encoding: {message}"
+    );
+}
+
 // --- resolve comparison rules ---------------------------------------------------
 
 #[test]
@@ -6989,11 +6712,11 @@ fn exact_confirmations_reject_above_and_below() {
     assert!(confirmations_exact(None, Some(0)).is_err());
 }
 
-/// A positive outcome with the given `versionId` encodings.
-fn positive(version_id: u64, version_id_string: Option<&str>) -> Outcome {
+/// A positive outcome with the given numeric and recorded `versionId`.
+fn positive(version_id: u64, version_id_string: &str) -> Outcome {
     Outcome::Positive {
         version_id,
-        version_id_string: version_id_string.map(str::to_string),
+        version_id_string: version_id_string.to_string(),
         deactivated: false,
         confirmations: None,
     }
@@ -7001,21 +6724,16 @@ fn positive(version_id: u64, version_id_string: Option<&str>) -> Outcome {
 
 #[test]
 fn version_id_matches_compares_the_string_encoding() {
-    assert_eq!(version_id_matches(3, &positive(3, Some("3"))), Ok(()));
+    assert_eq!(version_id_matches(3, &positive(3, "3")), Ok(()));
+    assert!(version_id_matches(3, &positive(2, "2")).is_err());
 }
 
 #[test]
 fn version_id_matches_does_not_coerce_a_string() {
     // `version_id` 3 is what a numeric read of "03" yields; the string compare
     // must still refuse it.
-    let err = version_id_matches(3, &positive(3, Some("03"))).expect_err("\"3\" is not \"03\"");
+    let err = version_id_matches(3, &positive(3, "03")).expect_err("\"3\" is not \"03\"");
     assert!(err.contains("\"03\"") && err.contains("\"3\""), "{err}");
-}
-
-#[test]
-fn version_id_matches_keeps_the_number_path() {
-    assert_eq!(version_id_matches(2, &positive(2, None)), Ok(()));
-    assert!(version_id_matches(3, &positive(2, None)).is_err());
 }
 
 #[test]
