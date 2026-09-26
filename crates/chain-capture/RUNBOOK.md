@@ -789,8 +789,8 @@ since.
   recorded `blockHeight`, `blockHash` and `signalBytes`, no more and no fewer.
   Each entry's `address` must be one of the captured addresses whose history
   carries its transaction; a transaction that spends from that beacon and pays
-  change to another carries both, so either matches. This replaces the
-  ordering checks that apply to a capture without `signals.json`.
+  change to another carries both, so either matches. Every set the tool
+  captures carries `signals.json`; the loader refuses one without it.
 
 ### Refusals, and what to do
 

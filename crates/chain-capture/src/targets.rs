@@ -547,8 +547,10 @@ pub struct VectorTarget {
     pub sidecar: Value,
     /// What `resolve/output.json` says the resolve produces.
     pub expected: ExpectedOutcome,
-    /// The set's `signals.json`, when it ships one.
-    pub signals: Option<CaptureSignals>,
+    /// The set's `signals.json`. Every target carries one: [`load_in`], the
+    /// one loader, refuses a set without it, because that record is what the
+    /// capture gate compares the chain with and what pins the capture's tip.
+    pub signals: CaptureSignals,
 }
 
 /// What a set's `resolve/output.json` says resolving its DID produces.
@@ -784,7 +786,7 @@ pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError>
         did,
         sidecar,
         expected,
-        signals: Some(signals),
+        signals,
     })
 }
 
@@ -1550,7 +1552,10 @@ mod tests {
             *target.did.encode(),
             "the expected document is the one the set states"
         );
-        assert!(target.signals.is_some(), "the set ships its signals record");
+        assert!(
+            !target.signals.entries.is_empty(),
+            "the set ships its signals record"
+        );
     }
 
     #[test]
@@ -1560,7 +1565,10 @@ mod tests {
         }
         let target = load("regtest/k1/qgpqx326").expect("a drivable regtest set loads");
         assert_eq!(target.expected_version_id(), 2);
-        assert!(target.signals.is_some(), "the set ships its signals record");
+        assert!(
+            !target.signals.entries.is_empty(),
+            "the set ships its signals record"
+        );
     }
 
     #[test]
@@ -1576,7 +1584,7 @@ mod tests {
             }
         );
         assert!(
-            target.signals.is_some(),
+            !target.signals.entries.is_empty(),
             "a negative set is captured against its signals record"
         );
     }
@@ -2060,10 +2068,7 @@ mod tests {
         assert_eq!(target.id, id);
         assert_eq!(target.network_dir, "signet");
         assert_eq!(target.network, Network::Signet);
-        let signals = target
-            .signals
-            .as_ref()
-            .expect("the record travels with the target");
+        let signals = &target.signals;
         assert_eq!(signals.recorded_tip, 310);
         assert_eq!(signals.entries.len(), 2);
         assert_eq!(signals.entries[0].update, Some(1));
@@ -2501,8 +2506,7 @@ mod tests {
         .expect("signals.json is writable");
         let target = load_from(&root, id).expect("the allow-listed set loads");
         assert_eq!(
-            target.signals.map(|s| s.recorded_tip),
-            Some(310),
+            target.signals.recorded_tip, 310,
             "a set that ships signals.json carries its record"
         );
         assert_eq!(target.expected.confirmations(), Some(11));
@@ -2603,7 +2607,7 @@ mod tests {
         for id in DRIVABLE_VECTORS {
             let target = load(id).unwrap_or_else(|e| panic!("{id} loads: {e}"));
             assert!(
-                target.signals.is_some(),
+                !target.signals.entries.is_empty(),
                 "{id} (expecting {:?}) must carry its signals record",
                 target.expected
             );

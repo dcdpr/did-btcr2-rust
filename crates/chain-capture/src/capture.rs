@@ -26,7 +26,7 @@ use std::rc::Rc;
 use crate::fixture::{self, ChainFixture};
 use crate::pace::{Clock, PacePolicy, PaceState, PacedTransport, SystemClock};
 use crate::record::{self, Recording, RecordingTransport};
-use crate::targets::{self, CaptureSignals, ExpectedOutcome, VectorTarget};
+use crate::targets::{self, ExpectedOutcome, VectorTarget};
 use crate::validate;
 
 /// Capture-layer failures. Every message names the vector it is about, because a
@@ -181,31 +181,22 @@ pub fn resolution_options_for(
 
 /// How a captured row's `confirmations` came out.
 ///
-/// Two independently derived numbers: `expected` is what the vector states, and
+/// Two independently derived numbers: `expected` is what the set states, and
 /// `observed` is what the resolver reported while resolving against the real
-/// chain. The refuse-to-write gate re-derives the same value a third way, from
-/// the recorded tip and the announcement's block height.
+/// chain at the set's `recordedTip`. The set states its count as "at least the
+/// recorded value" at that tip, so a count at or above it reproduces the set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationsCheck {
-    /// The vector's stated confirmations, `None` when it states none.
+    /// The set's stated confirmations, `None` when it states none.
     pub expected: Option<u64>,
     /// What the resolver reported for this resolve.
     pub observed: Option<u32>,
-    /// Whether `expected` is a lower bound rather than an exact count. A set
-    /// carrying `signals.json` states its confirmations as "at least the
-    /// recorded value" at its `recordedTip`, so a count at or above it
-    /// reproduces the set; an unpinned capture's count must match exactly.
-    pub at_least: bool,
 }
 
-/// Whether a resolver's reported confirmations reproduce a stated count:
-/// exactly, or at or above it when the count is a lower bound.
-fn confirmations_reproduce(expected: u64, observed: Option<u32>, at_least: bool) -> bool {
-    match observed.map(u64::from) {
-        Some(observed) if at_least => observed >= expected,
-        Some(observed) => observed == expected,
-        None => false,
-    }
+/// Whether a resolver's reported confirmations reproduce a stated count: at
+/// or above it, since the stated count is a lower bound.
+fn confirmations_reproduce(expected: u64, observed: Option<u32>) -> bool {
+    observed.is_some_and(|observed| u64::from(observed) >= expected)
 }
 
 impl std::fmt::Display for ConfirmationsCheck {
@@ -215,14 +206,13 @@ impl std::fmt::Display for ConfirmationsCheck {
                 write!(f, "{expected} == {observed} ok")
             }
             (Some(expected), Some(observed))
-                if confirmations_reproduce(expected, Some(observed), self.at_least) =>
+                if confirmations_reproduce(expected, Some(observed)) =>
             {
                 write!(f, "{observed} >= {expected} ok (at least)")
             }
-            (Some(expected), Some(observed)) if self.at_least => {
+            (Some(expected), Some(observed)) => {
                 write!(f, "{observed} < {expected} MISMATCH (at least)")
             }
-            (Some(expected), Some(observed)) => write!(f, "{expected} != {observed} MISMATCH"),
             (Some(expected), None) => write!(f, "{expected} expected, none reported MISMATCH"),
             (None, Some(observed)) => {
                 write!(f, "n/a (vector states none; resolver reported {observed})")
@@ -243,21 +233,20 @@ pub struct CaptureOutcome {
     pub empty_addresses: usize,
     /// How many beacon signals the capture proved.
     pub signals: usize,
-    /// The chain tip the fixture pins.
+    /// The chain tip the fixture pins: the set's `recordedTip`.
     pub tip_height: u32,
-    /// Whether the capture was pinned to the set's `recordedTip` rather than
-    /// the live tip.
-    pub recorded_tip: bool,
     /// The confirmations check for this row.
     pub confirmations: ConfirmationsCheck,
     /// Where the fixture was written.
     pub path: PathBuf,
 }
 
-/// Validate a recording and, only if it passes, write the fixture under `root`.
+/// Validate a recording against the set's `signals.json` and, only if it
+/// passes, write the fixture under `root`, pinned to the set's `recordedTip`.
 ///
-/// The gate and the write are ONE function so no caller can reorder them. A
-/// failure returns before the write, so an existing fixture is left
+/// The gate is [`validate::validate_signals`], the exact match with that
+/// record. The gate and the write are ONE function so no caller can reorder
+/// them. A failure returns before the write, so an existing fixture is left
 /// byte-identical — `emit_writes_nothing_when_validation_fails` asserts exactly
 /// that.
 ///
@@ -274,65 +263,12 @@ pub fn emit_to(
     root: &Path,
     target: &VectorTarget,
     endpoint: &str,
-    tip_height: u32,
     addresses: &BTreeMap<String, Vec<Value>>,
     blocks: &BTreeMap<String, Value>,
     observed_confirmations: Option<u32>,
 ) -> Result<CaptureOutcome, CaptureError> {
-    let signals = validate::validate(target, tip_height, addresses)?;
-    let fixture = ChainFixture {
-        captured_at: Utc::now().to_rfc3339(),
-        endpoint: endpoint.to_string(),
-        network: target.network_dir.clone(),
-        vector: target.id.clone(),
-        did: target.did.encode().to_string(),
-        tip_height,
-        signals,
-        addresses: addresses.clone(),
-        blocks: blocks.clone(),
-        // A vendor vector reads its sidecar and its expectations from the
-        // test-suite tree; only a minted scenario carries its own.
-        sidecar: None,
-        expected: None,
-    };
-    let path = fixture::write_atomic_in(root, &fixture)?;
-    // The derived path runs through the crate manifest directory, so it carries
-    // `../..` segments; the file exists by now, so report the resolved one. A
-    // filesystem that cannot resolve it is not a reason to fail a written
-    // capture — fall back to the path as derived.
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
-    Ok(CaptureOutcome {
-        addresses: addresses.len(),
-        empty_addresses: addresses.values().filter(|txs| txs.is_empty()).count(),
-        signals: fixture.signals.len(),
-        tip_height,
-        recorded_tip: false,
-        confirmations: ConfirmationsCheck {
-            expected: target.expected.confirmations(),
-            observed: observed_confirmations,
-            at_least: false,
-        },
-        path,
-    })
-}
-
-/// [`emit_to`] for a set that carries `signals.json`: the gate is the exact
-/// match with that record, and the fixture pins the set's `recordedTip`.
-///
-/// The ordering checks of [`validate::validate`] are not run: the record is
-/// the oracle for such a set, and a legitimate duplicate above a later update,
-/// or an announcement deliberately below the current height, would fail them.
-pub fn emit_signals_to(
-    root: &Path,
-    target: &VectorTarget,
-    signals: &CaptureSignals,
-    endpoint: &str,
-    addresses: &BTreeMap<String, Vec<Value>>,
-    blocks: &BTreeMap<String, Value>,
-    observed_confirmations: Option<u32>,
-) -> Result<CaptureOutcome, CaptureError> {
-    let proved = validate::validate_signals(target, signals, addresses)?;
-    let tip_height = signals.recorded_tip;
+    let proved = validate::validate_signals(target, &target.signals, addresses)?;
+    let tip_height = target.signals.recorded_tip;
     let fixture = ChainFixture {
         captured_at: Utc::now().to_rfc3339(),
         endpoint: endpoint.to_string(),
@@ -348,17 +284,19 @@ pub fn emit_signals_to(
         expected: None,
     };
     let path = fixture::write_atomic_in(root, &fixture)?;
+    // The derived path runs through the crate manifest directory, so it carries
+    // `../..` segments; the file exists by now, so report the resolved one. A
+    // filesystem that cannot resolve it is not a reason to fail a written
+    // capture — fall back to the path as derived.
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     Ok(CaptureOutcome {
         addresses: addresses.len(),
         empty_addresses: addresses.values().filter(|txs| txs.is_empty()).count(),
         signals: fixture.signals.len(),
         tip_height,
-        recorded_tip: true,
         confirmations: ConfirmationsCheck {
             expected: target.expected.confirmations(),
             observed: observed_confirmations,
-            at_least: true,
         },
         path,
     })
@@ -368,7 +306,7 @@ pub fn emit_signals_to(
 ///
 /// Built by hand because the client's own tip request is not reachable from
 /// here. The answer decides whether the capture may proceed; it is not fixture
-/// data, since a set carrying `signals.json` replays against its `recordedTip`.
+/// data, since a set replays against its `recordedTip`.
 fn live_tip<T: BtcTransport>(
     transport: &T,
     base_url: &str,
@@ -438,33 +376,25 @@ pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
     let paced =
         || PacedTransport::sharing(transport.clone(), clock.clone(), policy, Rc::clone(&pace));
 
-    // A set carrying `signals.json` states its expected confirmations against
-    // its `recordedTip`, so the capture resolves at that tip and the replay
-    // reads it back from the fixture. A live tip below it means the indexer is
-    // behind the chain the set was recorded on, and nothing it serves can
-    // reproduce the set.
-    let pinned_tip = match &target.signals {
-        Some(signals) => {
-            let live = live_tip(&paced(), base_url, &target.id)?;
-            if live < signals.recorded_tip {
-                return Err(CaptureError::TipBelowRecorded {
-                    vector: target.id.clone(),
-                    live_tip: live,
-                    recorded_tip: signals.recorded_tip,
-                });
-            }
-            Some(signals.recorded_tip)
-        }
-        // Without a record, the client fetches `/blocks/tip/height` itself and
-        // the recorder captures that value as the tip the fixture will pin.
-        None => None,
-    };
+    // A set states its expected confirmations against its `recordedTip`, so
+    // the capture resolves at that tip and the replay reads it back from the
+    // fixture. A live tip below it means the indexer is behind the chain the
+    // set was recorded on, and nothing it serves can reproduce the set.
+    let recorded_tip = target.signals.recorded_tip;
+    let live = live_tip(&paced(), base_url, &target.id)?;
+    if live < recorded_tip {
+        return Err(CaptureError::TipBelowRecorded {
+            vector: target.id.clone(),
+            live_tip: live,
+            recorded_tip,
+        });
+    }
 
     let client = Client::new(
         base_url.to_string(),
         RecordingTransport::sharing(paced(), Rc::clone(&recording)),
     );
-    let options = resolution_options_for(&target.sidecar, pinned_tip)?;
+    let options = resolution_options_for(&target.sidecar, Some(recorded_tip))?;
     let resolved = client.resolve(&target.did, options);
 
     // The expected-output check. This is where a real chain is contacted on every
@@ -487,28 +417,13 @@ pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
         },
     )?;
 
+    // The pinned resolve never fetches the tip, so the recorder holds none;
+    // the fixture pins the set's own.
     let recorded = recording.borrow();
-    if let Some(signals) = &target.signals {
-        // The pinned resolve never fetches the tip, so the recorder holds none;
-        // the fixture pins the set's own.
-        return emit_signals_to(
-            out_root,
-            target,
-            signals,
-            base_url,
-            &recorded.addresses,
-            &recorded.blocks,
-            observed_confirmations,
-        );
-    }
-    let tip = recorded.tip.ok_or_else(|| CaptureError::NoTip {
-        vector: target.id.clone(),
-    })?;
     emit_to(
         out_root,
         target,
         base_url,
-        tip,
         &recorded.addresses,
         &recorded.blocks,
         observed_confirmations,
@@ -548,13 +463,10 @@ fn client_error_code(err: &did_btcr2_client::Error) -> Option<String> {
 ///
 /// A resolved expectation is compared on `didDocument`, `versionId`,
 /// `deactivated` and — when the set states them — `confirmations`. A set
-/// carrying `signals.json` states them as a lower bound: its README contract is
-/// that at `recordedTip` each count is at least the recorded value, and the
-/// conformance harness compares them the same way, so a count at or above the
-/// stated one passes. The heights the count derives from are already held to
-/// the record exactly by the signals gate. A set without that record is
-/// captured against one live tip, and its count must reproduce exactly. A
-/// resolve that fails is refused with the client's own error.
+/// states them as a lower bound: its README contract is that at `recordedTip`
+/// each count is at least the recorded value, and the conformance harness
+/// compares them the same way, so a count at or above the stated one passes.
+/// A resolve that fails is refused with the client's own error.
 ///
 /// An expected error is satisfied by any failure that carries a specification
 /// error code, whatever the code: the capture only proves the chain makes the
@@ -622,22 +534,16 @@ fn check_outcome(
                     result.document_metadata.deactivated.to_string(),
                 ));
             }
-            // A set that states confirmations states them against one tip, so
-            // the resolver's own report is checked too: at or above the stated
-            // count for a set pinned to its `recordedTip`, exactly otherwise.
-            // A set that states none is not checked here — the tip moves on a
-            // live chain and the set never claimed otherwise.
+            // A set that states confirmations states them against its
+            // `recordedTip`, so the resolver's own report there is checked
+            // too: at or above the stated count. A set that states none is not
+            // checked here.
             if let Some(expected) = confirmations {
                 let observed = result.document_metadata.confirmations;
-                let at_least = target.signals.is_some();
-                if !confirmations_reproduce(*expected, observed, at_least) {
+                if !confirmations_reproduce(*expected, observed) {
                     return Err(mismatch(
                         "confirmations",
-                        if at_least {
-                            format!("at least {expected}")
-                        } else {
-                            expected.to_string()
-                        },
+                        format!("at least {expected}"),
                         observed.map_or_else(|| "none".to_string(), |n| n.to_string()),
                     ));
                 }
@@ -802,49 +708,34 @@ fn render_summary(
     // re-capture has to be taken against. A capture pinned to a set's
     // `recordedTip` can be repeated for as long as the live tip is at or above
     // it and the beacon has announced nothing above it, since the tool pins the
-    // same tip again and refuses either; an unpinned capture measures against
-    // the live tip, so once the chain has been mined on only a fresh unpack of
-    // the export reproduces it.
+    // same tip again and refuses either.
     //
-    // Sets pinned to a `recordedTip` need not share one: sets recorded one
-    // after another on a live chain each carry the tip of their own moment. The
-    // footer then states the range rather than naming one set's tip as if every
-    // row had been measured against it.
-    let measured: Vec<&CaptureOutcome> = rows
+    // Sets need not share one `recordedTip`: sets recorded one after another
+    // on a live chain each carry the tip of their own moment. The footer then
+    // states the range rather than naming one set's tip as if every row had
+    // been measured against it.
+    let tip_range = rows
         .iter()
         .filter_map(|(_, row)| row.as_ref().ok())
         .filter(|outcome| outcome.confirmations.expected.is_some())
-        .collect();
-    let pinned_range = measured
-        .iter()
-        .filter(|outcome| outcome.recorded_tip)
         .map(|outcome| outcome.tip_height)
         .fold(None, |range: Option<(u32, u32)>, tip| {
             Some(range.map_or((tip, tip), |(low, high)| (low.min(tip), high.max(tip))))
         });
-    let shared_tip = measured
-        .first()
-        .map(|outcome| (outcome.tip_height, outcome.recorded_tip));
     const RECAPTURE_RULE: &str = "The fixtures replay from their files regardless; a \
          re-capture works as long as the live tip is at or above the recordedTip and no \
          announcement has been confirmed above it — the tool refuses either.";
-    match (shared_tip, pinned_range) {
-        (Some((_, true)), Some((low, high))) if low != high => out.push_str(&format!(
+    match tip_range {
+        Some((low, high)) if low != high => out.push_str(&format!(
             "  tips {low}..={high}: every confirmations expectation captured above is \
              measured against its own set's recordedTip, which ranges from {low} to \
              {high} across these sets. {RECAPTURE_RULE}\n"
         )),
-        (Some((_, true)), Some((tip, _))) => out.push_str(&format!(
+        Some((tip, _)) => out.push_str(&format!(
             "  tip {tip}: every confirmations expectation captured above is measured \
              against the set's recordedTip, {tip}. {RECAPTURE_RULE}\n"
         )),
-        (Some((tip, false)), _) => out.push_str(&format!(
-            "  tip {tip}: every confirmations expectation captured above is measured \
-             against this tip. The fixtures replay from their files regardless; to \
-             re-capture a `{network_dir}` vector after this chain has been mined on, \
-             start from a fresh unpack of the export.\n"
-        )),
-        _ => {}
+        None => {}
     }
     out
 }
@@ -852,6 +743,7 @@ fn render_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::targets::{CaptureSignals, SignalRecord};
     use crate::validate::{ValidateError, update_hashes};
     use did_btcr2::identifier::{Did, Network, Sha256Hash};
     use serde_json::json;
@@ -937,7 +829,31 @@ mod tests {
                 deactivated: false,
                 confirmations,
             },
-            signals: None,
+            // Replaced by a test that runs the gate; the outcome checks never
+            // read it.
+            signals: CaptureSignals {
+                recorded_tip: 212,
+                entries: Vec::new(),
+            },
+        }
+    }
+
+    /// The `signals.json` record of [`announcement`]'s transaction on
+    /// `bcrt1qbeacon`, against `recorded_tip`.
+    fn announcement_record(hash: [u8; 32], height: u32, recorded_tip: u32) -> CaptureSignals {
+        CaptureSignals {
+            recorded_tip,
+            entries: vec![SignalRecord {
+                update: Some(1),
+                duplicate: false,
+                address: "bcrt1qbeacon".to_string(),
+                txid: "a1".repeat(32),
+                block_height: height,
+                block_hash: "00".repeat(32),
+                signal_bytes: hash,
+                recorded_tip,
+                cohort: None,
+            }],
         }
     }
 
@@ -1104,7 +1020,8 @@ mod tests {
         let one = update(2, "bitcoin:mmBCLTLMZqUFhiG4vhhaM7EbLRN6h7sCfG");
         let sidecar = json!({ "updates": [one] });
         let hashes = update_hashes(vector, &sidecar).expect("the synthetic sidecar hashes");
-        let target = synthetic_target(vector, sidecar, Some(93));
+        let mut target = synthetic_target(vector, sidecar, Some(93));
+        target.signals = announcement_record(hashes[0], 120, 212);
         let addresses = bodies(vec![
             ("bcrt1qbeacon", vec![announcement(hashes[0], 120)]),
             ("bcrt1qquiet", Vec::new()),
@@ -1114,16 +1031,11 @@ mod tests {
             &root,
             &target,
             "http://localhost:3000",
-            212,
             &addresses,
             &BTreeMap::new(),
             Some(93),
         )
         .expect("a validated capture is written");
-        assert!(
-            !outcome.recorded_tip,
-            "a capture without signals.json measures against the live tip"
-        );
         assert!(
             outcome
                 .path
@@ -1177,7 +1089,9 @@ mod tests {
         std::fs::write(&path, sentinel).expect("the sentinel fixture is written");
 
         let sidecar = json!({ "updates": [update(2, "salt")] });
-        let target = synthetic_target(vector, sidecar, Some(93));
+        let hashes = update_hashes(vector, &sidecar).expect("the synthetic sidecar hashes");
+        let mut target = synthetic_target(vector, sidecar, Some(93));
+        target.signals = announcement_record(hashes[0], 120, 212);
         // Bodies that carry no announcement at all: the gate must refuse.
         let addresses = bodies(vec![("bcrt1qbeacon", Vec::new())]);
 
@@ -1185,16 +1099,15 @@ mod tests {
             &root,
             &target,
             "http://localhost:3000",
-            212,
             &addresses,
             &BTreeMap::new(),
             Some(93),
         )
-        .expect_err("an unannounced update must not be written");
+        .expect_err("an unannounced signal must not be written");
         assert!(
             matches!(
                 error,
-                CaptureError::Validation(ValidateError::MissingSignal { .. })
+                CaptureError::Validation(ValidateError::SignalNotOnChain { .. })
             ),
             "got: {error}"
         );
@@ -1391,7 +1304,6 @@ mod tests {
             empty_addresses: 1,
             signals: 1,
             tip_height: 212,
-            recorded_tip: false,
             confirmations,
             path: PathBuf::from("/fixtures/chain").join(format!("{id}.json")),
         }
@@ -1406,7 +1318,6 @@ mod tests {
                 ConfirmationsCheck {
                     expected: Some(93),
                     observed: Some(93),
-                    at_least: false,
                 },
             )),
         );
@@ -1427,7 +1338,6 @@ mod tests {
                 ConfirmationsCheck {
                     expected: None,
                     observed: Some(1_045),
-                    at_least: false,
                 },
             )),
         );
@@ -1459,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn a_regtest_session_footer_states_the_tip_the_confirmations_were_measured_against() {
+    fn a_session_summary_names_what_is_drivable_what_failed_and_the_tip() {
         let rows = vec![
             (
                 "regtest/k1/qgph7nre".to_string(),
@@ -1468,7 +1378,6 @@ mod tests {
                     ConfirmationsCheck {
                         expected: Some(93),
                         observed: Some(93),
-                        at_least: false,
                     },
                 )),
             ),
@@ -1491,12 +1400,7 @@ mod tests {
         );
         assert!(
             summary.contains("tip 212"),
-            "a regtest session states the tip its confirmations are measured against: \
-             {summary}"
-        );
-        assert!(
-            summary.contains("fresh unpack"),
-            "a regtest session says how to re-capture once the chain has moved: {summary}"
+            "a session states the tip its confirmations are measured against: {summary}"
         );
         assert!(
             !summary.to_lowercase().contains("do not mine"),
@@ -1506,15 +1410,13 @@ mod tests {
 
     #[test]
     fn a_recorded_tip_session_footer_states_the_recorded_tip_rule() {
-        let mut pinned = sample_outcome(
+        let pinned = sample_outcome(
             "signet/k1/qyp5h7kz",
             ConfirmationsCheck {
                 expected: Some(4),
                 observed: Some(4),
-                at_least: true,
             },
         );
-        pinned.recorded_tip = true;
         let rows = vec![("signet/k1/qyp5h7kz".to_string(), Ok(pinned))];
         let summary = render_summary("signet", "https://mempool.space/signet/api", &rows);
 
@@ -1546,7 +1448,6 @@ mod tests {
                 ConfirmationsCheck {
                     expected: None,
                     observed: Some(1_045),
-                    at_least: false,
                 },
             )),
         )];
@@ -1554,7 +1455,7 @@ mod tests {
 
         assert!(summary.contains("drivable now: mutinynet/k1/q5pqhkks"));
         assert!(
-            !summary.contains("measured against this tip"),
+            !summary.contains("measured against"),
             "a chain whose vectors state no confirmations has no shared tip to report: \
              {summary}"
         );
@@ -1565,13 +1466,11 @@ mod tests {
         let check = ConfirmationsCheck {
             expected: Some(93),
             observed: Some(91),
-            at_least: false,
         };
-        assert_eq!(check.to_string(), "93 != 91 MISMATCH");
+        assert_eq!(check.to_string(), "91 < 93 MISMATCH (at least)");
         let missing = ConfirmationsCheck {
             expected: Some(93),
             observed: None,
-            at_least: false,
         };
         assert!(missing.to_string().contains("MISMATCH"), "{missing}");
     }
@@ -1584,10 +1483,8 @@ mod tests {
                 ConfirmationsCheck {
                     expected,
                     observed: Some(17_540),
-                    at_least: true,
                 },
             );
-            outcome.recorded_tip = true;
             outcome.tip_height = tip;
             (id.to_string(), Ok(outcome))
         };
@@ -1619,7 +1516,6 @@ mod tests {
         let check = |observed| ConfirmationsCheck {
             expected: Some(17_540),
             observed,
-            at_least: true,
         };
         assert_eq!(check(Some(17_540)).to_string(), "17540 == 17540 ok");
         assert_eq!(
@@ -1630,13 +1526,9 @@ mod tests {
         assert!(below.contains("MISMATCH"), "{below}");
         assert!(check(None).to_string().contains("MISMATCH"));
 
-        assert!(confirmations_reproduce(17_540, Some(17_541), true));
-        assert!(!confirmations_reproduce(17_540, Some(17_539), true));
-        assert!(!confirmations_reproduce(17_540, None, true));
-        assert!(
-            !confirmations_reproduce(17_540, Some(17_541), false),
-            "an exact count is not a lower bound"
-        );
+        assert!(confirmations_reproduce(17_540, Some(17_541)));
+        assert!(!confirmations_reproduce(17_540, Some(17_539)));
+        assert!(!confirmations_reproduce(17_540, None));
     }
 
     /// An offline resolution of the vendor DID: its generated
@@ -1700,13 +1592,13 @@ mod tests {
     #[test]
     fn outcome_resolved_refuses_a_different_confirmation_count() {
         let target = expecting(resolved_outcome(2, Some(5)));
-        let error = check_outcome(&target, Ok(resolution(2, false, Some(6))))
-            .expect_err("a capture without a signals record counts exactly against the live tip");
+        let error = check_outcome(&target, Ok(resolution(2, false, Some(4))))
+            .expect_err("a count below the stated lower bound is refused");
         assert!(
             matches!(
                 error,
                 CaptureError::ResolutionMismatch { ref field, ref expected, ref got, .. }
-                    if field == "confirmations" && expected == "5" && got == "6"
+                    if field == "confirmations" && expected == "at least 5" && got == "4"
             ),
             "got: {error}"
         );
@@ -2083,7 +1975,6 @@ mod tests {
             beacon: String,
             update_hash: [u8; 32],
             sidecar: Value,
-            genesis_document: Value,
             expected_document: Value,
             clock: FakeClock,
             indexer: FakeIndexer,
@@ -2213,7 +2104,6 @@ mod tests {
                     beacon,
                     update_hash,
                     sidecar,
-                    genesis_document: genesis.as_ref().clone(),
                     expected_document,
                     clock,
                     indexer,
@@ -2384,14 +2274,12 @@ mod tests {
 
             let outcome = set.capture().expect("the set captures");
             assert_eq!(outcome.tip_height, RECORDED_TIP);
-            assert!(outcome.recorded_tip, "the capture is pinned to recordedTip");
             assert_eq!(outcome.signals, 1);
             assert_eq!(
                 outcome.confirmations,
                 ConfirmationsCheck {
                     expected: Some(11),
                     observed: Some(11),
-                    at_least: true,
                 }
             );
             let expected_path = std::fs::canonicalize(&set.out_root)
@@ -2470,7 +2358,6 @@ mod tests {
                 ConfirmationsCheck {
                     expected: Some(10),
                     observed: Some(11),
-                    at_least: true,
                 }
             );
             assert_eq!(set.written()["tip_height"], json!(RECORDED_TIP));
@@ -2771,56 +2658,6 @@ mod tests {
             let written = set.written();
             assert_eq!(written["tip_height"], json!(RECORDED_TIP));
             assert!(written.get("expected").is_none() && written.get("sidecar").is_none());
-            set.cleanup();
-        }
-
-        #[test]
-        fn captures_a_set_without_signals_through_the_sidecar_gate_at_the_live_tip() {
-            let set = ScratchSet::new(Network::Signet, "signet", "no-signals");
-            let mut target = set.target();
-            target.signals = None;
-            target.expected = ExpectedOutcome::Resolved {
-                document: set.expected_document.clone(),
-                version_id: 2,
-                deactivated: false,
-                confirmations: Some(u64::from(LIVE_TIP - ANNOUNCED_AT + 1)),
-            };
-
-            let outcome = capture_one_with(
-                &target,
-                BASE,
-                set.indexer.clone(),
-                set.clock.clone(),
-                &set.out_root,
-            )
-            .expect("a set without a record captures through the sidecar gate");
-            assert_eq!(outcome.tip_height, LIVE_TIP, "the recorder's tip is pinned");
-            assert_eq!(set.written()["tip_height"], json!(LIVE_TIP));
-
-            // The sidecar gate, not the record, judges this row: a sidecar
-            // update the chain never announced is refused as a missing signal.
-            set.indexer.history(&set.beacon, Vec::new());
-            target.expected = ExpectedOutcome::Resolved {
-                document: set.genesis_document.clone(),
-                version_id: 1,
-                deactivated: false,
-                confirmations: None,
-            };
-            let error = capture_one_with(
-                &target,
-                BASE,
-                set.indexer.clone(),
-                set.clock.clone(),
-                &set.out_root,
-            )
-            .expect_err("an unannounced sidecar update is refused");
-            assert!(
-                matches!(
-                    error,
-                    CaptureError::Validation(ValidateError::MissingSignal { .. })
-                ),
-                "got: {error}"
-            );
             set.cleanup();
         }
     }
