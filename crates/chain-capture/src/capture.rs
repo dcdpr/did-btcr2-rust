@@ -806,23 +806,6 @@ mod tests {
     const REGTEST_DID: &str =
         "did:btcr2:k1qgppexmyqqlce9netky3h4ur2j9dur83j7m7vva497kfhdgsq2t9nxgqj3x0s";
 
-    /// The vector tree is a git submodule; a non-recursive clone leaves it empty.
-    /// Every test that reads it calls this first and skips green when it is
-    /// absent, matching the core crate's absent-submodule contract.
-    fn test_suite_present() -> bool {
-        if targets::test_suite_root()
-            .join("regtest/k1/qgppexmy/resolve/input.json")
-            .exists()
-        {
-            return true;
-        }
-        eprintln!(
-            "SKIP: test-suite submodule absent; \
-             run `git submodule update --init --recursive` to enable"
-        );
-        false
-    }
-
     /// A vector's `resolutionOptions.sidecar`, read from the tree.
     ///
     /// Read directly rather than through `targets::load`, because three of the
@@ -953,7 +936,7 @@ mod tests {
 
     #[test]
     fn an_empty_sidecar_yields_no_updates_and_no_genesis_document() {
-        if !test_suite_present() {
+        if !targets::test_suite_present() {
             return;
         }
         let options = resolution_options_for(&vendor_sidecar("regtest/k1/qgpakaw4"), None)
@@ -974,7 +957,7 @@ mod tests {
 
     #[test]
     fn a_genesis_document_sidecar_sets_the_wire_field_and_not_the_legacy_one() {
-        if !test_suite_present() {
+        if !targets::test_suite_present() {
             return;
         }
         let sidecar = vendor_sidecar("regtest/x1/q2fz9mz6");
@@ -1001,7 +984,7 @@ mod tests {
 
     #[test]
     fn an_updates_sidecar_yields_one_entry_in_the_update_lookup_table() {
-        if !test_suite_present() {
+        if !targets::test_suite_present() {
             return;
         }
         let id = "regtest/k1/qgppexmy";
@@ -1029,7 +1012,7 @@ mod tests {
 
     #[test]
     fn a_sidecar_carrying_both_keys_yields_both() {
-        if !test_suite_present() {
+        if !targets::test_suite_present() {
             return;
         }
         let id = "regtest/x1/q26jeds9";

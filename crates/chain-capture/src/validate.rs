@@ -866,11 +866,7 @@ mod tests {
 
     #[test]
     fn update_hashes_reads_a_real_vendor_sidecar() {
-        if !targets::test_suite_root()
-            .join("regtest/k1/qgppexmy/resolve/input.json")
-            .exists()
-        {
-            eprintln!("SKIP: test-suite submodule absent");
+        if !targets::test_suite_present() {
             return;
         }
         let loaded = targets::load("regtest/k1/qgppexmy").expect("the vector loads");

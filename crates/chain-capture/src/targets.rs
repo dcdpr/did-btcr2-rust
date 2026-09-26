@@ -193,6 +193,45 @@ pub fn test_suite_root() -> PathBuf {
     PathBuf::from(format!("{}/../../test-suite", env!("CARGO_MANIFEST_DIR")))
 }
 
+/// The network directories a vector tree may hold.
+#[cfg(test)]
+const SUITE_NETWORK_DIRS: [&str; 4] = ["regtest", "mutinynet", "signet", "testnet4"];
+
+/// True iff `root` holds at least one set directory: some network directory
+/// with a `k1` or `x1` directory that has a subdirectory of its own.
+///
+/// Content-based on purpose. A probe on one named set would turn every
+/// corpus-reading test into a silent skip the moment that set is renamed or
+/// dropped; this one only answers "is a corpus checked out", so a present
+/// corpus that lacks the set a test reads makes that test fail.
+#[cfg(test)]
+pub(crate) fn test_suite_present_in(root: &Path) -> bool {
+    SUITE_NETWORK_DIRS.iter().any(|network| {
+        ["k1", "x1"].iter().any(|kind| {
+            std::fs::read_dir(root.join(network).join(kind)).is_ok_and(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.path().is_dir())
+            })
+        })
+    })
+}
+
+/// [`test_suite_present_in`] over the real submodule, printing the skip line
+/// when it is absent. A non-recursive clone leaves the submodule empty; every
+/// test that reads it calls this first and skips green in that case only.
+#[cfg(test)]
+pub(crate) fn test_suite_present() -> bool {
+    if test_suite_present_in(&test_suite_root()) {
+        return true;
+    }
+    eprintln!(
+        "SKIP: test-suite submodule absent; \
+         run `git submodule update --init --recursive` to enable"
+    );
+    false
+}
+
 /// Map a `test-suite/` network directory name onto a [`Network`].
 ///
 /// Nothing is defaulted: an unrecognized name is a typed error naming the value,
@@ -964,23 +1003,6 @@ mod tests {
         }
     }
 
-    /// The vector tree is a git submodule; a non-recursive clone leaves it empty.
-    /// Every test that reads it calls this first and skips green when it is
-    /// absent, matching the core crate's absent-submodule contract.
-    fn test_suite_present() -> bool {
-        if test_suite_root()
-            .join("regtest/k1/qgppexmy/resolve/input.json")
-            .exists()
-        {
-            return true;
-        }
-        eprintln!(
-            "SKIP: test-suite submodule absent; \
-             run `git submodule update --init --recursive` to enable"
-        );
-        false
-    }
-
     /// Sorted names of `dir`'s child directories, dot entries excluded. An absent
     /// directory yields nothing; an unreadable one panics, because a directory
     /// that silently disappears would shrink the recomputed set and let the drift
@@ -1578,6 +1600,42 @@ mod tests {
         if let Some(other) = other {
             write("other.json", &other);
         }
+    }
+
+    #[test]
+    fn the_probe_finds_no_corpus_in_an_empty_root() {
+        let root = scratch_suite("probe-empty");
+        assert!(!test_suite_present_in(&root));
+        assert!(!test_suite_present_in(&root.join("absent")));
+        std::fs::remove_dir_all(&root).expect("the scratch root is removable");
+    }
+
+    #[test]
+    fn the_probe_finds_a_corpus_holding_one_set_directory() {
+        let root = scratch_suite("probe-set");
+        std::fs::create_dir_all(root.join("regtest/k1/qanyset"))
+            .expect("the set directory is creatable");
+        assert!(test_suite_present_in(&root));
+        std::fs::remove_dir_all(&root).expect("the scratch root is removable");
+
+        let root = scratch_suite("probe-x1");
+        std::fs::create_dir_all(root.join("testnet4/x1/qanyset"))
+            .expect("the set directory is creatable");
+        assert!(test_suite_present_in(&root));
+        std::fs::remove_dir_all(&root).expect("the scratch root is removable");
+    }
+
+    #[test]
+    fn the_probe_ignores_network_directories_without_set_directories() {
+        let root = scratch_suite("probe-hollow");
+        std::fs::create_dir_all(root.join("regtest")).expect("the network dir is creatable");
+        std::fs::create_dir_all(root.join("signet/k1")).expect("the kind dir is creatable");
+        std::fs::write(root.join("signet/k1/README.md"), "not a set")
+            .expect("a stray file is writable");
+        std::fs::create_dir_all(root.join("elsewhere/k1/qnotanetwork"))
+            .expect("an unrelated dir is creatable");
+        assert!(!test_suite_present_in(&root));
+        std::fs::remove_dir_all(&root).expect("the scratch root is removable");
     }
 
     /// `parse_signals` on an in-memory file.
