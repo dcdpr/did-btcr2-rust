@@ -4331,6 +4331,23 @@ impl Drop for TempRoot {
     }
 }
 
+/// A `TempRoot` is removed when the test holding it panics, so a failing
+/// assertion leaves no directory behind.
+#[test]
+fn temp_root_is_removed_when_its_test_panics() {
+    let path = TempRoot::new("temp-root-panic").0.clone();
+    let inner = path.clone();
+    let result = std::panic::catch_unwind(move || {
+        let root = TempRoot::new("temp-root-panic");
+        assert_eq!(root.0, inner);
+        std::fs::create_dir_all(root.0.join("sets")).unwrap();
+        std::fs::write(root.0.join("sets/marker"), "x").unwrap();
+        panic!("a failing assertion");
+    });
+    assert!(result.is_err(), "the closure panicked");
+    assert!(!path.exists(), "{} was left behind", path.display());
+}
+
 /// A positive set whose sidecar carries an empty `updates` array is
 /// CAS-delivered, not sidecar-delivered: an empty list delivers nothing.
 #[test]
@@ -6776,10 +6793,9 @@ fn copy_tree(from: &Path, to: &Path) {
 /// the field must be a string.
 #[test]
 fn discovery_rejects_a_number_encoded_version_id_by_path() {
-    let root = std::env::temp_dir().join(format!(
-        "did-btcr2-number-version-id-{}",
-        std::process::id()
-    ));
+    // Removed on drop, so a failing assertion below leaves nothing behind.
+    let guard = TempRoot::new("number-version-id");
+    let root = &guard.0;
     let set = "mutinynet/x1/qh66uy2s";
     copy_tree(
         &Corpus::synthetic("shapes").sets.join(set),
@@ -6797,7 +6813,6 @@ fn discovery_rejects_a_number_encoded_version_id_by_path() {
     let payload = std::panic::catch_unwind(|| discover_in(&corpus))
         .expect_err("discovery over a number-encoded versionId must fail");
     let message = panic_message(payload);
-    std::fs::remove_dir_all(&root).unwrap();
     assert!(
         message.contains(&format!("{set}/resolve/output.json"))
             && message.contains("didDocumentMetadata.versionId")
