@@ -178,7 +178,8 @@ any declaration:
   `updates` are CAS announcements.
 
 Discovery also parses `signals.json` where a set ships one (a bare array; one
-`recordedTip` across all entries; `update` optional only on a cohort entry; a
+`recordedTip` across all entries, with no `blockHeight` above it; `update`
+optional only on a cohort entry; a
 repeated `update` only with `duplicate: true`) and checks cohorts across sets:
 each cohort member names exactly one sibling set's `scenarioId`, and every
 member records the same cohort id and transaction. This is structure only:

@@ -710,7 +710,19 @@ impl CaptureSignals {
                     version_id,
                     update: version_id - 1,
                 })?;
-        let derived = u64::from(self.recorded_tip.saturating_sub(height)) + 1;
+        let below_tip =
+            self.recorded_tip
+                .checked_sub(height)
+                .ok_or_else(|| TargetError::MalformedFixture {
+                    vector: vector.to_string(),
+                    path: "signals.json".to_string(),
+                    detail: format!(
+                        "update {} is announced in block {height}, above the recordedTip {}",
+                        version_id - 1,
+                        self.recorded_tip
+                    ),
+                })?;
+        let derived = u64::from(below_tip) + 1;
         match stated {
             Some(stated) if stated > derived => Err(TargetError::ConfirmationsAboveRecord {
                 vector: vector.to_string(),
@@ -953,7 +965,7 @@ fn is_hex64(value: &str) -> bool {
 /// are ignored, not rejected. The rules:
 ///
 /// - the file is a bare array of at least one entry, all agreeing on
-///   `recordedTip`;
+///   `recordedTip`, none with a `blockHeight` above it;
 /// - `txid`, `blockHash` and `signalBytes` are 64 lowercase hex, and no two
 ///   entries share a `txid` (the gate would otherwise report the second as a
 ///   signal not on chain, pointing at the chain instead of the file);
@@ -1043,6 +1055,17 @@ fn parse_signals(vector: &str, path: &Path, raw: &Value) -> Result<CaptureSignal
             "entry {index} records recordedTip {} but entry 0 records {recorded_tip} — every \
              entry of one file is recorded against the same tip",
             entry.recorded_tip
+        )));
+    }
+    if let Some((index, entry)) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.block_height > recorded_tip)
+    {
+        return Err(bad(format!(
+            "entry {index} records blockHeight {} above the recordedTip {recorded_tip} — a \
+             signal the set records was confirmed at or below the tip it was recorded against",
+            entry.block_height
         )));
     }
 
@@ -2363,6 +2386,48 @@ mod tests {
         assert!(
             detail.contains("310") && detail.contains("312"),
             "names both tips: {detail}"
+        );
+    }
+
+    #[test]
+    fn signals_record_refuses_an_entry_above_the_recorded_tip() {
+        let detail = malformed_detail(parse(serde_json::json!([
+            entry(Some(1), 0xa1, 300, 0x11, 310),
+            entry(Some(2), 0xa2, 311, 0x22, 310),
+        ])));
+        assert!(
+            detail.contains("entry 1") && detail.contains("311") && detail.contains("310"),
+            "{detail}"
+        );
+        parse(serde_json::json!([entry(Some(1), 0xa1, 310, 0x11, 310)]))
+            .expect("an entry at recordedTip is accepted");
+    }
+
+    /// A record built past the parser with an entry above its tip fails the
+    /// derivation rather than counting 1.
+    #[test]
+    fn derived_confirmations_refuse_an_entry_above_the_recorded_tip() {
+        let signals = CaptureSignals {
+            recorded_tip: 310,
+            entries: vec![SignalRecord {
+                update: Some(1),
+                duplicate: false,
+                address: "bcrt1qbeacon".to_string(),
+                txid: "a1".repeat(32),
+                block_height: 315,
+                block_hash: "00".repeat(32),
+                signal_bytes: [0x11; 32],
+                recorded_tip: 310,
+                cohort: None,
+            }],
+        };
+        let error = signals
+            .derived_confirmations("signet/k1/qabove", 2, None)
+            .expect_err("315 is above the tip 310");
+        assert!(
+            matches!(error, TargetError::MalformedFixture { ref detail, .. }
+                if detail.contains("315") && detail.contains("310")),
+            "got: {error}"
         );
     }
 

@@ -388,7 +388,7 @@ fn is_hex64(value: &str) -> bool {
 /// ships. `ctx` names the file in every message.
 ///
 /// The file is a bare array of entries, at least one, all agreeing on
-/// `recordedTip`. An entry's `update` N, when present, must name an update step
+/// `recordedTip`, none with a `blockHeight` above it. An entry's `update` N, when present, must name an update step
 /// the set has — `update/{NN}` in a numbered layout, or N = 1 for a flat
 /// `update/` — and an entry without `update` must name its `cohort`. The
 /// `txid`, `blockHash` and `signalBytes` are 64 lowercase hex, and no two
@@ -440,6 +440,18 @@ pub(crate) fn parse_signals(
             "{ctx}: entry {index} records recordedTip {} but entry 0 records {recorded_tip} — \
              every entry of one file is recorded against the same tip",
             entry.recorded_tip
+        ));
+    }
+    if let Some((index, entry)) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.block_height > recorded_tip)
+    {
+        return Err(format!(
+            "{ctx}: entry {index} records blockHeight {} above the recordedTip {recorded_tip} — \
+             a signal the set records was confirmed at or below the tip it was recorded \
+             against",
+            entry.block_height
         ));
     }
 
@@ -1218,9 +1230,13 @@ pub(crate) fn derived_confirmations(
                  announcement of update {update}, which produced it"
             )
         })?;
-    Ok(Some(
-        u64::from(signals.recorded_tip.saturating_sub(height)) + 1,
-    ))
+    let below_tip = signals.recorded_tip.checked_sub(height).ok_or_else(|| {
+        format!(
+            "signals.json announces update {update} in block {height}, above its recordedTip {}",
+            signals.recorded_tip
+        )
+    })?;
+    Ok(Some(u64::from(below_tip) + 1))
 }
 
 /// Judge a replayed positive resolve's `confirmations`: at least the count the
@@ -6174,6 +6190,35 @@ fn signals_reject_disagreeing_recorded_tips() {
     assert!(err.contains("601") && err.contains("602"), "{err}");
 }
 
+/// An entry confirmed above the tip the set was recorded against is refused,
+/// naming both heights; one at the tip is accepted.
+#[test]
+fn signals_reject_an_entry_above_the_recorded_tip() {
+    let err = signals_from(
+        serde_json::json!([signal_entry(Some(1), 602, None)]),
+        &two_steps(),
+    )
+    .expect_err("an entry above recordedTip must be rejected");
+    assert!(err.contains("602") && err.contains("601"), "{err}");
+    signals_from(
+        serde_json::json!([signal_entry(Some(1), 601, None)]),
+        &two_steps(),
+    )
+    .expect("an entry at recordedTip is accepted");
+}
+
+/// A record built past the parser with an entry above its tip fails the
+/// derivation rather than counting 1.
+#[test]
+fn derived_confirmations_refuse_an_entry_above_the_recorded_tip() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![parsed_entry(1, false, &"a1".repeat(32), 325)],
+    };
+    let err = derived_confirmations(Some(&signals), 2).expect_err("325 is above the tip 320");
+    assert!(err.contains("325") && err.contains("320"), "{err}");
+}
+
 /// `recordedTip` is required on every entry.
 #[test]
 fn signals_reject_an_entry_without_recorded_tip() {
@@ -6416,7 +6461,7 @@ fn signals_tolerate_unknown_members() {
 fn cohort_member(id: &str, scenario: &str, cohort: &serde_json::Value, txid: &str) -> Vector {
     let mut v = synthetic_vector(id, "x1");
     v.scenario_id = Some(scenario.to_string());
-    let mut entry = signal_entry(None, 1000, Some(cohort.clone()));
+    let mut entry = signal_entry(None, 500, Some(cohort.clone()));
     entry["txid"] = serde_json::json!(txid);
     v.signals = Some(
         signals_from(serde_json::json!([entry]), &UpdateLayout::None)
