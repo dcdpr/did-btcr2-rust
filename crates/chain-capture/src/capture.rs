@@ -424,25 +424,12 @@ pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
     let options = resolution_options_for(&target.sidecar, Some(recorded_tip))?;
     let resolved = client.resolve(&target.did, options);
 
-    // The chain must match the set's `signals.json` before the outcome is
-    // judged, because the outcome check takes its expected confirmations from
-    // that record: a record that disagrees with the chain is a capture against
-    // the wrong chain, and is reported as such, not as a resolver mismatch.
-    // A resolve that failed without a specification code (a transport or
-    // endpoint fault) may have stopped part-way through the addresses, so its
-    // recording proves nothing either way; the outcome check reports that
-    // failure itself. `emit_to` runs the same gate again before it writes.
-    let completed = !matches!(&resolved, Err(e) if client_error_code(e).is_none());
-    if completed {
-        validate::validate_signals(target, &recording.borrow().addresses)?;
-    }
-
     // The expected-output check. This is where a real chain is contacted on every
     // run, which is why no live-network test ships: a capture is accepted only
     // when it reproduces the vector's own stated resolution, so a substituted or
     // partial body set cannot pass. `None` means the set expects an error and
     // the resolve failed with one; its recording is still the fixture.
-    let result = check_outcome(target, resolved)?;
+    let result = check_outcome(target, resolved, &recording.borrow().addresses)?;
     let observed_confirmations = result.and_then(|r| r.document_metadata.confirmations);
 
     // The confirming block of every announcement, whether or not the resolve
@@ -503,7 +490,14 @@ fn client_error_code(err: &did_btcr2_client::Error) -> Option<String> {
 ///
 /// A resolved expectation is compared on `didDocument`, `versionId`,
 /// `deactivated` and `confirmations` ([`check_confirmations`]). A resolve that
-/// fails is refused with the client's own error.
+/// fails is refused with the client's own error. Between the flag and the
+/// confirmations, the recorded `addresses` must match the set's `signals.json`
+/// ([`validate::validate_signals`]): the confirmations are derived from that
+/// record, so a record the chain contradicts is reported as that and not as a
+/// resolver mismatch. It runs only once the first three match, because only
+/// then has the resolver fetched every beacon the stated version depends on;
+/// before that, a partial recording would blame the record for a resolver
+/// fault.
 ///
 /// An expected error is satisfied by any failure that carries a specification
 /// error code, whatever the code: the capture only proves the chain makes the
@@ -519,6 +513,7 @@ fn client_error_code(err: &did_btcr2_client::Error) -> Option<String> {
 fn check_outcome(
     target: &VectorTarget,
     resolved: Result<ResolutionResult, did_btcr2_client::Error>,
+    addresses: &BTreeMap<String, Vec<Value>>,
 ) -> Result<Option<ResolutionResult>, CaptureError> {
     let mismatch = |field: &str, expected: String, got: String| CaptureError::ResolutionMismatch {
         vector: target.id.clone(),
@@ -571,6 +566,11 @@ fn check_outcome(
                     result.document_metadata.deactivated.to_string(),
                 ));
             }
+            // The chain must match signals.json before the confirmations
+            // derived from it are judged; the document, versionId and flag
+            // have matched, so the resolver fetched every beacon the stated
+            // version depends on.
+            validate::validate_signals(target, addresses)?;
             check_confirmations(target, resolved_version_id, *confirmations, &result)?;
             Ok(Some(result))
         }
@@ -1718,10 +1718,20 @@ mod tests {
         })
     }
 
+    /// [`check_outcome`] with a recording that carries the announcement
+    /// [`synthetic_target`]'s record names, so the signals gate passes.
+    fn judge(
+        target: &VectorTarget,
+        resolved: Result<ResolutionResult, did_btcr2_client::Error>,
+    ) -> Result<Option<ResolutionResult>, CaptureError> {
+        let recorded = bodies(vec![("bcrt1qbeacon", vec![announcement([0x11; 32], 208)])]);
+        check_outcome(target, resolved, &recorded)
+    }
+
     #[test]
     fn outcome_resolved_accepts_a_matching_resolution() {
         let target = expecting(resolved_outcome(2, Some(5)));
-        let result = check_outcome(&target, Ok(resolution(2, false, Some(5))))
+        let result = judge(&target, Ok(resolution(2, false, Some(5))))
             .expect("a matching resolution passes")
             .expect("a resolved expectation returns the resolution");
         assert_eq!(result.document_metadata.confirmations, Some(5));
@@ -1730,7 +1740,7 @@ mod tests {
     #[test]
     fn outcome_resolved_refuses_a_different_confirmation_count() {
         let target = expecting(resolved_outcome(2, Some(5)));
-        let error = check_outcome(&target, Ok(resolution(2, false, Some(4))))
+        let error = judge(&target, Ok(resolution(2, false, Some(4))))
             .expect_err("a count below the one the record gives is refused");
         assert!(
             matches!(
@@ -1742,7 +1752,7 @@ mod tests {
             ),
             "got: {error}"
         );
-        let error = check_outcome(&target, Ok(resolution(2, false, None)))
+        let error = judge(&target, Ok(resolution(2, false, None)))
             .expect_err("a stated count needs a reported one");
         assert!(
             matches!(error, CaptureError::ResolutionMismatch { ref got, .. } if got == "none"),
@@ -1756,7 +1766,7 @@ mod tests {
     #[test]
     fn outcome_resolved_refuses_a_count_anchored_on_an_earlier_block() {
         let target = expecting(resolved_outcome(2, Some(5)));
-        let error = check_outcome(&target, Ok(resolution(2, false, Some(9))))
+        let error = judge(&target, Ok(resolution(2, false, Some(9))))
             .expect_err("a count above the one the record gives is refused");
         assert!(
             matches!(
@@ -1773,14 +1783,14 @@ mod tests {
     #[test]
     fn outcome_resolved_accepts_a_stated_count_below_the_derived_one() {
         let target = expecting(resolved_outcome(2, Some(4)));
-        check_outcome(&target, Ok(resolution(2, false, Some(5))))
+        judge(&target, Ok(resolution(2, false, Some(5))))
             .expect("a stated count below the derived one is a lower bound that holds");
     }
 
     #[test]
     fn outcome_resolved_refuses_a_stated_count_above_the_derived_one() {
         let target = expecting(resolved_outcome(2, Some(6)));
-        let error = check_outcome(&target, Ok(resolution(2, false, Some(5))))
+        let error = judge(&target, Ok(resolution(2, false, Some(5))))
             .expect_err("a set may not state more than its record gives");
         assert!(
             matches!(
@@ -1800,9 +1810,8 @@ mod tests {
     #[test]
     fn outcome_resolved_without_stated_confirmations_still_requires_the_derived_count() {
         let target = expecting(resolved_outcome(2, None));
-        check_outcome(&target, Ok(resolution(2, false, Some(5))))
-            .expect("the derived count is reproduced");
-        let error = check_outcome(&target, Ok(resolution(2, false, Some(1_045))))
+        judge(&target, Ok(resolution(2, false, Some(5)))).expect("the derived count is reproduced");
+        let error = judge(&target, Ok(resolution(2, false, Some(1_045))))
             .expect_err("the resolver's count is checked against the record either way");
         assert!(
             matches!(error, CaptureError::ResolutionMismatch { ref field, .. } if field == "confirmations"),
@@ -1813,7 +1822,7 @@ mod tests {
     #[test]
     fn outcome_resolved_refuses_a_version_the_record_does_not_announce() {
         let target = expecting(resolved_outcome(3, Some(5)));
-        let error = check_outcome(&target, Ok(resolution(3, false, Some(5))))
+        let error = judge(&target, Ok(resolution(3, false, Some(5))))
             .expect_err("no entry announces update 2");
         assert!(
             matches!(
@@ -1831,10 +1840,9 @@ mod tests {
     #[test]
     fn outcome_resolved_at_genesis_requires_zero_confirmations() {
         let target = expecting(resolved_outcome(1, Some(0)));
-        check_outcome(&target, Ok(resolution(1, false, Some(0))))
-            .expect("a genesis resolve counts 0");
+        judge(&target, Ok(resolution(1, false, Some(0)))).expect("a genesis resolve counts 0");
         for reported in [Some(7), None] {
-            let error = check_outcome(&target, Ok(resolution(1, false, reported)))
+            let error = judge(&target, Ok(resolution(1, false, reported)))
                 .expect_err("a genesis resolve applied no update, so it counts 0");
             assert!(
                 matches!(
@@ -1846,13 +1854,13 @@ mod tests {
             );
         }
         let unstated = expecting(resolved_outcome(1, None));
-        assert!(check_outcome(&unstated, Ok(resolution(1, false, Some(3)))).is_err());
+        assert!(judge(&unstated, Ok(resolution(1, false, Some(3)))).is_err());
     }
 
     #[test]
     fn outcome_resolved_at_genesis_refuses_a_nonzero_stated_count() {
         let target = expecting(resolved_outcome(1, Some(3)));
-        let error = check_outcome(&target, Ok(resolution(1, false, Some(0))))
+        let error = judge(&target, Ok(resolution(1, false, Some(0))))
             .expect_err("a genesis set may not state more than 0");
         assert!(
             matches!(
@@ -1870,7 +1878,7 @@ mod tests {
             (resolution(3, false, None), "versionId"),
             (resolution(2, true, None), "deactivated"),
         ] {
-            let error = check_outcome(&target, Ok(result)).expect_err("a mismatch is refused");
+            let error = judge(&target, Ok(result)).expect_err("a mismatch is refused");
             assert!(
                 matches!(error, CaptureError::ResolutionMismatch { field: ref f, .. } if f == field),
                 "{field}: got {error}"
@@ -1882,7 +1890,7 @@ mod tests {
             deactivated: false,
             confirmations: None,
         });
-        let error = check_outcome(&other_document, Ok(resolution(2, false, None)))
+        let error = judge(&other_document, Ok(resolution(2, false, None)))
             .expect_err("a different document is refused");
         assert!(
             matches!(error, CaptureError::ResolutionMismatch { ref field, .. } if field == "didDocument"),
@@ -1893,7 +1901,7 @@ mod tests {
     #[test]
     fn outcome_resolved_refuses_a_failed_resolve_with_its_error() {
         let target = expecting(resolved_outcome(2, None));
-        let error = check_outcome(&target, Err(missing_update_data()))
+        let error = judge(&target, Err(missing_update_data()))
             .expect_err("a failed resolve is not a resolution");
         assert!(
             matches!(
@@ -1913,7 +1921,7 @@ mod tests {
     fn outcome_expected_error_accepts_the_same_code() {
         let target = expecting(expected_error("MISSING_UPDATE_DATA"));
         assert!(
-            check_outcome(&target, Err(missing_update_data()))
+            judge(&target, Err(missing_update_data()))
                 .expect("the recorded error is reproduced")
                 .is_none()
         );
@@ -1924,7 +1932,7 @@ mod tests {
         // The code is not compared at capture: the harness judges it.
         let target = expecting(expected_error("NOT_FOUND"));
         assert!(
-            check_outcome(&target, Err(missing_update_data()))
+            judge(&target, Err(missing_update_data()))
                 .expect("any specification error satisfies an expected error")
                 .is_none()
         );
@@ -1940,7 +1948,7 @@ mod tests {
         ));
         assert_eq!(client_error_code(&late).as_deref(), Some("LATE_PUBLISHING"));
         assert!(
-            check_outcome(&target, Err(late))
+            judge(&target, Err(late))
                 .expect("a coded failure satisfies an expected error")
                 .is_none()
         );
@@ -1949,7 +1957,7 @@ mod tests {
     #[test]
     fn outcome_expected_error_refuses_a_success() {
         let target = expecting(expected_error("MISSING_UPDATE_DATA"));
-        let error = check_outcome(&target, Ok(resolution(2, false, Some(5))))
+        let error = judge(&target, Ok(resolution(2, false, Some(5))))
             .expect_err("a resolve that succeeds does not reproduce an expected error");
         assert!(
             matches!(
@@ -1971,7 +1979,7 @@ mod tests {
                 status: 503,
                 body: "unavailable".to_string(),
             });
-        let error = check_outcome(&target, Err(transport))
+        let error = judge(&target, Err(transport))
             .expect_err("a transport fault is not a reproduced error");
         assert!(
             matches!(
@@ -1985,7 +1993,7 @@ mod tests {
         );
 
         let no_endpoint = did_btcr2_client::Error::NoDefaultEndpoint("regtest");
-        let error = check_outcome(&target, Err(no_endpoint))
+        let error = judge(&target, Err(no_endpoint))
             .expect_err("an endpoint fault is not a reproduced error");
         assert!(
             matches!(
@@ -2663,6 +2671,79 @@ mod tests {
                         ..
                     }) if *recorded == (ANNOUNCED_AT + 2).to_string()
                         && *on_chain == ANNOUNCED_AT.to_string()
+                ),
+                "got: {error}"
+            );
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        /// Add to the record a later announcement at an address the resolver
+        /// never asks about, so a recording of this set's resolve is always
+        /// missing it.
+        fn record_an_unfetched_announcement(set: &ScratchSet) {
+            let mut later = set.entry(Some(2), false, &txid(9), 309);
+            later["address"] = json!("tb1qneverfetched");
+            later["signalBytes"] = json!(hex::encode([0x55; 32]));
+            set.write_signals(vec![
+                set.entry(Some(1), false, &txid(1), ANNOUNCED_AT),
+                later,
+            ]);
+        }
+
+        /// A positive set whose resolve fails with a specification code stopped
+        /// before it fetched every beacon, so its recording is partial; the
+        /// failure is the resolver's and is reported as such, not as a record
+        /// the chain contradicts.
+        #[test]
+        fn a_coded_failure_on_a_positive_set_is_the_resolve_failure() {
+            let set = ScratchSet::new(Network::Signet, "signet", "coded-partial");
+            record_an_unfetched_announcement(&set);
+            std::fs::write(
+                set.suite_root.join(&set.id).join("resolve/input.json"),
+                json!({ "did": set.did.encode().to_string(), "resolutionOptions": { "sidecar": {} } })
+                    .to_string(),
+            )
+            .expect("input.json is writable");
+
+            let error = set
+                .capture()
+                .expect_err("a positive set whose resolve fails is refused");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::ResolveFailed { ref source, .. }
+                        if client_error_code(source).as_deref() == Some("MISSING_UPDATE_DATA")
+                ),
+                "got: {error:?}"
+            );
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        /// A resolve that returns a document other than the stated one, with a
+        /// recording missing a recorded announcement, is an outcome mismatch:
+        /// the signals gate does not run before the document is judged.
+        #[test]
+        fn a_wrong_document_with_a_partial_recording_is_the_outcome_mismatch() {
+            let set = ScratchSet::new(Network::Signet, "signet", "wrong-doc");
+            record_an_unfetched_announcement(&set);
+            std::fs::write(
+                set.suite_root.join(&set.id).join("resolve/output.json"),
+                json!({
+                    "didDocument": { "id": "did:btcr2:someone-else" },
+                    "didDocumentMetadata": { "versionId": "2", "deactivated": false },
+                    "didResolutionMetadata": { "contentType": "application/did" },
+                })
+                .to_string(),
+            )
+            .expect("output.json is writable");
+
+            let error = set.capture().expect_err("a different document is refused");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::ResolutionMismatch { ref field, .. } if field == "didDocument"
                 ),
                 "got: {error}"
             );
