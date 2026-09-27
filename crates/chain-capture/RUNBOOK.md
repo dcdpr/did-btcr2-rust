@@ -804,10 +804,15 @@ since.
   Each entry's `address` must be one of the captured addresses whose history
   carries its transaction; a transaction that spends from that beacon and pays
   change to another carries both, so either matches. Every set the tool
-  captures carries `signals.json`; the loader refuses one without it. This
-  check runs as soon as the resolve completes, before the outcome is judged:
+  captures carries `signals.json`; the loader refuses one without it. For a
+  set that states a resolution, this check runs after the outcome's document,
+  versionId and deactivated flag match, before its confirmations are judged:
   the expected `confirmations` come from `signals.json`, so a record the chain
-  contradicts is reported as a signal mismatch, not as a resolver mismatch.
+  contradicts is reported as a signal mismatch, not as a resolver mismatch. A
+  resolve that fails, or returns a different document, version or flag, is
+  reported as that, because it may have stopped before fetching every beacon.
+  For a set that expects an error, the check runs once the error is
+  reproduced, before the fixture is written.
 
 ### Refusals, and what to do
 
