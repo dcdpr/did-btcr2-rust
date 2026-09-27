@@ -1207,6 +1207,12 @@ pub(crate) fn confirmations_exact(
 /// `Ok(None)` past genesis on a set without `signals.json`, which gives no
 /// block to count from. A version past genesis whose update no entry
 /// announces is an error: the record cannot say where the count starts.
+///
+/// TWIN: the capture tool derives the same count from its own reading of the
+/// file, in `CaptureSignals::derived_confirmations`
+/// (`crates/chain-capture/src/targets.rs`). Neither crate can call the
+/// other's, so the rule lives twice; a change to one (the genesis value, the
+/// anchor entry, the arithmetic) must be made to both.
 pub(crate) fn derived_confirmations(
     signals: Option<&Signals>,
     version_id: u64,

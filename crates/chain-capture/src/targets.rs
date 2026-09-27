@@ -688,6 +688,12 @@ impl CaptureSignals {
     /// Depends on the set's own files alone, so the loader runs it before any
     /// request goes out, and a set inconsistent with its record is refused as
     /// such rather than surfacing, after a resolve, as a resolver mismatch.
+    ///
+    /// TWIN: the core crate's conformance harness derives the same count from
+    /// its own reading of the file, in `derived_confirmations`
+    /// (`src/test_vectors.rs`). Neither crate can call the other's, so the rule
+    /// lives twice; a change to one (the genesis value, the anchor entry, the
+    /// arithmetic) must be made to both.
     pub fn derived_confirmations(
         &self,
         vector: &str,
