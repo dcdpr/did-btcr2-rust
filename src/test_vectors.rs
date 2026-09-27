@@ -1212,7 +1212,10 @@ pub(crate) fn confirmations_exact(
 /// file, in `CaptureSignals::derived_confirmations`
 /// (`crates/chain-capture/src/targets.rs`). Neither crate can call the
 /// other's, so the rule lives twice; a change to one (the genesis value, the
-/// anchor entry, the arithmetic) must be made to both.
+/// anchor entry, the arithmetic) must be made to both. Both also refuse a
+/// stated count above the derived one, and a nonzero stated count at genesis,
+/// as a set defect: the capture tool in that function, this harness in
+/// [`replayed_confirmations`] before its lower bound.
 pub(crate) fn derived_confirmations(
     signals: Option<&Signals>,
     version_id: u64,
@@ -1253,14 +1256,35 @@ pub(crate) fn derived_confirmations(
 /// The equality pins the block the resolver counts from. The lower bound
 /// alone accepts a resolver that anchors its count on an earlier block, and at
 /// genesis, where every set states `0`, it accepts any count at all.
+///
+/// Before the lower bound, a stated count above the derived one — any nonzero
+/// count at genesis — is refused as a set inconsistent with its own record,
+/// so it does not read as a resolver reporting too few.
 pub(crate) fn replayed_confirmations(
     resolved: Option<u32>,
     stated: Option<u64>,
     signals: Option<&Signals>,
     version_id: u64,
 ) -> Result<(), String> {
+    let derived = derived_confirmations(signals, version_id)?;
+    if let (Some(stated), Some(derived)) = (stated, derived)
+        && stated > derived
+    {
+        let given = match signals {
+            Some(signals) if version_id > 1 => format!(
+                "its signals.json gives {derived} (recordedTip {} - the block announcing \
+                 version {version_id} + 1)",
+                signals.recorded_tip
+            ),
+            _ => "a resolve that applies no update counts 0".to_string(),
+        };
+        return Err(format!(
+            "the set states {stated} confirmations at version {version_id}, but {given}: \
+             the set is inconsistent with its own record, not a resolver shortfall"
+        ));
+    }
     confirmations_at_least(resolved, stated)?;
-    let Some(derived) = derived_confirmations(signals, version_id)? else {
+    let Some(derived) = derived else {
         return Ok(());
     };
     confirmations_exact(resolved, Some(derived)).map_err(|e| match signals {
@@ -7012,6 +7036,51 @@ fn replayed_confirmations_past_genesis_require_the_derived_count() {
     assert!(replayed_confirmations(Some(19), Some(20), Some(&signals), 2).is_err());
     assert_eq!(replayed_confirmations(Some(25), Some(20), None, 2), Ok(()));
     assert!(replayed_confirmations(Some(19), Some(20), None, 2).is_err());
+}
+
+/// A set that states more than its record gives is refused as a set defect,
+/// before the lower bound, whatever the resolver reported: even a report below
+/// the stated count names the set, not the resolver.
+#[test]
+fn replayed_confirmations_refuse_a_stated_count_above_the_derived_one() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![parsed_entry(1, false, &"a1".repeat(32), 300)],
+    };
+    for resolved in [Some(21), Some(20), None] {
+        let err = replayed_confirmations(resolved, Some(22), Some(&signals), 2)
+            .expect_err("the set states 22 but its record gives 21");
+        assert!(
+            err.contains("states 22")
+                && err.contains("gives 21")
+                && err.contains("inconsistent with its own record")
+                && !err.contains("below the recorded"),
+            "got: {err}"
+        );
+    }
+}
+
+/// A set that states a nonzero count at its genesis version is refused as a
+/// set defect, with or without a record, whatever the resolver reported.
+#[test]
+fn replayed_confirmations_refuse_a_nonzero_stated_count_at_genesis() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![parsed_entry(1, false, &"a1".repeat(32), 300)],
+    };
+    for record in [Some(&signals), None] {
+        for resolved in [Some(0), Some(2)] {
+            let err = replayed_confirmations(resolved, Some(3), record, 1)
+                .expect_err("a genesis set may not state more than 0");
+            assert!(
+                err.contains("states 3")
+                    && err.contains("applies no update counts 0")
+                    && err.contains("inconsistent with its own record")
+                    && !err.contains("below the recorded"),
+                "got: {err}"
+            );
+        }
+    }
 }
 
 #[test]

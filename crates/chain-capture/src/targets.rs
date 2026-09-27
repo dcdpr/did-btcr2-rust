@@ -693,7 +693,10 @@ impl CaptureSignals {
     /// its own reading of the file, in `derived_confirmations`
     /// (`src/test_vectors.rs`). Neither crate can call the other's, so the rule
     /// lives twice; a change to one (the genesis value, the anchor entry, the
-    /// arithmetic) must be made to both.
+    /// arithmetic) must be made to both. Both also refuse a stated count above
+    /// the derived one, and a nonzero stated count at genesis, as a set
+    /// defect: this function here, the harness in `replayed_confirmations`
+    /// before its lower bound.
     pub fn derived_confirmations(
         &self,
         vector: &str,
