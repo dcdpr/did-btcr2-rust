@@ -1122,13 +1122,13 @@ mod tests {
     use crate::test_vectors::{
         AnnouncementDelivery, AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR,
         ERROR_CODE_DIVERGENCES, GenesisDelivery, Outcome, RowKey, SKIP_OVERRIDES, SkipOverride,
-        SkipReason, Vector, VectorIdType, confirmations_at_least, confirmations_exact,
-        derived_confirmations, discover_in, expected_driven_with, expected_emitted_code, field_hex,
-        field_nonzero_version_id, field_str, field_u64, field_version_id, fixture_announcements,
-        network_dirs_with_vectors, parse_outcome, read_chain_fixture, read_chain_fixture_in,
-        read_vendor_copy, reconcile_driven_with, redundant_overrides, render_minted_summary,
-        render_summary_with, signals_match, stale_overrides, test_suite_checked_out,
-        unclassified_rows_with, unused_divergences, version_id_matches,
+        SkipReason, Vector, VectorIdType, confirmations_exact, discover_in, expected_driven_with,
+        expected_emitted_code, field_hex, field_nonzero_version_id, field_str, field_u64,
+        field_version_id, fixture_announcements, network_dirs_with_vectors, parse_outcome,
+        read_chain_fixture, read_chain_fixture_in, read_vendor_copy, reconcile_driven_with,
+        redundant_overrides, render_minted_summary, render_summary_with, replayed_confirmations,
+        signals_match, stale_overrides, test_suite_checked_out, unclassified_rows_with,
+        unused_divergences, version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -2559,13 +2559,14 @@ mod tests {
     /// A RESOLVED DOCUMENT compares four things. `didDocument` in full, on every
     /// content field and with no masking. `versionId` through
     /// [`version_id_matches`]: as a string when the output encodes it as one.
-    /// `deactivated` by value. `confirmations` as AT LEAST the recorded number
-    /// ([`confirmations_at_least`]) — a recorded value was taken at the set's
-    /// recorded tip, and a later tip only adds confirmations — and, on a set
-    /// with `signals.json` resolved past genesis, as EQUAL to the count the
-    /// record gives ([`derived_confirmations`]), which pins the block the
-    /// resolver counts from. A replayed positive pair, main or `resolve/NN/`,
-    /// must record the number: one that records none fails by name.
+    /// `deactivated` by value. `confirmations` through
+    /// [`replayed_confirmations`]: AT LEAST the recorded number — a recorded
+    /// value was taken at the set's recorded tip, and a later tip only adds
+    /// confirmations — and EQUAL to the derived count, which pins the block
+    /// the resolver counts from: `0` at genesis, where no update was applied,
+    /// and past genesis, on a set with `signals.json`, the count the record
+    /// gives. A replayed positive pair, main or `resolve/NN/`, must record the
+    /// number: one that records none fails by name.
     ///
     /// Observation-dependent `updated` and `created` are never compared by
     /// value.
@@ -2651,34 +2652,19 @@ mod tests {
                         "{ctx}: a replayed positive resolve must record \
                          didDocumentMetadata.confirmations"
                     );
-                    confirmations_at_least(result.document_metadata.confirmations, *confirmations)
-                        .unwrap_or_else(|e| {
-                            panic!("{ctx}: {e} (replayed at tip {})", f.tip_height)
-                        });
-                    // The resolver's own count must be the one the record
-                    // gives. At least the recorded value is all the corpus
-                    // promises, but it would accept a resolver that anchors
-                    // its count on an earlier block than the one announcing
-                    // the resolved version, which only ever reports more.
-                    if let Some(signals) = &vector.signals {
-                        let version = result.document_metadata.version_id.get();
-                        let derived = derived_confirmations(signals, version)
-                            .unwrap_or_else(|e| panic!("{ctx}: {e}"));
-                        if let Some(derived) = derived {
-                            confirmations_exact(
-                                result.document_metadata.confirmations,
-                                Some(derived),
-                            )
-                            .unwrap_or_else(|e| {
-                                panic!(
-                                    "{ctx}: {e} derived from signals.json as recordedTip {} \
-                                         - the block announcing version {version} + 1 (replayed \
-                                         at tip {})",
-                                    signals.recorded_tip, f.tip_height
-                                )
-                            });
-                        }
-                    }
+                    // At least the recorded value is all the corpus promises,
+                    // but it would accept a resolver that anchors its count on
+                    // an earlier block than the one announcing the resolved
+                    // version, which only ever reports more — and at genesis,
+                    // where every set states 0, any count. So the resolver's
+                    // own count must also be the derived one.
+                    replayed_confirmations(
+                        result.document_metadata.confirmations,
+                        *confirmations,
+                        vector.signals.as_ref(),
+                        result.document_metadata.version_id.get(),
+                    )
+                    .unwrap_or_else(|e| panic!("{ctx}: {e} (replayed at tip {})", f.tip_height));
                 }
                 result.document_metadata.confirmations
             }

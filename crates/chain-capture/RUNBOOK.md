@@ -777,12 +777,14 @@ since.
 - **The outcome.** For a positive set, the resolved `didDocument`, `versionId`
   and `deactivated` flag must match the set's `resolve/output.json`, and any
   stated `confirmations` must be reached: the set's contract is "at least the
-  recorded value" at `recordedTip`. Past genesis the resolver's count at the
-  pinned tip must also **equal** the count the record gives, `recordedTip -
-  blockHeight + 1` for the `signals.json` entry announcing the resolved version
-  (the earliest, for a repeated announcement), and the stated count must not
-  exceed it. The equality catches a resolver that counts from an earlier block,
-  which the lower bound alone accepts. A negative set (its
+  recorded value" at `recordedTip`. The resolver's count at the pinned tip
+  must also **equal** the derived count, and the stated count must not exceed
+  it. At genesis the derived count is `0`: no update was applied. Past genesis
+  it is `recordedTip - blockHeight + 1` for the `signals.json` entry announcing
+  the resolved version (the earliest, for a repeated announcement). The
+  equality catches a resolver that counts from an earlier block, which the
+  lower bound alone accepts, and one that reports a count at genesis, where
+  every set states `0`. A negative set (its
   `resolve/output.json` carries `didResolutionMetadata.error`) is captured when the resolve fails with **any**
   specification error code. A resolve that succeeds, or that fails without a
   code, is refused. The capture does not compare the code: run the conformance
@@ -807,7 +809,7 @@ Every refusal writes nothing for the set.
 | `signals.json` repeats an `update` without `duplicate: true` on the later entry, or records one `txid` in two entries. | A malformed set. Report it upstream. |
 | The set declares a CAS or SMT beacon, or an entry belongs to a cohort, including a cohort-only set with no `update/` directory. | Unsupported: the resolver cannot query those beacons yet, so there is nothing to capture. Skip the set. |
 | The main `resolve/input.json` sets `versionId`, `versionTime` or `minConf` under `resolutionOptions`. | The capture resolves the main pair with only its sidecar and the recorded tip, while the conformance harness honours those options, so the two would check different resolves. This tool does not yet capture a main resolve carrying those options; that is a limitation of the tool, not a defect in the set. Capturing it needs the tool extended to resolve with the input's options; until then, skip the set. |
-| The set resolves past genesis but `signals.json` records no announcement of the update that produced the resolved version, or the set states more `confirmations` than its record gives at `recordedTip`. | A set inconsistent with its own record. Report it upstream. |
+| The set resolves past genesis but `signals.json` records no announcement of the update that produced the resolved version, or the set states more `confirmations` than its record gives at `recordedTip` (more than `0`, for a set that resolves to its genesis version). | A set inconsistent with its own record. Report it upstream. |
 | The resolve outcome does not match (see above). | Either the chain no longer carries what the set was recorded against, or the resolver disagrees with the set. Establish which before re-running. |
 
 Any other transaction above `recordedTip`, such as someone paying the beacon

@@ -80,12 +80,14 @@ walks `test-suite/` only, and the synthetic corpora under `fixtures/layout/`
 `didResolutionMetadata.error` is asserted by **code only** (the `errorMessage`
 is the generating implementation's text). A positive output is asserted on
 `didDocument`, `versionId` (a string, no coercion), `deactivated`, and
-`confirmations` compared as **at least** the recorded value. On a set with
-`signals.json` resolved past genesis, the resolver's `confirmations` must also
-**equal** the count the record gives, `recordedTip - blockHeight + 1` for the
-entry announcing the resolved version (the earliest, for a repeated
-announcement); that pins the block the resolver counts from, which the lower
-bound alone does not. A set that carries
+`confirmations` compared as **at least** the recorded value. The resolver's
+`confirmations` must also **equal** the derived count: `0` at genesis, where no
+update was applied, and past genesis, on a set with `signals.json`, the count
+the record gives, `recordedTip - blockHeight + 1` for the entry announcing the
+resolved version (the earliest, for a repeated announcement). That pins the
+block the resolver counts from, which the lower bound alone does not; at
+genesis, where every set states `0`, the lower bound accepts any count. A set
+that carries
 `signals.json` is replayed only after the chain fixture's announcements equal
 that file exactly (txid, block height, block hash, signal bytes, and an address
 whose captured history carries the transaction). An unknown child under
@@ -411,8 +413,9 @@ that value and writes it as the fixture's `tip_height`, so the replayed
 moved. On regtest every set shares 601, the Polar export's tip as shipped; on
 signet and testnet4 every set shares one tip; on mutinynet each set carries its
 own. Every positive output records `confirmations`, compared as at least the
-recorded value and, past genesis, as equal to the count `signals.json` gives; a
-replayed positive pair that records none fails by name.
+recorded value and as equal to the derived count (`0` at genesis, past it the
+count `signals.json` gives); a replayed positive pair that records none fails by
+name.
 
 To re-capture, see [crates/chain-capture/README.md](./crates/chain-capture/README.md)
 and [crates/chain-capture/RUNBOOK.md](./crates/chain-capture/RUNBOOK.md).

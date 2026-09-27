@@ -155,6 +155,17 @@ pub enum CaptureError {
         height: u32,
     },
 
+    /// The set resolves to its genesis version but states a nonzero count.
+    #[error(
+        "{vector}: the set resolves to its genesis version and states {stated} confirmations, but a resolve that applies no update reports 0 — the capture is refused; report the set upstream"
+    )]
+    ConfirmationsAtGenesis {
+        /// The set being captured.
+        vector: String,
+        /// The count `resolve/output.json` states.
+        stated: u64,
+    },
+
     /// The chain has no vector this tool captures.
     #[error(
         "no vector this tool captures is filed under `{network_dir}` — the drivable set is: {drivable}"
@@ -216,8 +227,9 @@ pub fn resolution_options_for(
 /// `observed` is what the resolver reported while resolving against the real
 /// chain at the set's `recordedTip`. The set states its count as "at least the
 /// recorded value" at that tip, so a count at or above it reproduces the set;
-/// past genesis the count must also equal the one the set's `signals.json`
-/// gives ([`check_confirmations`]), which a written row has passed.
+/// the count must also equal the derived one — `0` at genesis, and past it the
+/// one the set's `signals.json` gives ([`check_confirmations`]) — which a
+/// written row has passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationsCheck {
     /// The set's stated confirmations, `None` when it states none.
@@ -585,8 +597,13 @@ fn check_outcome(
 ///
 /// The stated count is a lower bound: the set's contract is that at
 /// `recordedTip` each count is at least the recorded value, and some sets
-/// state one below what their own record gives. At genesis no update anchors
-/// the count, so only that lower bound is checked, when the set states one.
+/// state one below what their own record gives.
+///
+/// At genesis the count is `0` whatever the record holds: no update was
+/// applied, and the resolver starts its count at `0`. The report must equal
+/// that, and a set stating more is refused. Every genesis set states `0`, so
+/// the lower bound alone would accept any count there — including one a
+/// resolver anchored on an announcement it ignored or stopped before.
 fn check_confirmations(
     target: &VectorTarget,
     version_id: u64,
@@ -603,12 +620,18 @@ fn check_confirmations(
     };
 
     if version_id <= 1 {
-        return match stated {
-            Some(stated) if !confirmations_reproduce(stated, observed) => {
-                Err(mismatch(format!("at least {stated}")))
-            }
-            _ => Ok(()),
-        };
+        if observed != Some(0) {
+            return Err(mismatch("0 (no update applied)".to_string()));
+        }
+        if let Some(stated) = stated
+            && stated > 0
+        {
+            return Err(CaptureError::ConfirmationsAtGenesis {
+                vector: target.id.clone(),
+                stated,
+            });
+        }
+        return Ok(());
     }
 
     let recorded_tip = target.signals.recorded_tip;
@@ -1776,14 +1799,36 @@ mod tests {
     }
 
     #[test]
-    fn outcome_resolved_at_genesis_checks_only_the_stated_lower_bound() {
+    fn outcome_resolved_at_genesis_requires_zero_confirmations() {
+        let target = expecting(resolved_outcome(1, Some(0)));
+        check_outcome(&target, Ok(resolution(1, false, Some(0))))
+            .expect("a genesis resolve counts 0");
+        for reported in [Some(7), None] {
+            let error = check_outcome(&target, Ok(resolution(1, false, reported)))
+                .expect_err("a genesis resolve applied no update, so it counts 0");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::ResolutionMismatch { ref field, ref expected, .. }
+                        if field == "confirmations" && expected == "0 (no update applied)"
+                ),
+                "got: {error}"
+            );
+        }
+        let unstated = expecting(resolved_outcome(1, None));
+        assert!(check_outcome(&unstated, Ok(resolution(1, false, Some(3)))).is_err());
+    }
+
+    #[test]
+    fn outcome_resolved_at_genesis_refuses_a_nonzero_stated_count() {
         let target = expecting(resolved_outcome(1, Some(3)));
-        check_outcome(&target, Ok(resolution(1, false, Some(7))))
-            .expect("no update anchors a genesis count");
-        let error = check_outcome(&target, Ok(resolution(1, false, Some(2))))
-            .expect_err("below the stated count is refused");
+        let error = check_outcome(&target, Ok(resolution(1, false, Some(0))))
+            .expect_err("a genesis set may not state more than 0");
         assert!(
-            matches!(error, CaptureError::ResolutionMismatch { ref expected, .. } if expected == "at least 3"),
+            matches!(
+                error,
+                CaptureError::ConfirmationsAtGenesis { stated: 3, .. }
+            ),
             "got: {error}"
         );
     }

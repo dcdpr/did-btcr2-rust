@@ -1182,22 +1182,29 @@ pub(crate) fn confirmations_exact(
     }
 }
 
-/// The `confirmations` a resolve that ends at `version_id` reports at the
-/// set's `recordedTip`, derived from `signals.json` alone: `recordedTip -
-/// blockHeight + 1`, where `blockHeight` is that of the entry announcing the
-/// update that produced the version (update step `version_id - 1`), the
-/// earliest one when the update was announced again.
+/// The `confirmations` a replayed resolve that ends at `version_id` reports at
+/// the set's `recordedTip`.
 ///
-/// `Ok(None)` at genesis, which no update anchors. A version past genesis
-/// whose update no entry announces is an error: the record cannot say where
-/// the count starts.
+/// At genesis the count is `0` whatever the set records: no update was
+/// applied, and the resolver starts its count at `0` (`terminal_state` in
+/// `resolver.rs`). Past genesis it is derived from `signals.json` alone:
+/// `recordedTip - blockHeight + 1`, where `blockHeight` is that of the entry
+/// announcing the update that produced the version (update step
+/// `version_id - 1`), the earliest one when the update was announced again.
+///
+/// `Ok(None)` past genesis on a set without `signals.json`, which gives no
+/// block to count from. A version past genesis whose update no entry
+/// announces is an error: the record cannot say where the count starts.
 pub(crate) fn derived_confirmations(
-    signals: &Signals,
+    signals: Option<&Signals>,
     version_id: u64,
 ) -> Result<Option<u64>, String> {
     if version_id <= 1 {
-        return Ok(None);
+        return Ok(Some(0));
     }
+    let Some(signals) = signals else {
+        return Ok(None);
+    };
     let update = version_id - 1;
     let height = signals
         .entries
@@ -1214,6 +1221,34 @@ pub(crate) fn derived_confirmations(
     Ok(Some(
         u64::from(signals.recorded_tip.saturating_sub(height)) + 1,
     ))
+}
+
+/// Judge a replayed positive resolve's `confirmations`: at least the count the
+/// set states ([`confirmations_at_least`]), and equal to the count derived for
+/// the version it reached ([`derived_confirmations`]) wherever one can be
+/// derived — always at genesis, and past it on a set with `signals.json`.
+///
+/// The equality pins the block the resolver counts from. The lower bound
+/// alone accepts a resolver that anchors its count on an earlier block, and at
+/// genesis, where every set states `0`, it accepts any count at all.
+pub(crate) fn replayed_confirmations(
+    resolved: Option<u32>,
+    stated: Option<u64>,
+    signals: Option<&Signals>,
+    version_id: u64,
+) -> Result<(), String> {
+    confirmations_at_least(resolved, stated)?;
+    let Some(derived) = derived_confirmations(signals, version_id)? else {
+        return Ok(());
+    };
+    confirmations_exact(resolved, Some(derived)).map_err(|e| match signals {
+        Some(signals) if version_id > 1 => format!(
+            "{e}, derived from signals.json as recordedTip {} - the block announcing version \
+             {version_id} + 1",
+            signals.recorded_tip
+        ),
+        _ => format!("{e}: a resolve that applies no update counts 0"),
+    })
 }
 
 /// The resolved `versionId` matches an expected positive outcome.
@@ -6865,24 +6900,67 @@ fn derived_confirmations_count_from_the_earliest_announcement_of_the_version() {
             parsed_entry(1, true, &"a3".repeat(32), 310),
         ],
     };
-    assert_eq!(derived_confirmations(&signals, 2), Ok(Some(21)));
-    assert_eq!(derived_confirmations(&signals, 3), Ok(Some(16)));
+    assert_eq!(derived_confirmations(Some(&signals), 2), Ok(Some(21)));
+    assert_eq!(derived_confirmations(Some(&signals), 3), Ok(Some(16)));
 }
 
-/// Genesis has no announcing block; a version past it with no announcing
-/// entry fails, naming the version and the update.
+/// Genesis counts 0 with or without a record; past genesis a set without
+/// `signals.json` derives nothing, and a version with no announcing entry
+/// fails, naming the version and the update.
 #[test]
-fn derived_confirmations_are_absent_at_genesis_and_refused_without_an_entry() {
+fn derived_confirmations_are_zero_at_genesis_and_refused_without_an_entry() {
     let signals = Signals {
         recorded_tip: 320,
         entries: vec![parsed_entry(1, false, &"a1".repeat(32), 300)],
     };
-    assert_eq!(derived_confirmations(&signals, 1), Ok(None));
-    let err = derived_confirmations(&signals, 3).expect_err("no entry announces update 2");
+    assert_eq!(derived_confirmations(Some(&signals), 1), Ok(Some(0)));
+    assert_eq!(derived_confirmations(None, 1), Ok(Some(0)));
+    assert_eq!(derived_confirmations(None, 2), Ok(None));
+    let err = derived_confirmations(Some(&signals), 3).expect_err("no entry announces update 2");
     assert!(
         err.contains("version 3") && err.contains("update 2"),
         "got: {err}"
     );
+}
+
+/// A genesis resolve that reports a nonzero count fails, though every set
+/// states `0` there and the lower bound alone would accept it; `0` passes.
+#[test]
+fn replayed_confirmations_refuse_a_nonzero_count_at_genesis() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![parsed_entry(1, false, &"a1".repeat(32), 300)],
+    };
+    for record in [Some(&signals), None] {
+        assert_eq!(replayed_confirmations(Some(0), Some(0), record, 1), Ok(()));
+        let err = replayed_confirmations(Some(21), Some(0), record, 1)
+            .expect_err("a genesis resolve applied no update, so it counts 0");
+        assert!(
+            err.contains("21") && err.contains("applies no update"),
+            "got: {err}"
+        );
+    }
+}
+
+/// Past genesis the count must equal the derived one in both directions, and
+/// may not fall below the stated one; a set without `signals.json` is held to
+/// the stated lower bound only.
+#[test]
+fn replayed_confirmations_past_genesis_require_the_derived_count() {
+    let signals = Signals {
+        recorded_tip: 320,
+        entries: vec![parsed_entry(1, false, &"a1".repeat(32), 300)],
+    };
+    assert_eq!(
+        replayed_confirmations(Some(21), Some(20), Some(&signals), 2),
+        Ok(())
+    );
+    let above = replayed_confirmations(Some(25), Some(20), Some(&signals), 2)
+        .expect_err("25 is not the derived 21");
+    assert!(above.contains("recordedTip 320"), "got: {above}");
+    assert!(replayed_confirmations(Some(19), Some(20), Some(&signals), 2).is_err());
+    assert_eq!(replayed_confirmations(Some(25), Some(20), None, 2), Ok(()));
+    assert!(replayed_confirmations(Some(19), Some(20), None, 2).is_err());
 }
 
 #[test]
