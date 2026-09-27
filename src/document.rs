@@ -469,9 +469,10 @@ fn optional_multibase_from_object(
 /// of that is inspected unless a proof invokes the entry — see
 /// `DocumentFields<Did>::invoking_public_key`. In particular the top-level
 /// `Multikey` type rule of `verification_method_from_value` is not applied
-/// here, on purpose, pending the same open question to the spec authors. The `id` must be a JSON
-/// string and a present `publicKeyMultibase` must be one too; both errors
-/// name the array (`{field}.id`, `{field}.publicKeyMultibase`).
+/// here, on purpose, pending the same open question to the spec authors. The
+/// `id` must be a JSON string and a present `publicKeyMultibase` must be one
+/// too; both errors name the array (`{field}.id`,
+/// `{field}.publicKeyMultibase`).
 fn relationship_from_value(
     entry: &Value,
     field: &str,
