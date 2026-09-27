@@ -359,12 +359,19 @@ then retry step 3.
 
 **A row fails with a confirmations mismatch.**
 The capture is pinned to the set's `recordedTip`, so mining on this copy does
-not cause it. The count the resolver reports is `recordedTip - blockHeight + 1`
-for the block of the last applied update, and the set's stated count is a lower
-bound on it; a failure means the resolver counts from a later block than the
-set does. Establish which block each side counts from before re-running. Do
-**not** pin a fabricated tip to make the arithmetic come out: a back-derived tip
-would make the assertion circular and unable to fail.
+not cause it. The count the resolver reports must equal the derived count:
+`recordedTip - blockHeight + 1` for the `signals.json` entry announcing the
+resolved version, or `0` at genesis. The chain has already been proved against
+`signals.json` by then, so the heights are right; a mismatch in either
+direction means the resolver anchored its count on a different block — a
+later one if it reports fewer, an earlier one if it reports more. A nonzero
+count at genesis means it anchored on an announcement it did not apply.
+Establish which block
+the resolver counts from before re-running. Do **not** pin a fabricated tip to
+make the arithmetic come out: a back-derived tip would make the assertion
+circular and unable to fail. A set whose stated count is above the derived
+one, or whose stated version no entry announces, is refused when it is
+loaded; see the refusals table under "Refusals, and what to do".
 
 **A row fails with a signal that is not on chain.**
 An entry in the set's `signals.json` has no announcement at the captured
