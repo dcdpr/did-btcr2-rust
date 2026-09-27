@@ -583,14 +583,14 @@ fn check_outcome(
 /// The expected count is derived from the record alone
 /// ([`CaptureSignals::derived_confirmations`](targets::CaptureSignals::derived_confirmations)):
 /// `0` at genesis, where no update was applied, and past genesis
-/// `recordedTip - height + 1`, where `height` is the block of the `signals.json` entry
-/// announcing the update that produced the resolved version (the earliest, for
-/// a repeated announcement). The resolver's report must EQUAL that count. The
-/// equality is what tells a resolver that anchors its count on the right block
-/// from one that anchors it on an earlier one: the signals gate pins every
-/// announcement's height, but not which of them the resolver counted from, and
-/// an earlier anchor only ever reports more. At genesis, where every set
-/// states `0`, it refuses any count at all.
+/// `recordedTip - height + 1`, where `height` is the block of the
+/// `signals.json` entry announcing the update that produced the resolved
+/// version (the earliest, for a repeated announcement). The resolver's report
+/// must EQUAL that count. The equality is what tells a resolver that anchors
+/// its count on the right block from one that anchors it on an earlier one:
+/// the signals gate pins every announcement's height, but not which of them
+/// the resolver counted from, and an earlier anchor only ever reports more. At
+/// genesis, where every set states `0`, it refuses any count at all.
 ///
 /// The stated count is a lower bound: the set's contract is that at
 /// `recordedTip` each count is at least the recorded value, and some sets

@@ -388,11 +388,11 @@ fn is_hex64(value: &str) -> bool {
 /// ships. `ctx` names the file in every message.
 ///
 /// The file is a bare array of entries, at least one, all agreeing on
-/// `recordedTip`, none with a `blockHeight` above it. An entry's `update` N, when present, must name an update step
-/// the set has — `update/{NN}` in a numbered layout, or N = 1 for a flat
-/// `update/` — and an entry without `update` must name its `cohort`. The
-/// `txid`, `blockHash` and `signalBytes` are 64 lowercase hex, and no two
-/// entries share a `txid`.
+/// `recordedTip`, none with a `blockHeight` above it. An entry's `update` N,
+/// when present, must name an update step the set has — `update/{NN}` in a
+/// numbered layout, or N = 1 for a flat `update/` — and an entry without
+/// `update` must name its `cohort`. The `txid`, `blockHash` and `signalBytes`
+/// are 64 lowercase hex, and no two entries share a `txid`.
 ///
 /// Duplicates are keyed on `update` alone: an entry repeating an earlier
 /// entry's `update` must set `duplicate: true`, push the same `signalBytes`,
