@@ -205,6 +205,11 @@ fn confirmations_reproduce(expected: u64, observed: Option<u32>) -> bool {
     observed.is_some_and(|observed| u64::from(observed) >= expected)
 }
 
+/// The two `MISMATCH` forms appear only for a caller of [`emit_to`] that
+/// bypasses [`check_outcome`]: on the capture path the outcome check has
+/// already refused a reported count other than the derived one, and the loader
+/// a stated count above it. A check with no derived count is a set that
+/// expects an error, whatever the resolver reported.
 impl std::fmt::Display for ConfirmationsCheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(derived) = self.derived {
@@ -229,10 +234,7 @@ impl std::fmt::Display for ConfirmationsCheck {
             };
         }
         // No derived count: the set expects an error, so there is no count.
-        match self.observed {
-            Some(observed) => write!(f, "n/a (no count derived; resolver reported {observed})"),
-            None => write!(f, "n/a (vector expects an error)"),
-        }
+        write!(f, "n/a (vector expects an error)")
     }
 }
 
@@ -1663,6 +1665,15 @@ mod tests {
         );
         let below = check(17_542).to_string();
         assert!(below.contains("MISMATCH"), "{below}");
+
+        for observed in [None, Some(4)] {
+            let no_count = ConfirmationsCheck {
+                expected: None,
+                derived: None,
+                observed,
+            };
+            assert_eq!(no_count.to_string(), "n/a (vector expects an error)");
+        }
 
         assert!(confirmations_reproduce(17_540, Some(17_541)));
         assert!(!confirmations_reproduce(17_540, Some(17_539)));
