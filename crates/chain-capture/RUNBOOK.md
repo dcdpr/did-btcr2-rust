@@ -795,7 +795,10 @@ since.
   Each entry's `address` must be one of the captured addresses whose history
   carries its transaction; a transaction that spends from that beacon and pays
   change to another carries both, so either matches. Every set the tool
-  captures carries `signals.json`; the loader refuses one without it.
+  captures carries `signals.json`; the loader refuses one without it. This
+  check runs as soon as the resolve completes, before the outcome is judged:
+  the expected `confirmations` come from `signals.json`, so a record the chain
+  contradicts is reported as a signal mismatch, not as a resolver mismatch.
 
 ### Refusals, and what to do
 
@@ -809,7 +812,7 @@ Every refusal writes nothing for the set.
 | `signals.json` repeats an `update` without `duplicate: true` on the later entry, or records one `txid` in two entries. | A malformed set. Report it upstream. |
 | The set declares a CAS or SMT beacon, or an entry belongs to a cohort, including a cohort-only set with no `update/` directory. | Unsupported: the resolver cannot query those beacons yet, so there is nothing to capture. Skip the set. |
 | The main `resolve/input.json` sets `versionId`, `versionTime` or `minConf` under `resolutionOptions`. | The capture resolves the main pair with only its sidecar and the recorded tip, while the conformance harness honours those options, so the two would check different resolves. This tool does not yet capture a main resolve carrying those options; that is a limitation of the tool, not a defect in the set. Capturing it needs the tool extended to resolve with the input's options; until then, skip the set. |
-| The set resolves past genesis but `signals.json` records no announcement of the update that produced the resolved version, or the set states more `confirmations` than its record gives at `recordedTip` (more than `0`, for a set that resolves to its genesis version). | A set inconsistent with its own record. Report it upstream. |
+| The set's `resolve/output.json` states a version past genesis whose update `signals.json` does not announce, or states more `confirmations` than its record gives at `recordedTip` (more than `0`, for a set that resolves to its genesis version). Checked from the set's files when it is loaded, before any request. | A set inconsistent with its own record. Report it upstream. |
 | The resolve outcome does not match (see above). | Either the chain no longer carries what the set was recorded against, or the resolver disagrees with the set. Establish which before re-running. |
 
 Any other transaction above `recordedTip`, such as someone paying the beacon

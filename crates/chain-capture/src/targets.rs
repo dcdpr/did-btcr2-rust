@@ -347,6 +347,48 @@ pub enum TargetError {
         source: did_btcr2::identifier::Error,
     },
 
+    /// The set resolves past genesis, but its record announces no update that
+    /// produced the resolved version, so the count it states cannot be derived.
+    #[error(
+        "{vector}: the set resolves to version {version_id}, but its signals.json records no announcement of update {update}, which produced that version — the confirmations cannot be derived from the record, so the set is refused; report it upstream"
+    )]
+    UnannouncedVersion {
+        /// The set being loaded.
+        vector: String,
+        /// The resolved version.
+        version_id: u64,
+        /// The update step that produced it.
+        update: u64,
+    },
+
+    /// The set states more confirmations than its own record gives.
+    #[error(
+        "{vector}: the set states {stated} confirmations, but its signals.json gives {derived} at its recordedTip {recorded_tip} (announcing block {height}) — a count at a tip can be no more than that, so the set is refused; report it upstream"
+    )]
+    ConfirmationsAboveRecord {
+        /// The set being loaded.
+        vector: String,
+        /// The count `resolve/output.json` states.
+        stated: u64,
+        /// `recordedTip - height + 1`.
+        derived: u64,
+        /// The set's `recordedTip`.
+        recorded_tip: u32,
+        /// The block the resolved version was announced in.
+        height: u32,
+    },
+
+    /// The set resolves to its genesis version but states a nonzero count.
+    #[error(
+        "{vector}: the set resolves to its genesis version and states {stated} confirmations, but a resolve that applies no update reports 0 — the set is refused; report it upstream"
+    )]
+    ConfirmationsAtGenesis {
+        /// The set being loaded.
+        vector: String,
+        /// The count `resolve/output.json` states.
+        stated: u64,
+    },
+
     /// A network name this crate does not model.
     #[error(
         "unknown network `{0}`: expected mainnet, signet, regtest, mutinynet, testnet, testnet3 or testnet4"
@@ -634,6 +676,52 @@ impl CaptureSignals {
             .map(|entry| entry.block_height)
             .min()
     }
+
+    /// The `confirmations` a resolve that ends at `version_id` reports at
+    /// `recordedTip`, checked against the count the set states.
+    ///
+    /// `0` at genesis, where no update was applied. Past genesis,
+    /// `recordedTip - height + 1` for the block [`Self::announcing_height`]
+    /// names. The set's stated count is a lower bound on that and may not
+    /// exceed it.
+    ///
+    /// Depends on the set's own files alone, so the loader runs it before any
+    /// request goes out, and a set inconsistent with its record is refused as
+    /// such rather than surfacing, after a resolve, as a resolver mismatch.
+    pub fn derived_confirmations(
+        &self,
+        vector: &str,
+        version_id: u64,
+        stated: Option<u64>,
+    ) -> Result<u64, TargetError> {
+        if version_id <= 1 {
+            return match stated {
+                Some(stated) if stated > 0 => Err(TargetError::ConfirmationsAtGenesis {
+                    vector: vector.to_string(),
+                    stated,
+                }),
+                _ => Ok(0),
+            };
+        }
+        let height =
+            self.announcing_height(version_id)
+                .ok_or_else(|| TargetError::UnannouncedVersion {
+                    vector: vector.to_string(),
+                    version_id,
+                    update: version_id - 1,
+                })?;
+        let derived = u64::from(self.recorded_tip.saturating_sub(height)) + 1;
+        match stated {
+            Some(stated) if stated > derived => Err(TargetError::ConfirmationsAboveRecord {
+                vector: vector.to_string(),
+                stated,
+                derived,
+                recorded_tip: self.recorded_tip,
+                height,
+            }),
+            _ => Ok(derived),
+        }
+    }
 }
 
 /// The wire shape of one `signals.json` entry, before its rules are checked.
@@ -708,7 +796,8 @@ fn load_from(root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
 /// it), a sidecar without `updates`, and an expected error rather than a
 /// resolved document: the sets that expect `MISSING_UPDATE_DATA` withhold their
 /// update on purpose. A main input carrying `versionId`, `versionTime` or
-/// `minConf` is refused.
+/// `minConf` is refused, and so is a positive set whose stated outcome its own
+/// record cannot support ([`CaptureSignals::derived_confirmations`]).
 pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError> {
     check_vector_id(id)?;
     let network_dir = id
@@ -794,6 +883,18 @@ pub fn load_in(suite_root: &Path, id: &str) -> Result<VectorTarget, TargetError>
             ));
         }
     };
+
+    // A set whose stated outcome is inconsistent with its own record is
+    // refused here, before any request, rather than after a resolve where it
+    // would read as a resolver mismatch.
+    if let ExpectedOutcome::Resolved {
+        version_id,
+        confirmations,
+        ..
+    } = &expected
+    {
+        signals.derived_confirmations(id, *version_id, *confirmations)?;
+    }
 
     Ok(VectorTarget {
         id: id.to_string(),
@@ -2102,6 +2203,73 @@ mod tests {
                 deactivated: false,
                 confirmations: Some(11),
             }
+        );
+
+        std::fs::remove_dir_all(&root).expect("scratch suite root is removable");
+    }
+
+    /// A positive output at `version_id` stating `confirmations`.
+    fn output_at(version_id: &str, confirmations: u64) -> Value {
+        let mut output = positive_output();
+        output["didDocumentMetadata"]["versionId"] = serde_json::json!(version_id);
+        output["didDocumentMetadata"]["confirmations"] = serde_json::json!(confirmations);
+        output
+    }
+
+    /// A set whose stated outcome its own record cannot support is refused
+    /// at load, from its files alone: a version no entry announces, a count
+    /// above the one the record gives, a nonzero count at genesis. A stated
+    /// count below the derived one is a lower bound and loads.
+    #[test]
+    fn load_in_refuses_a_stated_outcome_its_record_cannot_support() {
+        let root = scratch_suite("record-consistency");
+        let id = "signet/k1/qyp5h7kz";
+        let load_with = |output: Value| {
+            write_set(
+                &root,
+                id,
+                Some(serde_json::json!([entry(Some(1), 0xa1, 300, 0x11, 310)])),
+                None,
+                output,
+                None,
+            );
+            load_in(&root, id)
+        };
+
+        load_with(output_at("2", 11)).expect("the derived count loads");
+        load_with(output_at("2", 10)).expect("a count below the derived one loads");
+        load_with(output_at("1", 0)).expect("a genesis count of 0 loads");
+
+        let error = load_with(output_at("2", 12)).expect_err("12 is above the derived 11");
+        assert!(
+            matches!(
+                error,
+                TargetError::ConfirmationsAboveRecord {
+                    stated: 12,
+                    derived: 11,
+                    recorded_tip: 310,
+                    height: 300,
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+        let error = load_with(output_at("3", 5)).expect_err("no entry announces update 2");
+        assert!(
+            matches!(
+                error,
+                TargetError::UnannouncedVersion {
+                    version_id: 3,
+                    update: 2,
+                    ..
+                }
+            ),
+            "got: {error}"
+        );
+        let error = load_with(output_at("1", 1)).expect_err("genesis counts 0");
+        assert!(
+            matches!(error, TargetError::ConfirmationsAtGenesis { stated: 1, .. }),
+            "got: {error}"
         );
 
         std::fs::remove_dir_all(&root).expect("scratch suite root is removable");

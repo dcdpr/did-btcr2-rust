@@ -110,6 +110,11 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   applied, and past genesis the count the set's `signals.json` gives
   (`recordedTip` minus the block announcing the resolved version, plus one);
   the set's stated count stays a lower bound and may not exceed that.
+- `chain-capture` refuses a set whose stated `versionId` or `confirmations`
+  its own `signals.json` cannot support when it loads the set, before any
+  request, and proves the captured chain against `signals.json` before it
+  judges the resolve outcome, so a record the chain contradicts is reported
+  as a signal mismatch rather than a confirmations mismatch.
 
 ### Deprecated
 

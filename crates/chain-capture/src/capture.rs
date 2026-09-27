@@ -124,48 +124,6 @@ pub enum CaptureError {
         recorded_tip: u32,
     },
 
-    /// The set resolves past genesis, but its record announces no update that
-    /// produced the resolved version, so the count it states cannot be derived.
-    #[error(
-        "{vector}: the set resolves to version {version_id}, but its signals.json records no announcement of update {update}, which produced that version — the confirmations cannot be derived from the record, so the capture is refused; report the set upstream"
-    )]
-    UnannouncedVersion {
-        /// The set being captured.
-        vector: String,
-        /// The resolved version.
-        version_id: u64,
-        /// The update step that produced it.
-        update: u64,
-    },
-
-    /// The set states more confirmations than its own record gives.
-    #[error(
-        "{vector}: the set states {stated} confirmations, but its signals.json gives {derived} at its recordedTip {recorded_tip} (announcing block {height}) — a count at a tip can be no more than that, so the capture is refused; report the set upstream"
-    )]
-    ConfirmationsAboveRecord {
-        /// The set being captured.
-        vector: String,
-        /// The count `resolve/output.json` states.
-        stated: u64,
-        /// `recordedTip - height + 1`.
-        derived: u64,
-        /// The set's `recordedTip`.
-        recorded_tip: u32,
-        /// The block the resolved version was announced in.
-        height: u32,
-    },
-
-    /// The set resolves to its genesis version but states a nonzero count.
-    #[error(
-        "{vector}: the set resolves to its genesis version and states {stated} confirmations, but a resolve that applies no update reports 0 — the capture is refused; report the set upstream"
-    )]
-    ConfirmationsAtGenesis {
-        /// The set being captured.
-        vector: String,
-        /// The count `resolve/output.json` states.
-        stated: u64,
-    },
-
     /// The chain has no vector this tool captures.
     #[error(
         "no vector this tool captures is filed under `{network_dir}` — the drivable set is: {drivable}"
@@ -442,6 +400,19 @@ pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
     let options = resolution_options_for(&target.sidecar, Some(recorded_tip))?;
     let resolved = client.resolve(&target.did, options);
 
+    // The chain must match the set's `signals.json` before the outcome is
+    // judged, because the outcome check takes its expected confirmations from
+    // that record: a record that disagrees with the chain is a capture against
+    // the wrong chain, and is reported as such, not as a resolver mismatch.
+    // A resolve that failed without a specification code (a transport or
+    // endpoint fault) may have stopped part-way through the addresses, so its
+    // recording proves nothing either way; the outcome check reports that
+    // failure itself. `emit_to` runs the same gate again before it writes.
+    let completed = !matches!(&resolved, Err(e) if client_error_code(e).is_none());
+    if completed {
+        validate::validate_signals(target, &target.signals, &recording.borrow().addresses)?;
+    }
+
     // The expected-output check. This is where a real chain is contacted on every
     // run, which is why no live-network test ships: a capture is accepted only
     // when it reproduces the vector's own stated resolution, so a substituted or
@@ -585,82 +556,51 @@ fn check_outcome(
 /// Judge the resolver's reported `confirmations` for a resolve that reached
 /// `version_id` at the set's `recordedTip`.
 ///
-/// Past genesis the count is derived from the record alone: `recordedTip -
-/// height + 1`, where `height` is the block of the `signals.json` entry
+/// The expected count is derived from the record alone
+/// ([`CaptureSignals::derived_confirmations`](targets::CaptureSignals::derived_confirmations)):
+/// `0` at genesis, where no update was applied, and past genesis
+/// `recordedTip - height + 1`, where `height` is the block of the `signals.json` entry
 /// announcing the update that produced the resolved version (the earliest, for
-/// a repeated announcement). The resolver's report must EQUAL that count, and
-/// the count the set states must not exceed it. The equality is what tells a
-/// resolver that anchors its count on the right block from one that anchors it
-/// on an earlier one: the signals gate pins every announcement's height, but
-/// not which of them the resolver counted from, and an earlier anchor only
-/// ever reports more.
+/// a repeated announcement). The resolver's report must EQUAL that count. The
+/// equality is what tells a resolver that anchors its count on the right block
+/// from one that anchors it on an earlier one: the signals gate pins every
+/// announcement's height, but not which of them the resolver counted from, and
+/// an earlier anchor only ever reports more. At genesis, where every set
+/// states `0`, it refuses any count at all.
 ///
 /// The stated count is a lower bound: the set's contract is that at
 /// `recordedTip` each count is at least the recorded value, and some sets
-/// state one below what their own record gives.
-///
-/// At genesis the count is `0` whatever the record holds: no update was
-/// applied, and the resolver starts its count at `0`. The report must equal
-/// that, and a set stating more is refused. Every genesis set states `0`, so
-/// the lower bound alone would accept any count there — including one a
-/// resolver anchored on an announcement it ignored or stopped before.
+/// state one below what their own record gives. That it does not exceed the
+/// derived count is a property of the set's own files, which the loader has
+/// already checked; it is checked again here, BEFORE the equality, so a
+/// target built some other way still reports a set inconsistent with its
+/// record as that and not as a resolver mismatch.
 fn check_confirmations(
     target: &VectorTarget,
     version_id: u64,
     stated: Option<u64>,
     result: &ResolutionResult,
 ) -> Result<(), CaptureError> {
+    let derived = target
+        .signals
+        .derived_confirmations(&target.id, version_id, stated)?;
     let observed = result.document_metadata.confirmations;
-    let shown = |n: Option<u32>| n.map_or_else(|| "none".to_string(), |n| n.to_string());
-    let mismatch = |expected: String| CaptureError::ResolutionMismatch {
+    if observed.map(u64::from) == Some(derived) {
+        return Ok(());
+    }
+    let expected = match target.signals.announcing_height(version_id) {
+        Some(height) => format!(
+            "{derived} (recordedTip {} - announcing block {height} + 1)",
+            target.signals.recorded_tip
+        ),
+        None => format!("{derived} (no update applied)"),
+    };
+    Err(CaptureError::ResolutionMismatch {
         vector: target.id.clone(),
         field: "confirmations".to_string(),
         expected,
-        got: shown(observed),
-    };
-
-    if version_id <= 1 {
-        if observed != Some(0) {
-            return Err(mismatch("0 (no update applied)".to_string()));
-        }
-        if let Some(stated) = stated
-            && stated > 0
-        {
-            return Err(CaptureError::ConfirmationsAtGenesis {
-                vector: target.id.clone(),
-                stated,
-            });
-        }
-        return Ok(());
-    }
-
-    let recorded_tip = target.signals.recorded_tip;
-    let height = target
-        .signals
-        .announcing_height(version_id)
-        .ok_or_else(|| CaptureError::UnannouncedVersion {
-            vector: target.id.clone(),
-            version_id,
-            update: version_id - 1,
-        })?;
-    let derived = u64::from(recorded_tip.saturating_sub(height)) + 1;
-    if observed.map(u64::from) != Some(derived) {
-        return Err(mismatch(format!(
-            "{derived} (recordedTip {recorded_tip} - announcing block {height} + 1)"
-        )));
-    }
-    if let Some(stated) = stated
-        && stated > derived
-    {
-        return Err(CaptureError::ConfirmationsAboveRecord {
-            vector: target.id.clone(),
-            stated,
-            derived,
-            recorded_tip,
-            height,
-        });
-    }
-    Ok(())
+        got: observed.map_or_else(|| "none".to_string(), |n| n.to_string()),
+    })
 }
 
 /// A JSON value as pretty text, for an error an operator has to read.
@@ -853,7 +793,7 @@ fn render_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::targets::{CaptureSignals, SignalRecord};
+    use crate::targets::{CaptureSignals, SignalRecord, TargetError};
     use crate::validate::{ValidateError, update_hashes};
     use did_btcr2::identifier::{Did, Network, Sha256Hash};
     use serde_json::json;
@@ -1755,13 +1695,13 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CaptureError::ConfirmationsAboveRecord {
+                CaptureError::Target(TargetError::ConfirmationsAboveRecord {
                     stated: 6,
                     derived: 5,
                     recorded_tip: 212,
                     height: 208,
                     ..
-                }
+                })
             ),
             "got: {error}"
         );
@@ -1788,11 +1728,11 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CaptureError::UnannouncedVersion {
+                CaptureError::Target(TargetError::UnannouncedVersion {
                     version_id: 3,
                     update: 2,
                     ..
-                }
+                })
             ),
             "got: {error}"
         );
@@ -1827,7 +1767,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CaptureError::ConfirmationsAtGenesis { stated: 3, .. }
+                CaptureError::Target(TargetError::ConfirmationsAtGenesis { stated: 3, .. })
             ),
             "got: {error}"
         );
@@ -2581,24 +2521,56 @@ mod tests {
             set.cleanup();
         }
 
+        /// A set stating more than its own record gives is refused by the
+        /// loader, from its files alone, before any request goes out.
         #[test]
         fn refuses_a_pinned_set_whose_stated_confirmations_exceed_the_recorded_tip_count() {
             let set = ScratchSet::new(Network::Signet, "signet", "conf-above");
             set.state_confirmations(RECORDED_TIP - ANNOUNCED_AT + 2);
 
-            let error = set
-                .capture()
+            let error = targets::load_in(&set.suite_root, &set.id)
                 .expect_err("a count the pinned tip cannot reach is refused");
             assert!(
                 matches!(
                     error,
-                    CaptureError::ConfirmationsAboveRecord {
+                    TargetError::ConfirmationsAboveRecord {
                         stated: 12,
                         derived: 11,
                         recorded_tip: RECORDED_TIP,
                         height: ANNOUNCED_AT,
                         ..
                     }
+                ),
+                "got: {error}"
+            );
+            assert!(set.indexer.log().is_empty(), "no request went out");
+            assert!(set.files_written().is_empty(), "nothing is written");
+            set.cleanup();
+        }
+
+        /// A record whose `blockHeight` disagrees with the chain is a capture
+        /// against the wrong chain. The confirmations the outcome check
+        /// derives from that record disagree with the resolver's too, but the
+        /// signals gate runs first, so the refusal names the record.
+        #[test]
+        fn a_record_height_the_chain_contradicts_is_a_signal_mismatch() {
+            let set = ScratchSet::new(Network::Signet, "signet", "height-off");
+            set.write_signals(vec![set.entry(Some(1), false, &txid(1), ANNOUNCED_AT + 2)]);
+            set.state_confirmations(RECORDED_TIP - ANNOUNCED_AT - 1);
+
+            let error = set
+                .capture()
+                .expect_err("a record the chain contradicts is refused");
+            assert!(
+                matches!(
+                    error,
+                    CaptureError::Validation(ValidateError::SignalMismatch {
+                        field: "blockHeight",
+                        ref recorded,
+                        ref on_chain,
+                        ..
+                    }) if *recorded == (ANNOUNCED_AT + 2).to_string()
+                        && *on_chain == ANNOUNCED_AT.to_string()
                 ),
                 "got: {error}"
             );
