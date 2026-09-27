@@ -281,7 +281,7 @@ pub fn emit_to(
     blocks: &BTreeMap<String, Value>,
     observed_confirmations: Option<u32>,
 ) -> Result<CaptureOutcome, CaptureError> {
-    let proved = validate::validate_signals(target, &target.signals, addresses)?;
+    let proved = validate::validate_signals(target, addresses)?;
     let derived = match &target.expected {
         ExpectedOutcome::Resolved {
             version_id,
@@ -434,7 +434,7 @@ pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
     // failure itself. `emit_to` runs the same gate again before it writes.
     let completed = !matches!(&resolved, Err(e) if client_error_code(e).is_none());
     if completed {
-        validate::validate_signals(target, &target.signals, &recording.borrow().addresses)?;
+        validate::validate_signals(target, &recording.borrow().addresses)?;
     }
 
     // The expected-output check. This is where a real chain is contacted on every

@@ -7,7 +7,7 @@
 //! is wrong" is the whole purpose of this module.
 
 use crate::fixture::CapturedSignal;
-use crate::targets::{CaptureSignals, VectorTarget};
+use crate::targets::VectorTarget;
 use did_btcr2::Update;
 use esploda::bitcoin::{opcodes::all::OP_RETURN, script::Instruction};
 use esploda::esplora::{Status, Transaction};
@@ -36,9 +36,10 @@ pub enum ValidateError {
         source: serde_json::Error,
     },
 
-    /// The vector's sidecar does not carry the updates this gate checks for.
+    /// A minted scenario's sidecar does not carry the signed updates whose
+    /// announcements its fixture is built from.
     #[error(
-        "{vector}: the sidecar is unusable: {detail}. Every vector this tool captures announces at least one update, so an empty or malformed sidecar means the wrong one was loaded"
+        "{vector}: the sidecar is unusable: {detail}. A minted scenario announces at least one signed update, and its fixture is built from the announcements of those updates, so an empty or malformed sidecar means the scenario's updates were not recorded in its state"
     )]
     UnusableSidecar {
         /// The vector being captured.
@@ -307,8 +308,8 @@ struct OnChainSignal {
     bytes: [u8; 32],
 }
 
-/// Reject a capture of a set that carries `signals.json` unless the chain
-/// matches that record exactly.
+/// Reject a capture of a set unless the chain matches its `signals.json`
+/// (`target.signals`) exactly.
 ///
 /// The upstream record is the oracle. Ordering rules derived from the sidecar
 /// would refuse legitimate sets — a duplicate announcement above a later
@@ -319,10 +320,10 @@ struct OnChainSignal {
 /// Returns the proved announcements sorted by block height, then txid.
 pub fn validate_signals(
     target: &VectorTarget,
-    signals: &CaptureSignals,
     addresses: &BTreeMap<String, Vec<Value>>,
 ) -> Result<Vec<CapturedSignal>, ValidateError> {
     let vector = &target.id;
+    let signals = &target.signals;
 
     // 1. Every recorded body is an Esplora transaction list.
     assert_bodies_parse(vector, addresses)?;
@@ -763,6 +764,13 @@ mod tests {
         target
     }
 
+    /// [`set_target`] carrying `record` as its `signals.json`.
+    fn set_target_with(record: &CaptureSignals) -> VectorTarget {
+        let mut target = set_target();
+        target.signals = record.clone();
+        target
+    }
+
     const U1: [u8; 32] = [0x11; 32];
     const U2: [u8; 32] = [0x22; 32];
 
@@ -778,7 +786,7 @@ mod tests {
             vec![announce(0xa2, 305, U2), announce(0xa1, 300, U1)],
         )]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("a capture equal to the record passes");
         assert_eq!(proved.len(), 2);
         assert_eq!(proved[0].txid, txid(0xa1));
@@ -811,7 +819,7 @@ mod tests {
             ],
         )]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("a repeat the record flags as a duplicate passes");
         assert_eq!(proved.len(), 3);
         assert_eq!(proved[2].block_height, 326);
@@ -835,7 +843,7 @@ mod tests {
             ],
         )]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("an unrecorded repeat is refused");
         assert!(
             matches!(error, ValidateError::UnrecordedSignal { ref txid, height: 326, .. } if *txid == super::tests::txid(0xa3)),
@@ -863,7 +871,7 @@ mod tests {
             vec![announce(0xa1, 300, U1), announce(0xa2, 299, U2)],
         )]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("the gate applies no ordering check");
         assert_eq!(proved[0].block_height, 299);
     }
@@ -876,7 +884,7 @@ mod tests {
         );
         let addresses = bodies(&[("tb1qbeacon", vec![announce(0xa1, 300, U1)])]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("a recorded signal the chain lacks is refused");
         assert!(
             matches!(error, ValidateError::SignalNotOnChain { ref txid, .. } if *txid == super::tests::txid(0xa2)),
@@ -898,7 +906,7 @@ mod tests {
             )],
         )]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("a reorganised block is refused");
         assert!(
             matches!(
@@ -931,7 +939,7 @@ mod tests {
                 &op_return(U1),
             )],
         )]);
-        let error = validate_signals(&set_target(), &record, &moved)
+        let error = validate_signals(&set_target_with(&record), &moved)
             .expect_err("a different height is refused");
         assert!(
             matches!(
@@ -945,7 +953,7 @@ mod tests {
         );
 
         let other_bytes = bodies(&[("tb1qbeacon", vec![announce(0xa1, 300, U2)])]);
-        let error = validate_signals(&set_target(), &record, &other_bytes)
+        let error = validate_signals(&set_target_with(&record), &other_bytes)
             .expect_err("different signal bytes are refused");
         assert!(
             matches!(
@@ -967,7 +975,7 @@ mod tests {
             vec![announce(0xa1, 300, U1), announce(0xa2, 315, U2)],
         )]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("beacon activity past the recorded tip is refused");
         assert!(
             matches!(
@@ -1015,7 +1023,7 @@ mod tests {
         });
         let addresses = bodies(&[("tb1qbeacon", vec![dust.clone(), announce(0xa1, 300, U1)])]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("dust above the recorded tip does not block the capture");
         assert_eq!(proved.len(), 1, "the dust is not a signal");
         assert_eq!(proved[0].txid, txid(0xa1));
@@ -1039,7 +1047,7 @@ mod tests {
             ],
         )]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("a non-announcement above the tip is accepted");
         assert_eq!(proved.len(), 1);
     }
@@ -1052,7 +1060,7 @@ mod tests {
             vec![announce(0xa1, 300, U1), tx(&[op_return(U2)], 0xc9, None)],
         )]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("a mempool announcement is refused");
         assert!(
             matches!(error, ValidateError::UnconfirmedAnnouncement { ref txid, .. } if *txid == "c9".repeat(32)),
@@ -1066,7 +1074,7 @@ mod tests {
         let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
         let addresses = bodies(&[("tb1qbeacon", vec![json!({ "not": "a transaction" })])]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("an unusable body is refused before anything is compared");
         assert!(
             matches!(error, ValidateError::UnparseableBody { ref address, .. } if address == "tb1qbeacon"),
@@ -1086,8 +1094,9 @@ mod tests {
         let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
         let addresses = bodies(&[("tb1qbeacon", vec![announce(0xa1, 300, U1)])]);
 
-        let proved = validate_signals(&target, &record, &addresses)
-            .expect("the gate runs on the record alone");
+        target.signals = record;
+        let proved =
+            validate_signals(&target, &addresses).expect("the gate runs on the record alone");
         assert_eq!(proved.len(), 1);
         assert!(matches!(
             update_hashes(&target.id, &target.sidecar),
@@ -1105,7 +1114,7 @@ mod tests {
             ("tb1qchange", vec![announce(0xa1, 300, U1)]),
         ]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("one transaction, one entry");
         assert_eq!(proved.len(), 1);
         assert_eq!(
@@ -1126,7 +1135,7 @@ mod tests {
             ("tb1qchange", vec![announce(0xa1, 300, U1)]),
         ]);
 
-        let proved = validate_signals(&set_target(), &record, &addresses)
+        let proved = validate_signals(&set_target_with(&record), &addresses)
             .expect("the named address carries the transaction");
         assert_eq!(proved.len(), 1);
         assert_eq!(proved[0].address, "tb1qchange");
@@ -1137,7 +1146,7 @@ mod tests {
         let record = signals(310, vec![record(1, 0xa1, 300, U1, 310)]);
         let addresses = bodies(&[("tb1qother", vec![announce(0xa1, 300, U1)])]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("an address that does not carry the transaction is refused");
         assert!(
             matches!(
@@ -1166,7 +1175,7 @@ mod tests {
             ("tb1qthird", vec![announce(0xa1, 300, U1)]),
         ]);
 
-        let error = validate_signals(&set_target(), &record, &addresses)
+        let error = validate_signals(&set_target_with(&record), &addresses)
             .expect_err("neither carrying address is the recorded one");
         let ValidateError::SignalMismatch {
             field: "address",
