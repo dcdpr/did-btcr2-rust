@@ -282,11 +282,13 @@ blocks").
 
 The session table goes to stderr, one row per set: addresses captured, how
 many of them came back empty (a captured state, not a failure), signals proved,
-the confirmations check, and the fixture path. A set's `confirmations` is a
-lower bound, so the check reads `N == N ok` or `N >= M ok (at least)`; a set
-that states none, or expects an error, reads `n/a`. Below the table: which sets
-are drivable now, each failure with its full cause chain, and the
-`recordedTip` (or range of them) the `confirmations` were measured against.
+the confirmations check, and the fixture path. The resolver's count must equal
+the count the set's record derives, and the set's stated count is a lower bound
+on it, so the check reads `N == derived D, >= stated M ok`; a set that states
+no count reads `N == derived D ok (vector states none)`, and a set that expects
+an error reads `n/a`. Below the table: which sets are drivable now, each
+failure with its full cause chain, and the `recordedTip` (or range of them)
+the `confirmations` of every positive set were measured against.
 
 A row reading `FAILED, nothing written` means exactly that — nothing was written
 for that vector, and the other rows are unaffected.

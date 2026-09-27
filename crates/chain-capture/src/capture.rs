@@ -181,17 +181,20 @@ pub fn resolution_options_for(
 
 /// How a captured row's `confirmations` came out.
 ///
-/// Two independently derived numbers: `expected` is what the set states, and
-/// `observed` is what the resolver reported while resolving against the real
-/// chain at the set's `recordedTip`. The set states its count as "at least the
-/// recorded value" at that tip, so a count at or above it reproduces the set;
-/// the count must also equal the derived one — `0` at genesis, and past it the
-/// one the set's `signals.json` gives ([`check_confirmations`]) — which a
-/// written row has passed.
+/// Three numbers: `expected` is what the set states, `derived` is what the
+/// set's record gives, and `observed` is what the resolver reported while
+/// resolving against the real chain at the set's `recordedTip`. The observed
+/// count must equal the derived one — `0` at genesis, and past it the one the
+/// set's `signals.json` gives ([`check_confirmations`]) — and the set states
+/// its count as "at least the recorded value" at that tip, so it must not be
+/// below the stated one. A written row has passed both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationsCheck {
     /// The set's stated confirmations, `None` when it states none.
     pub expected: Option<u64>,
+    /// The count the set's record gives for the resolved version, `None` for
+    /// a set that expects an error.
+    pub derived: Option<u64>,
     /// What the resolver reported for this resolve.
     pub observed: Option<u32>,
 }
@@ -204,23 +207,31 @@ fn confirmations_reproduce(expected: u64, observed: Option<u32>) -> bool {
 
 impl std::fmt::Display for ConfirmationsCheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (self.expected, self.observed) {
-            (Some(expected), Some(observed)) if expected == u64::from(observed) => {
-                write!(f, "{expected} == {observed} ok")
-            }
-            (Some(expected), Some(observed))
-                if confirmations_reproduce(expected, Some(observed)) =>
-            {
-                write!(f, "{observed} >= {expected} ok (at least)")
-            }
-            (Some(expected), Some(observed)) => {
-                write!(f, "{observed} < {expected} MISMATCH (at least)")
-            }
-            (Some(expected), None) => write!(f, "{expected} expected, none reported MISMATCH"),
-            (None, Some(observed)) => {
-                write!(f, "n/a (vector states none; resolver reported {observed})")
-            }
-            (None, None) => write!(f, "n/a (vector states none)"),
+        if let Some(derived) = self.derived {
+            let Some(observed) = self.observed.filter(|&o| u64::from(o) == derived) else {
+                let reported = self.observed.map_or("none".to_string(), |o| o.to_string());
+                return write!(f, "{reported} != derived {derived} MISMATCH");
+            };
+            return match self.expected {
+                Some(expected) if confirmations_reproduce(expected, Some(observed)) => {
+                    write!(
+                        f,
+                        "{observed} == derived {derived}, >= stated {expected} ok"
+                    )
+                }
+                Some(expected) => {
+                    write!(
+                        f,
+                        "{observed} == derived {derived}, < stated {expected} MISMATCH"
+                    )
+                }
+                None => write!(f, "{observed} == derived {derived} ok (vector states none)"),
+            };
+        }
+        // No derived count: the set expects an error, so there is no count.
+        match self.observed {
+            Some(observed) => write!(f, "n/a (no count derived; resolver reported {observed})"),
+            None => write!(f, "n/a (vector expects an error)"),
         }
     }
 }
@@ -271,6 +282,18 @@ pub fn emit_to(
     observed_confirmations: Option<u32>,
 ) -> Result<CaptureOutcome, CaptureError> {
     let proved = validate::validate_signals(target, &target.signals, addresses)?;
+    let derived = match &target.expected {
+        ExpectedOutcome::Resolved {
+            version_id,
+            confirmations,
+            ..
+        } => Some(
+            target
+                .signals
+                .derived_confirmations(&target.id, *version_id, *confirmations)?,
+        ),
+        ExpectedOutcome::Error { .. } => None,
+    };
     let tip_height = target.signals.recorded_tip;
     let fixture = ChainFixture {
         captured_at: Utc::now().to_rfc3339(),
@@ -299,6 +322,7 @@ pub fn emit_to(
         tip_height,
         confirmations: ConfirmationsCheck {
             expected: target.expected.confirmations(),
+            derived,
             observed: observed_confirmations,
         },
         path,
@@ -767,7 +791,9 @@ fn render_summary(
     let tip_range = rows
         .iter()
         .filter_map(|(_, row)| row.as_ref().ok())
-        .filter(|outcome| outcome.confirmations.expected.is_some())
+        .filter(|outcome| {
+            outcome.confirmations.derived.is_some() || outcome.confirmations.expected.is_some()
+        })
         .map(|outcome| outcome.tip_height)
         .fold(None, |range: Option<(u32, u32)>, tip| {
             Some(range.map_or((tip, tip), |(low, high)| (low.min(tip), high.max(tip))))
@@ -1120,6 +1146,7 @@ mod tests {
         assert_eq!(outcome.signals, 1);
         assert_eq!(outcome.tip_height, 212);
         assert_eq!(outcome.confirmations.expected, Some(93));
+        assert_eq!(outcome.confirmations.derived, Some(93));
         assert_eq!(outcome.confirmations.observed, Some(93));
 
         std::fs::remove_dir_all(&root).expect("scratch fixture root is removable");
@@ -1365,6 +1392,7 @@ mod tests {
                 "regtest/k1/qgph7nre",
                 ConfirmationsCheck {
                     expected: Some(93),
+                    derived: Some(93),
                     observed: Some(93),
                 },
             )),
@@ -1375,8 +1403,9 @@ mod tests {
             "the row names the file that was written: {row}"
         );
         assert!(
-            row.contains("93 == 93"),
-            "the row shows the vector's expectation against the resolver's report: {row}"
+            row.contains("93 == derived 93, >= stated 93 ok"),
+            "the row shows the resolver's report against the derived and the stated \
+             counts: {row}"
         );
 
         let mutinynet = render_row(
@@ -1385,13 +1414,14 @@ mod tests {
                 "mutinynet/k1/q5pqhkks",
                 ConfirmationsCheck {
                     expected: None,
+                    derived: Some(1_045),
                     observed: Some(1_045),
                 },
             )),
         );
         assert!(
-            mutinynet.contains("n/a"),
-            "a vector stating no confirmations reports n/a rather than a bare number: \
+            mutinynet.contains("1045 == derived 1045 ok (vector states none)"),
+            "a set stating no count still shows the derived count it was held to: \
              {mutinynet}"
         );
     }
@@ -1425,6 +1455,7 @@ mod tests {
                     "regtest/k1/qgph7nre",
                     ConfirmationsCheck {
                         expected: Some(93),
+                        derived: Some(93),
                         observed: Some(93),
                     },
                 )),
@@ -1462,6 +1493,7 @@ mod tests {
             "signet/k1/qyp5h7kz",
             ConfirmationsCheck {
                 expected: Some(4),
+                derived: Some(4),
                 observed: Some(4),
             },
         );
@@ -1488,14 +1520,15 @@ mod tests {
     }
 
     #[test]
-    fn a_session_with_no_stated_confirmations_omits_the_tip_footer() {
+    fn a_session_of_error_sets_omits_the_tip_footer() {
         let rows = vec![(
             "mutinynet/k1/q5pqhkks".to_string(),
             Ok(sample_outcome(
                 "mutinynet/k1/q5pqhkks",
                 ConfirmationsCheck {
                     expected: None,
-                    observed: Some(1_045),
+                    derived: None,
+                    observed: None,
                 },
             )),
         )];
@@ -1503,50 +1536,104 @@ mod tests {
 
         assert!(summary.contains("drivable now: mutinynet/k1/q5pqhkks"));
         assert!(
+            summary.contains("n/a (vector expects an error)"),
+            "{summary}"
+        );
+        assert!(
             !summary.contains("measured against"),
-            "a chain whose vectors state no confirmations has no shared tip to report: \
-             {summary}"
+            "a session that checked no count has no tip to report: {summary}"
+        );
+    }
+
+    /// A set that states no count was still held to the derived one, at its
+    /// `recordedTip`, so the footer names that tip.
+    #[test]
+    fn a_session_whose_sets_state_no_count_still_states_the_tip() {
+        let rows = vec![(
+            "mutinynet/k1/q5pqhkks".to_string(),
+            Ok(sample_outcome(
+                "mutinynet/k1/q5pqhkks",
+                ConfirmationsCheck {
+                    expected: None,
+                    derived: Some(1_045),
+                    observed: Some(1_045),
+                },
+            )),
+        )];
+        let summary = render_summary("mutinynet", "https://mutinynet.com/api", &rows);
+        assert!(
+            summary.contains("tip 212") && summary.contains("measured against"),
+            "{summary}"
         );
     }
 
     #[test]
     fn the_confirmations_check_reports_a_disagreement_as_a_mismatch() {
-        let check = ConfirmationsCheck {
-            expected: Some(93),
-            observed: Some(91),
+        let check = |expected, observed| ConfirmationsCheck {
+            expected,
+            derived: Some(93),
+            observed,
         };
-        assert_eq!(check.to_string(), "91 < 93 MISMATCH (at least)");
-        let missing = ConfirmationsCheck {
-            expected: Some(93),
-            observed: None,
-        };
-        assert!(missing.to_string().contains("MISMATCH"), "{missing}");
+        assert_eq!(
+            check(Some(93), Some(91)).to_string(),
+            "91 != derived 93 MISMATCH"
+        );
+        assert_eq!(
+            check(Some(90), Some(95)).to_string(),
+            "95 != derived 93 MISMATCH"
+        );
+        assert_eq!(
+            check(Some(93), None).to_string(),
+            "none != derived 93 MISMATCH"
+        );
+        assert_eq!(
+            check(Some(94), Some(93)).to_string(),
+            "93 == derived 93, < stated 94 MISMATCH"
+        );
     }
 
     #[test]
     fn a_session_pinned_to_several_recorded_tips_states_their_range() {
-        let pinned = |id: &str, tip: u32, expected: Option<u64>| {
+        let pinned = |id: &str, tip: u32, expected: Option<u64>, derived: Option<u64>| {
             let mut outcome = sample_outcome(
                 id,
                 ConfirmationsCheck {
                     expected,
-                    observed: Some(17_540),
+                    derived,
+                    observed: derived.map(|d| u32::try_from(d).expect("a small count")),
                 },
             );
             outcome.tip_height = tip;
             (id.to_string(), Ok(outcome))
         };
         let rows = vec![
-            pinned("mutinynet/k1/q5pqhkks", 3_449_796, Some(17_540)),
-            pinned("mutinynet/k1/q5p9uafd", 3_449_794, Some(17_540)),
-            pinned("mutinynet/k1/q5p0w6a9", 3_449_805, None),
-            pinned("mutinynet/x1/qhfjzym7", 3_449_799, Some(17_534)),
+            pinned(
+                "mutinynet/k1/q5pqhkks",
+                3_449_796,
+                Some(17_540),
+                Some(17_540),
+            ),
+            pinned(
+                "mutinynet/k1/q5p9uafd",
+                3_449_794,
+                Some(17_540),
+                Some(17_540),
+            ),
+            pinned("mutinynet/k1/q5p0w6a9", 3_449_801, None, Some(17_545)),
+            pinned(
+                "mutinynet/x1/qhfjzym7",
+                3_449_799,
+                Some(17_534),
+                Some(17_534),
+            ),
+            pinned("mutinynet/k1/q5perror", 3_449_805, None, None),
         ];
         let summary = render_summary("mutinynet", "https://mutinynet.com/api", &rows);
 
         assert!(
-            summary.contains("tips 3449794..=3449799"),
-            "the range covers every set that states confirmations, and only those: {summary}"
+            summary.contains("tips 3449794..=3449801"),
+            "the range covers every set whose count was checked, stated or not, and \
+             leaves out a set that expects an error: {summary}"
         );
         assert!(
             summary.contains("its own set's recordedTip"),
@@ -1561,18 +1648,21 @@ mod tests {
 
     #[test]
     fn a_lower_bound_confirmations_check_passes_at_or_above_and_fails_below() {
-        let check = |observed| ConfirmationsCheck {
-            expected: Some(17_540),
-            observed,
+        let check = |expected| ConfirmationsCheck {
+            expected: Some(expected),
+            derived: Some(17_541),
+            observed: Some(17_541),
         };
-        assert_eq!(check(Some(17_540)).to_string(), "17540 == 17540 ok");
         assert_eq!(
-            check(Some(17_541)).to_string(),
-            "17541 >= 17540 ok (at least)"
+            check(17_541).to_string(),
+            "17541 == derived 17541, >= stated 17541 ok"
         );
-        let below = check(Some(17_539)).to_string();
+        assert_eq!(
+            check(17_540).to_string(),
+            "17541 == derived 17541, >= stated 17540 ok"
+        );
+        let below = check(17_542).to_string();
         assert!(below.contains("MISMATCH"), "{below}");
-        assert!(check(None).to_string().contains("MISMATCH"));
 
         assert!(confirmations_reproduce(17_540, Some(17_541)));
         assert!(!confirmations_reproduce(17_540, Some(17_539)));
@@ -2435,6 +2525,7 @@ mod tests {
                 outcome.confirmations,
                 ConfirmationsCheck {
                     expected: Some(11),
+                    derived: Some(11),
                     observed: Some(11),
                 }
             );
@@ -2513,6 +2604,7 @@ mod tests {
                 outcome.confirmations,
                 ConfirmationsCheck {
                     expected: Some(10),
+                    derived: Some(11),
                     observed: Some(11),
                 }
             );
@@ -2848,6 +2940,7 @@ mod tests {
             assert_eq!(outcome.tip_height, RECORDED_TIP);
             assert_eq!(outcome.signals, 1);
             assert_eq!(outcome.confirmations.observed, None);
+            assert_eq!(outcome.confirmations.derived, None);
             let written = set.written();
             assert_eq!(written["tip_height"], json!(RECORDED_TIP));
             assert!(written.get("expected").is_none() && written.get("sidecar").is_none());
