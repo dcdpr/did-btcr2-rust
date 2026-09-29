@@ -72,7 +72,7 @@ walks `test-suite/` only, and the synthetic corpora under `fixtures/layout/`
 | `derivation` | `create/input.json` → encoded DID equals `create/output.json.did` | `op_vectors_create_derives_expected_did` |
 | `genesis-key` | `other.json.genesisKeys.secret` derives `genesisKeys.public`, and every update step signs with the genesis secret or an `other.json.extraKeys` secret whose public key is the one the step's `sourceDocument` names | `op_vectors_create_genesis_key_corroborated` |
 | `resolve` | the resolver FSM resolves the vector's main pair (`resolve/input.json`) to `resolve/output.json` | `op_vectors_resolve_matches_output` |
-| `update-crypto` | each update step's content-bound triple and BIP340 proof re-derive from its own inputs and verify against its source document; a step over a deactivated source is refused, and the vendor's proof on it is verified instead | `op_vectors_update_signs_to_expected_hashes` |
+| `update-crypto` | each step's own `signedUpdate` proof verifies under the key its source document names, first; then each step's content-bound triple and BIP340 proof re-derive from its own inputs and verify against its source document; a step over a deactivated source is refused, and the vendor's proof on it is verified instead. A negative set is held to its entry in the negative-set expectation table | `op_vectors_update_signs_to_expected_hashes` |
 | `end-state` | applying the update steps in order to the genesis document reproduces `resolve/output.json.didDocument`; the walk stops at the resolved version, so a step no resolver applies (after deactivation, from a removed beacon, below the current height) is not applied | `op_vectors_updates_apply_to_expected_end_state` |
 | `resolve-option` | one row per `resolve/NN/` case: the resolver, given that case's `resolutionOptions` (`versionId`, `versionTime`, both, `minConf`), produces its `output.json` | `op_vectors_resolve_cases_match_output` |
 
@@ -106,14 +106,14 @@ operation-vector coverage: 236 vectors, 1161 rows
   derivation         236        0
   genesis-key        236        0
   resolve            164       72
-  update-crypto      108       92
+  update-crypto      200        0
   end-state          108       92
   resolve-option      53        0
   skipped rows by reason (a row may carry several):
     CAS-aggregated delivery not implemented                                          40
     SMT-aggregated delivery not implemented                                          40
     resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)   56
-    the set's expected result is an error; its Resolve row asserts the code         184
+    the set's expected result is an error; there is no end state to reproduce        92
 
 minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counted in the upstream ledger above)
   minted/clean-rotating-beacons (minted on mutinynet)
@@ -131,8 +131,9 @@ minted-scenario coverage: 2 scenario(s) driven from in-repo fixtures (NOT counte
 1161 rows is 236 × 3 set-level kinds (`derivation`, `genesis-key`,
 `resolve`), plus 200 `update-crypto` and 200 `end-state` rows (the 50 sets per
 network that ship an `update/` directory; the other 9 are genesis-only), plus
-the 53 `resolve/NN` cases. The 92 skipped rows of each update kind are the 23
-negative sets per network that ship update steps.
+the 53 `resolve/NN` cases. The 92 skipped rows are all `end-state` rows: the 23
+negative sets per network that ship update steps. Their `update-crypto` rows are
+driven, against the negative-set expectation table below.
 
 ### The four skip reasons
 
@@ -151,11 +152,12 @@ match, which is why the counts above sum to more than the skipped rows.
   transaction is read. Distinct from the delivery reasons: different problem,
   different code. Both are recorded when both apply.
 - **`ExpectedError`** — the set's main `resolve/output.json` carries
-  `didResolutionMetadata.error`. **`update-crypto` and `end-state` only**: the
-  set is built to fail resolution, so its `resolve` row asserts the error code
-  and there is no end state to reproduce. `derivation` and `genesis-key` stay
-  driven, because `create/` still holds a valid DID. A negative `resolve/NN`
-  case does not make its set negative.
+  `didResolutionMetadata.error`. **`end-state` only**: the set is built to fail
+  resolution, so there is no end state to reproduce. Its `resolve` row asserts
+  the error code, and its update steps are still driven by `update-crypto`
+  against the negative-set expectation table. `derivation` and `genesis-key`
+  stay driven, because `create/` still holds a valid DID. A negative
+  `resolve/NN` case does not make its set negative.
 - **`Override(&str)`** — a hand-written one-off. `SKIP_OVERRIDES` is currently
   **empty by design**, so every skip on disk today comes from a derived rule.
   An entry names exactly one row: a `resolve-option` entry names its case, and
@@ -207,12 +209,38 @@ regenerated with the specification's code, the unused-entry guard fails and the
 entry is deleted. The `late-code` synthetic corpus below proves the mechanism
 on its own.
 
+### Negative-set expectation table
+
+`NEGATIVE_SET_EXPECTATIONS` (`src/test_vectors.rs`) holds, for each negative
+scenario of the checked-out suite that ships update steps (n05, n10–n31), what
+the `update-crypto` driver observes on its sets on every network: `Passes`, or
+`FailsAt` with the substrings the failure must carry (the check that failed and
+the reason it gives), plus a note where the outcome is not obvious from the
+scenario. A set expected to pass must pass; a set expected to fail must fail
+with every substring. Either mismatch fails naming the set and its scenario, and
+`a_flipped_negative_set_expectation_fails_naming_the_set` keeps that comparison
+live. A negative set with no entry is refused by name.
+
+The table covers the checked-out suite only; synthetic corpora have no entry.
+`negative_set_table_matches_the_corpus` pins it to that corpus in both
+directions: a negative update-bearing set without an entry, or an entry with no
+set, fails by name, and the 92 sets are counted.
+
+On every set, positive and negative, `update-crypto` first checks each step's
+own `signedUpdate` proof under the key its `sourceDocument` names, before any
+other check, so a set that fails a later check still has each signature pinned.
+A step over a deactivated source is left to the deactivated-source check, which
+verifies the same proof.
+
+An upstream change to a negative scenario is taken in by re-observing its sets
+and editing the entry, never by editing the vector.
+
 ### The coverage ratchet
 
 `DRIVEN_FLOOR` (`src/test_vectors.rs`) records the minimum driven rows per kind:
 
 ```
-Derivation 236, GenesisKey 236, Resolve 164, UpdateCrypto 108, EndState 108, ResolveOption 53
+Derivation 236, GenesisKey 236, Resolve 164, UpdateCrypto 200, EndState 108, ResolveOption 53
 ```
 
 It is compared with `>=`, so upstream adding vectors raises coverage without
@@ -285,7 +313,11 @@ transaction above that tip and `recordedTip` equal to it.
 
 No synthetic set carries a signing key. Their `genesis-key`, `update-crypto`
 and `end-state` rows are therefore asserted through classification only; those
-kinds stay driven on the real vectors.
+kinds stay driven on the real vectors. The two negative fork sets (`late-code`,
+`withheld`) have their `update-crypto` row classified as driven and their
+`end-state` row skipped as `ExpectedError`; the update-crypto driver is never
+called on them, and synthetic corpora have no entry in the negative-set
+expectation table.
 
 `fixtures/layout/vendor-19f8d424/` is not a corpus: it holds byte copies of a
 few files of the test suite at `19f8d424`, read by unit tests that need a known
@@ -309,8 +341,8 @@ under `test-suite/`. `resolve/NN` counts the numbered resolve cases.
 | 12a/b, 25a | v2 | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | driven |
 | 25b, 25c | v1 | `SMTBeacon`, genesis-only | `SmtDelivery`, `UnsupportedBeaconType` | none |
 | n01–n04 | `INVALID_DID` | genesis-only, raised before any request | driven | none |
-| n05, n10–n28 | `MISSING_UPDATE_DATA`, `INVALID_DID_UPDATE`, `LATE_PUBLISHING_ERROR` | Singleton beacons, captured | driven off the capture | `ExpectedError` |
-| n29–n31 | `INVALID_SIGNAL_DATA`, `MISSING_UPDATE_DATA` | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | `ExpectedError` |
+| n05, n10–n28 | `MISSING_UPDATE_DATA`, `INVALID_DID_UPDATE`, `LATE_PUBLISHING_ERROR` | Singleton beacons, captured | driven off the capture | update-crypto driven against the expectation table; end-state `ExpectedError` |
+| n29–n31 | `INVALID_SIGNAL_DATA`, `MISSING_UPDATE_DATA` | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | update-crypto driven against the expectation table; end-state `ExpectedError` |
 
 The scenarios with `resolve/NN` cases: 21 (one), 22 (ten on regtest, nine
 elsewhere; regtest's tenth is a `minConf` that holds only at `recordedTip`),
@@ -528,7 +560,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 126 `#[test]` functions; `src/test_vectors.rs` holds 171.
+`src/resolver.rs` holds 129 `#[test]` functions; `src/test_vectors.rs` holds 173.
 
 ## 8. When `test-suite/` is absent
 

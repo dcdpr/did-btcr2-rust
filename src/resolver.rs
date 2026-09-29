@@ -1121,14 +1121,15 @@ mod tests {
     use crate::document::Document;
     use crate::test_vectors::{
         AnnouncementDelivery, AssertionKind, ChainFixture, CodeDivergence, Corpus, DRIVEN_FLOOR,
-        ERROR_CODE_DIVERGENCES, GenesisDelivery, Outcome, RowKey, SKIP_OVERRIDES, SkipOverride,
-        SkipReason, Vector, VectorIdType, confirmations_exact, discover_in, expected_driven_with,
+        ERROR_CODE_DIVERGENCES, GenesisDelivery, NEGATIVE_SET_EXPECTATIONS, NegativeSetExpectation,
+        Outcome, RowKey, SKIP_OVERRIDES, SkipOverride, SkipReason, UpdateCryptoExpectation, Vector,
+        VectorIdType, confirmations_exact, discover_in, expected_driven_with,
         expected_emitted_code, field_hex, field_nonzero_version_id, field_str, field_u64,
-        field_version_id, fixture_announcements, network_dirs_with_vectors, parse_outcome,
-        read_chain_fixture, read_chain_fixture_in, read_vendor_copy, reconcile_driven_with,
-        redundant_overrides, render_minted_summary, render_summary_with, replayed_confirmations,
-        signals_match, stale_overrides, test_suite_checked_out, unclassified_rows_with,
-        unused_divergences, version_id_matches,
+        field_version_id, fixture_announcements, negative_set_expectation,
+        network_dirs_with_vectors, parse_outcome, read_chain_fixture, read_chain_fixture_in,
+        read_vendor_copy, reconcile_driven_with, redundant_overrides, render_minted_summary,
+        render_summary_with, replayed_confirmations, signals_match, stale_overrides,
+        test_suite_checked_out, unclassified_rows_with, unused_divergences, version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -2083,14 +2084,16 @@ mod tests {
 
     /// The version cutoff only trims the end of the walk: an inflated target
     /// on a step before the last fails both update drivers, naming the step,
-    /// before the cutoff can skip it.
+    /// before the cutoff can skip it. The step is re-signed at the inflated
+    /// target, so its own proof verifies and the version check is what fails.
     #[test]
     fn update_drivers_reject_an_inflated_target_version_before_the_last_step() {
         let suite = keyed_suite("inflated-target-early");
         let set = keyed_k1_rotation_set();
         suite.write(&set);
+        let resigned = keyed_resigned_at_target(&set.steps[0].0, 5, KEYED_GENESIS_SECRET);
         suite.edit(&set, "update/01/output.json", |output| {
-            output["signedUpdate"]["targetVersionId"] = serde_json::json!(5);
+            output["signedUpdate"] = resigned;
         });
         let vectors = suite.vectors();
         for message in [
@@ -2108,7 +2111,7 @@ mod tests {
 
     /// An inflated target on the final step would otherwise drop that step
     /// from the end-state walk unseen: a set resolved at version 3 whose
-    /// expected document is the version-2 one, with update/02 claiming to
+    /// expected document is the version-2 one, with update/02 re-signed to
     /// target version 4, fails both update drivers, naming the step.
     #[test]
     fn update_drivers_reject_an_inflated_target_version_on_the_last_step() {
@@ -2119,8 +2122,9 @@ mod tests {
         suite.edit(&set, "resolve/output.json", |output| {
             output["didDocument"] = v2;
         });
+        let resigned = keyed_resigned_at_target(&set.steps[1].0, 4, KEYED_EXTRA_SECRET);
         suite.edit(&set, "update/02/output.json", |output| {
-            output["signedUpdate"]["targetVersionId"] = serde_json::json!(4);
+            output["signedUpdate"] = resigned;
         });
         let vectors = suite.vectors();
         for message in [
@@ -2134,6 +2138,43 @@ mod tests {
                 "got: {message}"
             );
         }
+    }
+
+    /// A step's `signedUpdate` re-signed over the same source, patch and
+    /// method at `target_version_id`, so its proof still verifies.
+    fn keyed_resigned_at_target(
+        input: &serde_json::Value,
+        target_version_id: u64,
+        secret: [u8; 32],
+    ) -> serde_json::Value {
+        let source = InitialDocument::from_json_string(&input["sourceDocument"].to_string())
+            .expect("the keyed step's sourceDocument is an initial document");
+        let vm_id = input["verificationMethodId"]
+            .as_str()
+            .expect("the keyed step names its method");
+        keyed_hand_signed_update(&source, &input["patches"], target_version_id, vm_id, secret)
+    }
+
+    /// Each step's own proof is checked before any other update-crypto check:
+    /// an edited `targetVersionId` left unsigned fails on the proof, naming
+    /// the step, not on the version linkage the edit also breaks.
+    #[test]
+    fn update_crypto_checks_each_step_proof_before_its_versions() {
+        let suite = keyed_suite("unsigned-target-edit");
+        let set = keyed_k1_rotation_set();
+        suite.write(&set);
+        suite.edit(&set, "update/02/output.json", |output| {
+            output["signedUpdate"]["targetVersionId"] = serde_json::json!(4);
+        });
+        let vectors = suite.vectors();
+        let message = panic_text(|| drive_update_crypto(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("update/02")
+                && message.contains("the vendor signedUpdate proof must verify under the key")
+                && !message.contains("targetVersionId must be sourceVersionId + 1"),
+            "got: {message}"
+        );
     }
 
     /// The version cutoff trusts the vendor's resolved version, so it is
@@ -3374,28 +3415,28 @@ mod tests {
         );
     }
 
-    /// On both negative sets the update-crypto and end-state rows skip as
-    /// expected-error, and nothing else; derivation, genesis-key and resolve
-    /// stay classified as driven. The genesis-key row is classification only:
-    /// the set carries no signing key.
+    /// On both negative sets the end-state row skips as expected-error, and
+    /// nothing else; derivation, genesis-key, update-crypto and resolve stay
+    /// classified as driven. The genesis-key and update-crypto rows are
+    /// classification only: the set carries no signing key, and those drivers
+    /// are not called on synthetic corpora.
     #[test]
     fn synthetic_negative_sets_skip_update_rows_as_expected_error() {
         for corpus in ["late-code", "withheld"] {
             let vectors = fork_vectors(corpus);
-            for kind in [AssertionKind::UpdateCrypto, AssertionKind::EndState] {
-                assert_eq!(
-                    vectors[0].skip_reasons_with(kind, &[]),
-                    BTreeSet::from([SkipReason::ExpectedError]),
-                    "{corpus}: the {kind} row skips as an expected error"
-                );
-                assert!(
-                    expected_driven_with(kind, &vectors, &[]).is_empty(),
-                    "{corpus}: no {kind} row is driven"
-                );
-            }
+            assert_eq!(
+                vectors[0].skip_reasons_with(AssertionKind::EndState, &[]),
+                BTreeSet::from([SkipReason::ExpectedError]),
+                "{corpus}: the end-state row skips as an expected error"
+            );
+            assert!(
+                expected_driven_with(AssertionKind::EndState, &vectors, &[]).is_empty(),
+                "{corpus}: no end-state row is driven"
+            );
             for kind in [
                 AssertionKind::Derivation,
                 AssertionKind::GenesisKey,
+                AssertionKind::UpdateCrypto,
                 AssertionKind::Resolve,
             ] {
                 assert!(
@@ -3601,6 +3642,69 @@ mod tests {
         drive_update_crypto(&vectors, SKIP_OVERRIDES);
     }
 
+    /// The driver compares each negative set with its table entry: flipping
+    /// one entry's expected outcome makes the driver fail on that scenario's
+    /// set, naming the set and the scenario. Both directions are exercised, a
+    /// passing scenario expected to fail and a failing one expected to pass.
+    #[test]
+    fn a_flipped_negative_set_expectation_fails_naming_the_set() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        let find = |pred: fn(&UpdateCryptoExpectation) -> bool| {
+            NEGATIVE_SET_EXPECTATIONS
+                .iter()
+                .position(|e| pred(&e.update_crypto))
+                .expect("the table holds both outcomes")
+        };
+        let passing = find(|u| matches!(u, UpdateCryptoExpectation::Passes));
+        let failing = find(|u| matches!(u, UpdateCryptoExpectation::FailsAt(_)));
+
+        for (index, flipped_to) in [
+            (passing, UpdateCryptoExpectation::FailsAt(&["x"])),
+            (failing, UpdateCryptoExpectation::Passes),
+        ] {
+            let mut flipped = NEGATIVE_SET_EXPECTATIONS.to_vec();
+            flipped[index].update_crypto = flipped_to;
+            let scenario = flipped[index].scenario;
+
+            let subset: Vec<Vector> = vectors
+                .iter()
+                .filter(|v| {
+                    v.network_dir == "regtest"
+                        && v.is_negative()
+                        && negative_set_expectation(&flipped, v).map(|e| e.scenario)
+                            == Some(scenario)
+                })
+                .cloned()
+                .collect();
+            assert_eq!(subset.len(), 1, "{scenario} has one regtest set");
+
+            let message = panic_text(|| drive_update_crypto_with(&subset, &[], &flipped));
+            assert!(
+                message.contains(&subset[0].id) && message.contains(scenario),
+                "{scenario}: the failure names the set and the scenario: {message}"
+            );
+        }
+    }
+
+    /// A negative set with no table entry is refused by name, never passed
+    /// silently: here a keyed negative set, which carries no scenario id.
+    #[test]
+    fn update_crypto_refuses_a_negative_set_without_a_table_entry() {
+        let suite = keyed_suite("uc-no-entry");
+        let set = keyed_k1_unknown_method_set(keyed_invalid_update_output());
+        suite.write(&set);
+        let vectors = suite.vectors();
+        assert!(vectors[0].is_negative());
+        let message = panic_text(|| drive_update_crypto(&vectors, &[]));
+        assert!(
+            message.contains(&set.id())
+                && message.contains("needs a negative-set expectation entry"),
+            "got: {message}"
+        );
+    }
+
     /// One update step's fixtures plus the update the crate produced from them.
     struct StepFixtures {
         input: serde_json::Value,
@@ -3780,123 +3884,244 @@ mod tests {
     }
 
     /// The UPDATE-crypto driver body, over an explicit override table so the same
-    /// code path can be exercised with a hand-written skip in place.
-    ///
-    /// A step over a deactivated `sourceDocument` is checked by
-    /// [`check_update_over_deactivated_source`] instead of being re-derived;
-    /// the step linkage checks apply to it like to any other step.
+    /// code path can be exercised with a hand-written skip in place. Negative
+    /// sets are held to their entry in [`NEGATIVE_SET_EXPECTATIONS`].
     fn drive_update_crypto(vectors: &[Vector], overrides: &[SkipOverride]) {
-        use crate::document::InitialDocument;
+        drive_update_crypto_with(vectors, overrides, NEGATIVE_SET_EXPECTATIONS);
+    }
 
-        let to_b64 = hash_b64;
-
+    /// The update-crypto driver over an explicit negative-set expectation
+    /// table.
+    ///
+    /// A positive set must pass every check of [`update_crypto_set`]. A
+    /// negative set must have an entry in `table`, and its outcome must be the
+    /// entry's: a `Passes` set must pass, and a `FailsAt` set must fail with a
+    /// message carrying every recorded substring. Every mismatching set is
+    /// collected, and the driver then fails naming each set and its scenario.
+    fn drive_update_crypto_with(
+        vectors: &[Vector],
+        overrides: &[SkipOverride],
+        table: &[NegativeSetExpectation],
+    ) {
         let mut observed = BTreeSet::new();
+        let mut mismatches: Vec<String> = Vec::new();
         for vector in vectors {
             if !vector.should_drive_with(AssertionKind::UpdateCrypto, overrides) {
                 continue;
             }
             let id = &vector.id;
+            if vector.is_negative() {
+                let Some(entry) = negative_set_expectation(table, vector) else {
+                    panic!(
+                        "{id}: a negative set driven by update-crypto \
+                         needs a negative-set expectation entry (scenario {:?})",
+                        vector.scenario_id
+                    )
+                };
+                let scenario = entry.scenario;
+                let note = if entry.note.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n  recorded: {}", entry.note)
+                };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    update_crypto_set(vector)
+                }))
+                .map_err(|payload| {
+                    payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                });
+                let mismatch = match (entry.update_crypto, outcome) {
+                    (UpdateCryptoExpectation::Passes, Ok(())) => None,
+                    (UpdateCryptoExpectation::Passes, Err(msg)) => Some(format!(
+                        "{id} ({scenario}): update-crypto must pass for this negative set, but \
+                         failed: {msg}{note}"
+                    )),
+                    (UpdateCryptoExpectation::FailsAt(subs), Ok(())) => Some(format!(
+                        "{id} ({scenario}): update-crypto must fail with {subs:?} for this \
+                         negative set, but passed{note}"
+                    )),
+                    (UpdateCryptoExpectation::FailsAt(subs), Err(msg)) => {
+                        (!subs.iter().all(|sub| msg.contains(sub))).then(|| {
+                            format!(
+                                "{id} ({scenario}): update-crypto must fail with {subs:?}, but \
+                                 failed with: {msg}{note}"
+                            )
+                        })
+                    }
+                };
+                mismatches.extend(mismatch);
+            } else {
+                update_crypto_set(vector);
+            }
+            observed.insert(RowKey::set(id.clone()));
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} negative set(s) differ from their expectation entry:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+        reconcile_driven_with(AssertionKind::UpdateCrypto, vectors, &observed, overrides);
+    }
 
-            let mut previous_target_hash: Option<String> = None;
-            let mut carried: Option<InitialDocument> = None;
+    /// Check a step's own `signedUpdate` proof under the key its
+    /// `sourceDocument` names. `None` for a step over a deactivated source,
+    /// whose proof [`check_update_over_deactivated_source`] already checks.
+    fn vendor_proof(vector: &Vector, step: &str) -> Option<Result<(), String>> {
+        use crate::cryptosuite::CryptoSuite;
+        use crate::zcap::proof::ProofPurpose;
 
-            for (step_index, step) in vector.update_layout.step_prefixes().iter().enumerate() {
-                let input = vector.fixture(&format!("{step}/input.json"));
+        let input = vector.fixture(&format!("{step}/input.json"));
+        if input["sourceDocument"]["deactivated"] == serde_json::Value::Bool(true) {
+            return None;
+        }
+        let output = vector.fixture(&format!("{step}/output.json"));
+        let check = || -> Result<(), String> {
+            let vendor = Update::from_json_value(output["signedUpdate"].clone())
+                .map_err(|e| format!("signedUpdate does not parse as an update: {e}"))?;
+            let source_doc = Document::from_json_string(&input["sourceDocument"].to_string())
+                .map_err(|e| format!("sourceDocument does not parse: {e}"))?;
+            let key = source_doc
+                .fields
+                .invoking_public_key(&vendor.proof.inner.verification_method)
+                .map_err(|e| format!("no invoking key for the proof's verificationMethod: {e}"))?;
+            CryptoSuite
+                .data_integrity_verify_proof(key, &vendor, &ProofPurpose::CapabilityInvocation)
+                .map_err(|e| format!("proof does not verify: {e}"))
+        };
+        Some(check())
+    }
 
-                // (a) Version linkage: step NN is update number NN, and it
-                // targets the next version.
-                check_step_versions(
-                    &input,
-                    &vector.fixture(&format!("{step}/output.json")),
-                    step_index,
-                    &format!("{id} {step}"),
-                );
+    /// The update-crypto checks over one set, panicking on the first that
+    /// fails:
+    ///
+    /// - every step's own `signedUpdate` proof verifies under the key its
+    ///   `sourceDocument` names ([`vendor_proof`]), before anything else, so a
+    ///   set that fails a later check still has each signature pinned;
+    /// - (a) version linkage: step NN is update number NN and targets the
+    ///   next version;
+    /// - (b) hash linkage and (c) document linkage to the previous step;
+    /// - (f) the proof's cryptosuite;
+    /// - (d) the re-derived hashes equal the stated ones, and (e) the
+    ///   re-derived proof verifies when the update is applied.
+    ///
+    /// A step over a deactivated `sourceDocument` is checked by
+    /// [`check_update_over_deactivated_source`] instead of being re-derived;
+    /// the step linkage checks apply to it like to any other step.
+    fn update_crypto_set(vector: &Vector) {
+        use crate::document::InitialDocument;
 
-                let (output, update) = if input["sourceDocument"]["deactivated"]
-                    == serde_json::Value::Bool(true)
-                {
+        let to_b64 = hash_b64;
+        let id = &vector.id;
+
+        for step in vector.update_layout.step_prefixes() {
+            if let Some(Err(e)) = vendor_proof(vector, &step) {
+                panic!(
+                    "{id} {step}: \
+                     the vendor signedUpdate proof must verify under the key its sourceDocument names: {e}"
+                )
+            }
+        }
+
+        let mut previous_target_hash: Option<String> = None;
+        let mut carried: Option<InitialDocument> = None;
+
+        for (step_index, step) in vector.update_layout.step_prefixes().iter().enumerate() {
+            let input = vector.fixture(&format!("{step}/input.json"));
+
+            // (a) Version linkage: step NN is update number NN, and it
+            // targets the next version.
+            check_step_versions(
+                &input,
+                &vector.fixture(&format!("{step}/output.json")),
+                step_index,
+                &format!("{id} {step}"),
+            );
+
+            let (output, update) =
+                if input["sourceDocument"]["deactivated"] == serde_json::Value::Bool(true) {
                     (check_update_over_deactivated_source(vector, step), None)
                 } else {
                     let StepFixtures { output, update, .. } = signed_update_for_step(vector, step);
                     (output, Some(update))
                 };
 
-                let stated_source_hash = field_str(&output, "signedUpdate.sourceHash", id);
-                let stated_target_hash = field_str(&output, "signedUpdate.targetHash", id);
+            let stated_source_hash = field_str(&output, "signedUpdate.sourceHash", id);
+            let stated_target_hash = field_str(&output, "signedUpdate.targetHash", id);
 
-                // (b) Hash linkage: this step continues the previous one.
-                if let Some(prev) = &previous_target_hash {
-                    assert_eq!(
-                        stated_source_hash, prev,
-                        "{id}: {step} sourceHash must equal the previous step's targetHash"
-                    );
-                }
-
-                // (c) Document linkage: the document the previous step produced
-                // IS this step's stated source. Compared as `Value`s so the diff
-                // is on content, not key ordering.
-                if let Some(carried_doc) = &carried {
-                    let carried_json: serde_json::Value = carried_doc.as_ref().clone();
-                    assert_eq!(
-                        carried_json, input["sourceDocument"],
-                        "{id}: {step} sourceDocument must equal the document produced \
-                         by the previous step"
-                    );
-                }
-
-                // (f) Structural proof shape.
+            // (b) Hash linkage: this step continues the previous one.
+            if let Some(prev) = &previous_target_hash {
                 assert_eq!(
-                    field_str(&output, "signedUpdate.proof.cryptosuite", id),
-                    "bip340-jcs-2025",
-                    "{id}: {step} vector proof cryptosuite"
+                    stated_source_hash, prev,
+                    "{id}: {step} sourceHash must equal the previous step's targetHash"
                 );
-
-                // A step over a deactivated source was checked on its own terms
-                // and is never applied, so nothing carries past it.
-                let Some(update) = update else {
-                    previous_target_hash = Some(stated_target_hash.to_string());
-                    carried = None;
-                    continue;
-                };
-
-                // (d) Content-bound hashes must equal the vector's
-                // signedUpdate. The target version is not compared here: the
-                // update was built from it, and (a) ties it to the chain.
-                assert_eq!(
-                    to_b64(&update.source_hash),
-                    stated_source_hash,
-                    "{id}: {step} sourceHash"
-                );
-                assert_eq!(
-                    to_b64(&update.target_hash),
-                    stated_target_hash,
-                    "{id}: {step} targetHash"
-                );
-
-                // (e) Proof must VERIFY (not byte-compare proofValue): apply the
-                // produced update back to the source initial document.
-                // apply_update runs full BIP340 proof verification + target-hash
-                // check.
-                let mut initial =
-                    InitialDocument::from_json_string(&input["sourceDocument"].to_string())
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "{id}: {step} sourceDocument must parse as an initial \
-                                 document: {e}"
-                            )
-                        });
-                initial
-                    .apply_update(&update, &AnnouncingBlock::fixed())
-                    .unwrap_or_else(|e| panic!("{id}: {step} produced proof must verify: {e}"));
-
-                // (g) Carry forward into the next step.
-                previous_target_hash = Some(stated_target_hash.to_string());
-                carried = Some(initial);
             }
 
-            observed.insert(RowKey::set(id.clone()));
+            // (c) Document linkage: the document the previous step produced
+            // IS this step's stated source. Compared as `Value`s so the diff
+            // is on content, not key ordering.
+            if let Some(carried_doc) = &carried {
+                let carried_json: serde_json::Value = carried_doc.as_ref().clone();
+                assert_eq!(
+                    carried_json, input["sourceDocument"],
+                    "{id}: {step} sourceDocument must equal the document produced \
+                     by the previous step"
+                );
+            }
+
+            // (f) Structural proof shape.
+            assert_eq!(
+                field_str(&output, "signedUpdate.proof.cryptosuite", id),
+                "bip340-jcs-2025",
+                "{id}: {step} vector proof cryptosuite"
+            );
+
+            // A step over a deactivated source was checked on its own terms
+            // and is never applied, so nothing carries past it.
+            let Some(update) = update else {
+                previous_target_hash = Some(stated_target_hash.to_string());
+                carried = None;
+                continue;
+            };
+
+            // (d) Content-bound hashes must equal the vector's
+            // signedUpdate. The target version is not compared here: the
+            // update was built from it, and (a) ties it to the chain.
+            assert_eq!(
+                to_b64(&update.source_hash),
+                stated_source_hash,
+                "{id}: {step} sourceHash"
+            );
+            assert_eq!(
+                to_b64(&update.target_hash),
+                stated_target_hash,
+                "{id}: {step} targetHash"
+            );
+
+            // (e) Proof must VERIFY (not byte-compare proofValue): apply the
+            // produced update back to the source initial document.
+            // apply_update runs full BIP340 proof verification + target-hash
+            // check.
+            let mut initial =
+                InitialDocument::from_json_string(&input["sourceDocument"].to_string())
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{id}: {step} sourceDocument must parse as an initial \
+                             document: {e}"
+                        )
+                    });
+            initial
+                .apply_update(&update, &AnnouncingBlock::fixed())
+                .unwrap_or_else(|e| panic!("{id}: {step} produced proof must verify: {e}"));
+
+            // (g) Carry forward into the next step.
+            previous_target_hash = Some(stated_target_hash.to_string());
+            carried = Some(initial);
         }
-        reconcile_driven_with(AssertionKind::UpdateCrypto, vectors, &observed, overrides);
     }
 
     /// END-STATE driver: for every update-bearing vector, apply EVERY update

@@ -2450,10 +2450,12 @@ pub(crate) enum SkipReason {
     /// code. Both are recorded when both apply.
     UnsupportedBeaconType,
     /// The set's main `resolve/output.json` carries
-    /// `didResolutionMetadata.error`. Applies to UpdateCrypto and EndState: the
-    /// set is built to fail resolution, so its Resolve row asserts the error
-    /// code and there is no expected end state to reproduce. Derivation and
-    /// GenesisKey stay driven, because `create/` still holds a valid DID.
+    /// `didResolutionMetadata.error`. Applies to EndState only: the set is
+    /// built to fail resolution, so there is no end state to reproduce; its
+    /// update steps are still driven against the negative-set expectation
+    /// table ([`NEGATIVE_SET_EXPECTATIONS`]), and its Resolve row asserts the
+    /// error code. Derivation and GenesisKey stay driven, because `create/`
+    /// still holds a valid DID.
     ExpectedError,
     /// A one-off no derived rule expresses; the payload is the stated reason.
     Override(&'static str),
@@ -2468,7 +2470,7 @@ impl fmt::Display for SkipReason {
                 "resolver cannot query this beacon type (CAS/SMT beacon requests unimplemented)",
             ),
             Self::ExpectedError => f.write_str(
-                "the set's expected result is an error; its Resolve row asserts the code",
+                "the set's expected result is an error; there is no end state to reproduce",
             ),
             Self::Override(reason) => f.write_str(reason),
         }
@@ -2653,7 +2655,7 @@ pub(crate) const DRIVEN_FLOOR: &[(AssertionKind, usize)] = &[
     (AssertionKind::Derivation, 236),
     (AssertionKind::GenesisKey, 236),
     (AssertionKind::Resolve, 164),
-    (AssertionKind::UpdateCrypto, 108),
+    (AssertionKind::UpdateCrypto, 200),
     (AssertionKind::EndState, 108),
     (AssertionKind::ResolveOption, 53),
 ];
@@ -2836,11 +2838,13 @@ impl Vector {
     ///   rules of [`derived_resolve_skip_reasons`]. A
     ///   resolve case inherits exactly its set's reasons: a case of a
     ///   CAS-delivered set is as undeliverable as the main pair.
-    /// - `UpdateCrypto` and `EndState`: `ExpectedError` when the set's main
-    ///   resolve pair expects an error. The delivery reasons say nothing about
-    ///   whether a patch sequence reproduces a document, so a CAS-delivered
-    ///   set still drives both.
-    /// - `Derivation` and `GenesisKey`: none.
+    /// - `EndState`: `ExpectedError` when the set's main resolve pair expects
+    ///   an error. The delivery reasons say nothing about whether a patch
+    ///   sequence reproduces a document, so a CAS-delivered set still drives
+    ///   it.
+    /// - `Derivation`, `GenesisKey` and `UpdateCrypto`: none. A negative
+    ///   set's update steps are driven, and held to its entry in
+    ///   [`NEGATIVE_SET_EXPECTATIONS`].
     ///
     /// An override applies when it names this set, this kind and this case.
     pub(crate) fn row_skip_reasons(
@@ -2857,12 +2861,13 @@ impl Vector {
                     &self.genesis_service_types,
                 ));
             }
-            AssertionKind::UpdateCrypto | AssertionKind::EndState => {
+            AssertionKind::EndState => {
                 if self.is_negative() {
                     reasons.insert(SkipReason::ExpectedError);
                 }
             }
-            AssertionKind::Derivation | AssertionKind::GenesisKey => {}
+            AssertionKind::Derivation | AssertionKind::GenesisKey | AssertionKind::UpdateCrypto => {
+            }
         }
 
         for entry in overrides {
@@ -3065,8 +3070,8 @@ pub(crate) fn stale_overrides(overrides: &[SkipOverride], vectors: &[Vector]) ->
 /// rather than a reconciliation failure.
 ///
 /// Scope: derived reasons now reach Resolve, ResolveOption (the delivery,
-/// anchoring, beacon and stale-context rules), and UpdateCrypto and EndState
-/// (`ExpectedError` on a negative set). `Derivation` and `GenesisKey` carry no
+/// anchoring, beacon and stale-context rules), and EndState (`ExpectedError`
+/// on a negative set). `Derivation`, `GenesisKey` and `UpdateCrypto` carry no
 /// derived reason, so the loop `continue`s for those rows unconditionally.
 pub(crate) fn redundant_overrides(vectors: &[Vector], overrides: &[SkipOverride]) -> Vec<String> {
     let mut rows = Vec::new();
@@ -5645,7 +5650,7 @@ fn unsupported_beacon_type_does_not_follow_from_a_delivery_declaration() {
 /// `other.json.scenarioId` (`09a` for `09a-x1-cas-update-announcement`). Every
 /// network ships the same scenarios under different ids, so the corpus pins
 /// below name scenarios and check them on every network.
-fn scenario_number(v: &Vector) -> &str {
+pub(crate) fn scenario_number(v: &Vector) -> &str {
     let id = v
         .scenario_id
         .as_deref()
@@ -5666,6 +5671,215 @@ fn on_every_network(scenarios: &[&str]) -> BTreeSet<(String, String)> {
                 .map(move |s| (n.to_string(), s.to_string()))
         })
         .collect()
+}
+
+/// What the update-crypto driver must observe on a negative set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCryptoExpectation {
+    /// Every step's own proof verifies, and every step re-derives, links and
+    /// verifies: the set's rejection comes from somewhere other than its
+    /// update's hashes or signature.
+    Passes,
+    /// The driver fails, and its message contains every one of these: the
+    /// check that failed and the reason it gives.
+    FailsAt(&'static [&'static str]),
+}
+
+/// A negative scenario's expectations, the same on every network.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NegativeSetExpectation {
+    /// `other.json.scenarioId` prefix, e.g. `n24`.
+    pub(crate) scenario: &'static str,
+    pub(crate) update_crypto: UpdateCryptoExpectation,
+    /// Why the outcome is what it is when that is not obvious from the
+    /// scenario (a vector that differs from what its scenario describes, a
+    /// fault caught by an earlier check); empty otherwise.
+    pub(crate) note: &'static str,
+}
+
+/// Every negative scenario of the checked-out suite that ships update steps.
+/// Synthetic corpora have no entry.
+///
+/// Each entry is what the update-crypto driver observes on that scenario's
+/// sets, on every network. An upstream change to a negative scenario is taken
+/// in by re-observing the sets and editing the entry, never by editing the
+/// vector.
+pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
+    NegativeSetExpectation {
+        scenario: "n05",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the update is sound; the set is rejected because the update data is missing \
+               at resolution",
+    },
+    NegativeSetExpectation {
+        scenario: "n10",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "Proof context does not match update context",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n11",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "Proof context does not match update context",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n12",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "Proof context does not match update context",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n13",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the wrong capabilityAction is signed data under a valid proof; only the \
+               resolver checks its value",
+    },
+    NegativeSetExpectation {
+        scenario: "n14",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the wrong capability is signed data under a valid proof; only the resolver \
+               checks its value",
+    },
+    NegativeSetExpectation {
+        scenario: "n15",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "Proof purpose was expected to be capabilityInvocation",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n16",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "verificationMethod id not present in the capabilityInvocation set",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n17",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "verificationMethod id not present in the capabilityInvocation set",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n18",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "the vendor signedUpdate proof must verify",
+            "Verification failed",
+        ]),
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n19",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&["update sourceHash"]),
+        note: "the re-derived sourceHash differs from the stated one; the check names only \
+               the field",
+    },
+    NegativeSetExpectation {
+        scenario: "n20",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&["update targetHash"]),
+        note: "the re-derived targetHash differs from the stated one; the check names only \
+               the field",
+    },
+    NegativeSetExpectation {
+        scenario: "n21",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "signedUpdate.targetVersionId must be sourceVersionId + 1",
+        ]),
+        note: "the update skips a version; the version-linkage check refuses it before any \
+               hash is derived",
+    },
+    NegativeSetExpectation {
+        scenario: "n22",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "construct_signed_update must succeed",
+            "Unable to apply JSON Patch",
+            "'/service/9'",
+        ]),
+        note: "the patch replaces a service entry that does not exist, so the update cannot \
+               be built",
+    },
+    NegativeSetExpectation {
+        scenario: "n23",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "construct_signed_update must succeed",
+            "update may not change the DID document id",
+        ]),
+        note: "the patch changes the document id, so the update cannot be built",
+    },
+    NegativeSetExpectation {
+        scenario: "n24",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&[
+            "construct_signed_update must succeed",
+            "patched document is non-conformant",
+            "not Multikey",
+        ]),
+        note: "the patch leaves a non-conformant verification method, so the update cannot be \
+               built",
+    },
+    NegativeSetExpectation {
+        scenario: "n25",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the fault is the proof's created time against the announcing block, which only \
+               the resolver sees",
+    },
+    NegativeSetExpectation {
+        scenario: "n26",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the fault is the proof's expires time against the announcing block, which only \
+               the resolver sees",
+    },
+    NegativeSetExpectation {
+        scenario: "n27",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "expires is before created, but on every network it is also before the \
+               announcing block's mediantime, so the vector never isolates the \
+               created-versus-expires fault; the fault is only the resolver's to see \
+               (raised upstream)",
+    },
+    NegativeSetExpectation {
+        scenario: "n28",
+        update_crypto: UpdateCryptoExpectation::FailsAt(&["must be update number 2 in the chain"]),
+        note: "the second update is a conflicting update for version 2; the version-linkage \
+               check refuses it, and both proofs verify",
+    },
+    NegativeSetExpectation {
+        scenario: "n29",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the fault is in the SMT proof, which the update itself does not carry",
+    },
+    NegativeSetExpectation {
+        scenario: "n30",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the fault is in the SMT proof, which the update itself does not carry",
+    },
+    NegativeSetExpectation {
+        scenario: "n31",
+        update_crypto: UpdateCryptoExpectation::Passes,
+        note: "the fault is in the SMT proof, which the update itself does not carry",
+    },
+];
+
+/// The table entry for a negative set's scenario, or `None` when the set has
+/// no scenario id or the table does not name its scenario. Completeness over
+/// the live corpus is the guard test's job, not this lookup's.
+pub(crate) fn negative_set_expectation<'t>(
+    table: &'t [NegativeSetExpectation],
+    vector: &Vector,
+) -> Option<&'t NegativeSetExpectation> {
+    let id = vector.scenario_id.as_deref()?;
+    let scenario = id.split('-').next().unwrap_or(id);
+    table.iter().find(|entry| entry.scenario == scenario)
 }
 
 /// The scenarios whose genesis document declares a CAS or SMT beacon.
@@ -5783,6 +5997,79 @@ fn resolve_driven_set_is_every_set_outside_the_cas_and_smt_scenarios() {
         );
     }
     assert_eq!(observed.len(), 164, "the floor and this set must agree");
+}
+
+/// The negative-set expectation table names exactly the negative scenarios of
+/// the checked-out suite that ship update steps, each once, and every such set
+/// on every network has an entry. An upstream negative scenario appearing,
+/// losing its update steps or disappearing fails here by name.
+#[test]
+fn negative_set_table_matches_the_corpus() {
+    if !test_suite_checked_out() {
+        eprintln!(
+            "SKIP: test-suite submodule absent; \
+             run `git submodule update --init --recursive` to enable"
+        );
+        return;
+    }
+    let vectors = discover_in(&Corpus::test_suite());
+    assert!(!vectors.is_empty());
+
+    let derived: BTreeSet<(String, String)> = vectors
+        .iter()
+        .filter(|v| v.is_negative() && !v.update_layout.step_prefixes().is_empty())
+        .map(|v| (v.network_dir.clone(), scenario_number(v).to_string()))
+        .collect();
+    let scenarios: Vec<&str> = NEGATIVE_SET_EXPECTATIONS
+        .iter()
+        .map(|e| e.scenario)
+        .collect();
+    let declared = on_every_network(&scenarios);
+
+    let only_derived: Vec<&(String, String)> = derived.difference(&declared).collect();
+    let only_declared: Vec<&(String, String)> = declared.difference(&derived).collect();
+    assert!(
+        only_derived.is_empty() && only_declared.is_empty(),
+        "negative sets without a table entry: {only_derived:?}\n \
+         table entries with no negative set: {only_declared:?}"
+    );
+    assert_eq!(derived.len(), 92, "23 scenarios on each of four networks");
+    assert_eq!(
+        scenarios.iter().collect::<BTreeSet<_>>().len(),
+        scenarios.len(),
+        "each scenario has one entry: {scenarios:?}"
+    );
+}
+
+/// The lookup finds an entry by the scenario prefix of the set's scenario id,
+/// and gives `None` for a scenario the table does not name and for a set with
+/// no scenario id: the lookup never invents an expectation.
+#[test]
+fn negative_set_expectation_is_none_outside_the_table() {
+    const TABLE: &[NegativeSetExpectation] = &[
+        NegativeSetExpectation {
+            scenario: "n10",
+            update_crypto: UpdateCryptoExpectation::FailsAt(&["x"]),
+            note: "",
+        },
+        NegativeSetExpectation {
+            scenario: "n24",
+            update_crypto: UpdateCryptoExpectation::Passes,
+            note: "",
+        },
+    ];
+    let mut v = negative_vector("regtest/k1/qgppexmy", "k1");
+
+    v.scenario_id = Some("n99-x".into());
+    assert!(negative_set_expectation(TABLE, &v).is_none());
+
+    v.scenario_id = Some("n24-x".into());
+    let entry = negative_set_expectation(TABLE, &v).expect("n24 has an entry");
+    assert_eq!(entry.scenario, "n24");
+    assert_eq!(entry.update_crypto, UpdateCryptoExpectation::Passes);
+
+    v.scenario_id = None;
+    assert!(negative_set_expectation(TABLE, &v).is_none());
 }
 
 /// `Override` stays LAST in the derived ordering: `PartialOrd`/`Ord` are derived
@@ -6038,23 +6325,23 @@ fn resolve_option_override_names_one_case() {
     );
 }
 
-/// On a negative set, the update-crypto and end-state rows skip with
-/// `ExpectedError`; the Resolve row carries the assertion, and derivation and
-/// genesis-key stay driven because `create/` still holds a valid DID.
+/// On a negative set, only the end-state row skips with `ExpectedError`: there
+/// is no end state to reproduce. The update-crypto row is driven against the
+/// negative-set expectation table, the Resolve row carries the error code, and
+/// derivation and genesis-key stay driven because `create/` still holds a
+/// valid DID.
 #[test]
-fn expected_error_skips_the_update_rows_of_a_negative_set() {
+fn expected_error_skips_only_the_end_state_row_of_a_negative_set() {
     let v = negative_vector("regtest/k1/qgppexmy", "k1");
     assert!(v.is_negative());
 
-    for kind in [AssertionKind::UpdateCrypto, AssertionKind::EndState] {
-        assert_eq!(
-            v.skip_reasons_with(kind, &[]),
-            BTreeSet::from([SkipReason::ExpectedError]),
-            "{kind}"
-        );
-        assert!(!v.should_drive_with(kind, &[]), "{kind}");
-    }
+    assert_eq!(
+        v.skip_reasons_with(AssertionKind::EndState, &[]),
+        BTreeSet::from([SkipReason::ExpectedError]),
+    );
+    assert!(!v.should_drive_with(AssertionKind::EndState, &[]));
     for kind in [
+        AssertionKind::UpdateCrypto,
         AssertionKind::Derivation,
         AssertionKind::GenesisKey,
         AssertionKind::Resolve,
