@@ -7193,6 +7193,7 @@ mod tests {
     /// pump never reads it — `read_chain_fixture` is what re-derives it.
     fn capture_fixture(addresses: Vec<(&str, Vec<Transaction>)>) -> ChainFixture {
         ChainFixture {
+            vector: "mutinynet/k1/synthetic".to_string(),
             endpoint: "http://localhost:3000".to_string(),
             network: "mutinynet".to_string(),
             tip_height: 900,

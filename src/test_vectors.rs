@@ -272,6 +272,9 @@ pub(crate) const SYNTHETIC_CHAIN_FIXTURES_AT_EARLIER_TIP: &[(&str, &str, &str, u
 /// were read against, and the signals found in them.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct ChainFixture {
+    /// The set the capture was taken for, e.g. `regtest/k1/qgph7nre` or
+    /// `minted/clean-rotating-beacons`; names the fixture in reader panics.
+    pub(crate) vector: String,
     /// The Esplora endpoint the snapshot was read from. Recorded, not used as a
     /// routing key: replay keys on the ADDRESS, because the resolver builds its
     /// request URIs from its own `rpc_host`.
@@ -644,20 +647,19 @@ impl ChainFixture {
         use crate::canonical_hash::CanonicalHash as _;
 
         let updates = self.sidecar.as_ref()?.get("updates")?.as_array()?;
-        let last = updates.iter().max_by_key(|update| {
-            update
-                .get("targetVersionId")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        })?;
+        let (_, last) = updates
+            .iter()
+            .enumerate()
+            .max_by_key(|(index, update)| self.sidecar_target_version(*index, update))?;
         let parsed = crate::Update::from_json_value(last.clone()).ok()?;
         Some(hex::encode(parsed.hash().as_bytes()))
     }
 
     /// `(announcement hash, targetVersionId)` for every sidecar update this
     /// fixture carries, hashed the same way as [`Self::applied_update_hash`].
-    /// Empty when the fixture has no sidecar of its own; an update the core
-    /// cannot parse is left out, because no signal can announce it.
+    /// Empty when the fixture has no sidecar of its own. Every update's
+    /// `targetVersionId` is read strictly first; an update the core cannot
+    /// parse is then left out, because no signal can announce it.
     fn sidecar_update_versions(&self) -> Vec<(String, u64)> {
         use crate::canonical_hash::CanonicalHash as _;
 
@@ -671,12 +673,25 @@ impl ChainFixture {
         };
         updates
             .iter()
-            .filter_map(|update| {
-                let version = update.get("targetVersionId")?.as_u64()?;
+            .enumerate()
+            .filter_map(|(index, update)| {
+                let version = self.sidecar_target_version(index, update);
                 let parsed = crate::Update::from_json_value(update.clone()).ok()?;
                 Some((hex::encode(parsed.hash().as_bytes()), version))
             })
             .collect()
+    }
+
+    /// `sidecar.updates[index].targetVersionId`, read strictly: anything but
+    /// a non-negative JSON integer, including a missing member, panics by
+    /// fixture and index.
+    fn sidecar_target_version(&self, index: usize, update: &serde_json::Value) -> u64 {
+        update_version_number(
+            update
+                .get("targetVersionId")
+                .unwrap_or(&serde_json::Value::Null),
+            &format!("{} sidecar.updates[{index}].targetVersionId", self.vector),
+        )
     }
 
     /// The minimum `block_time` across the signals — the anchor for a
@@ -4806,6 +4821,63 @@ fn chain_fixture_envelope(
         "addresses": addresses,
     }))
     .expect("the synthetic envelope matches the captured fixture shape")
+}
+
+/// A string `targetVersionId` on a fixture's own sidecar fails by fixture and
+/// index when picking the applied update, instead of reading as version 0.
+#[test]
+#[should_panic(
+    expected = "regtest/k1/synthetic sidecar.updates[0].targetVersionId: must be a JSON integer, found a string"
+)]
+fn applied_update_hash_rejects_a_string_target_version_id() {
+    let mut fixture = chain_fixture_envelope(serde_json::json!([]), serde_json::json!({}));
+    fixture.sidecar = Some(serde_json::json!({"updates": [{"targetVersionId": "2"}]}));
+    let _ = fixture.applied_update_hash();
+}
+
+/// The same string `targetVersionId` fails the version listing too, instead of
+/// dropping the update from it.
+#[test]
+#[should_panic(
+    expected = "regtest/k1/synthetic sidecar.updates[0].targetVersionId: must be a JSON integer, found a string"
+)]
+fn sidecar_update_versions_rejects_a_string_target_version_id() {
+    let mut fixture = chain_fixture_envelope(serde_json::json!([]), serde_json::json!({}));
+    fixture.sidecar = Some(serde_json::json!({"updates": [{"targetVersionId": "2"}]}));
+    let _ = fixture.sidecar_update_versions();
+}
+
+/// A float, a negative number and a missing member each fail both sidecar
+/// readers, naming the fixture and the field.
+#[test]
+fn sidecar_target_version_rejects_every_non_integer_form() {
+    type Reader = fn(&ChainFixture);
+    let updates = [
+        serde_json::json!({"targetVersionId": 2.5}),
+        serde_json::json!({"targetVersionId": -1}),
+        serde_json::json!({"patch": []}),
+    ];
+    for update in updates {
+        let mut fixture = chain_fixture_envelope(serde_json::json!([]), serde_json::json!({}));
+        fixture.sidecar = Some(serde_json::json!({"updates": [update.clone()]}));
+        let readers: [(&str, Reader); 2] = [
+            ("applied_update_hash", |f| {
+                let _ = f.applied_update_hash();
+            }),
+            ("sidecar_update_versions", |f| {
+                let _ = f.sidecar_update_versions();
+            }),
+        ];
+        for (name, read) in readers {
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&fixture)))
+                .expect_err(&format!("{name} accepted {update}"));
+            let message = panic_message(payload);
+            assert!(
+                message.contains("regtest/k1/synthetic") && message.contains("targetVersionId"),
+                "{name} on {update}: {message}"
+            );
+        }
+    }
 }
 
 /// A vector id resolves under the crate's own `fixtures/chain/` tree, not the
