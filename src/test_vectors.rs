@@ -658,8 +658,11 @@ impl ChainFixture {
     /// other announcement. Without that, a lower announcement on a beacon added
     /// by a later update would be below the `current_block_height` the beacon is
     /// scanned at, Find Beacon Signals would not find it, and the resolver would
-    /// measure from a higher block. The capture-time gate enforces the same rule
-    /// and picks the same signal.
+    /// measure from a higher block. The capture gate (`validate_signals` in the
+    /// chain-capture crate) does not check this rule: it matches the chain
+    /// against the set's `signals.json` exactly and reads nothing from the
+    /// sidecar. The rule is enforced only here, on fixture read, by
+    /// [`assert_version_and_height_agree`].
     ///
     /// A fixture that carries no sidecar of its own (every vendor row: the
     /// sidecar lives in the test-suite tree) falls back to the highest block.
@@ -876,12 +879,17 @@ fn assert_signals_consistent(fixture: &ChainFixture, vector_id: &str) {
 /// Require the fixture's signals to be ordered the same way by version and by
 /// height.
 ///
-/// Two rules, the same two the capture-time gate enforces:
+/// Two rules, enforced here when a fixture is read:
 ///
 /// - every announcement of an update sits at or above every announcement of an
 ///   update with a lower `targetVersionId`; and
 /// - every announcement of the last update sits in one block, at or above every
 ///   other announcement.
+///
+/// The capture gate (`validate_signals` in the chain-capture crate) does not
+/// apply them: it matches the chain against `signals.json` exactly and reads
+/// nothing from the sidecar, so a set breaking either rule is captured and
+/// then fails here.
 ///
 /// Find Beacon Signals does not find a transaction below the
 /// `current_block_height` in force when its beacon is scanned — the block of
