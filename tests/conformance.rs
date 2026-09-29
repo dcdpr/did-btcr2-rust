@@ -11,16 +11,14 @@
 //!    exactly as many rows as the snapshot's MUST/SHALL universe — catching a
 //!    typo'd join key that `index_guard` might otherwise accept as a "different"
 //!    row (an off-by-one with no obvious miss).
-//! 3. [`every_covered_row_names_a_real_test`] asserts every `Covered(test)` row
-//!    names a test enumerated in the hand-maintained `KNOWN_TESTS` allow-list.
-//!    NOTE: this proves only that the referenced *string* appears in
-//!    `KNOWN_TESTS` — NOT that a `#[test]` of that name actually exists in the
-//!    suite. A pure-string integration test cannot introspect the libtest
-//!    registry, so a test renamed AND simultaneously dropped from `KNOWN_TESTS`
-//!    slips past this guard (caught only by the green suite breaking elsewhere).
-//!    This is an accepted, documented residual — see the `KNOWN_TESTS` doc and the
-//!    "Self-Check Scope (residual)" section emitted into `CONFORMANCE.md`. A
-//!    stronger fix would generate `KNOWN_TESTS` from `cargo test -- --list`.
+//! 3. [`every_covered_row_names_a_real_test`] resolves every test a `Covered`
+//!    row cites against the crate's own `src/` and FAILS, naming the row and
+//!    the citation, unless a `#[test] fn` of that name sits at that module
+//!    path and is not `#[ignore]`d. The supported citation form is a library
+//!    unit test in an inline module, `<module>::<inline mod>…::<fn>` (see
+//!    [`check_citation`]); any other form (an integration test, a doctest, a
+//!    test in another crate, an out-of-line module) fails loud rather than
+//!    passing.
 //! 4. [`conformance_md_matches_golden`] renders the matrix + gap list to a
 //!    committed `CONFORMANCE.md` golden and asserts they match (BLESS to refresh).
 //! 5. [`parent_index_method_section_matches_snapshot`] cross-checks the vendored
@@ -33,12 +31,15 @@
 //!
 //! Hermeticity: the snapshot is VENDORED at
 //! `specs-snapshot/method-spec-index.md` inside the crate and embedded with
-//! `include_str!`, so guards 1–4 need no I/O and no parent repository. Guard 5
+//! `include_str!`, so guards 1, 2 and 4 need no I/O and no parent repository.
+//! Guard 3 reads the crate's own `src/` at run time, which is present wherever
+//! these tests run, a standalone checkout and the packaged crate included. Guard 5
 //! is the only reader of the parent's `../specs/INDEX.md`, and it does so with a
 //! runtime `std::fs` probe that skips (loudly) when the path does not exist —
 //! `cargo package` and a standalone checkout of this crate stay green.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 /// The vendored method-spec INDEX section (the `## did:btcr2 method spec` block
 /// of the parent `specs/INDEX.md`), embedded at compile time so the test is
@@ -343,9 +344,10 @@ fn cross_check_parent(parent_path: &str, snapshot_path: &str) -> ProbeOutcome {
 /// milestone.
 #[derive(Clone, Copy)]
 enum Status {
-    /// Exercised by a real, currently-asserting `#[test]` (path enumerated in
-    /// [`KNOWN_TESTS`]).
-    Covered(&'static str),
+    /// Exercised by one or more real, currently-asserting `#[test]`s, each
+    /// checked against the crate source by
+    /// [`every_covered_row_names_a_real_test`].
+    Covered(&'static [&'static str]),
     /// Applies only to CAS / SMT / aggregation beacons, deferred to a future
     /// milestone. Not a gap for the Singleton scope.
     DeferredAggregation,
@@ -386,76 +388,76 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "any errors encountered during this algorithm must raise an [`invalid_did`] error",
-        status: Status::Covered("identifier::tests::test_invalid_prefix"),
+        status: Status::Covered(&["identifier::tests::test_invalid_prefix"]),
     },
     ConformanceRow {
         id: "algorithms.md:key-or-hash-genesis-bytes-variant",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "`key_or_hash` must be one of the supported [genesis bytes] variants defined in t",
-        status: Status::Covered("identifier::tests::test_id_type_hrps"),
+        status: Status::Covered(&["identifier::tests::test_id_type_hrps"]),
     },
     ConformanceRow {
         id: "algorithms.md:version-number-must-be-1",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "the `version_number` value must be `1`, declaring the encoding follows this spec",
-        status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_key_based"]),
     },
     ConformanceRow {
         id: "algorithms.md:reserved-network-values-not-encoded",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST NOT",
         prefix: "`reserved` network values must not be encoded until this specification assigns t",
-        status: Status::Covered(
+        status: Status::Covered(&[
             "identifier::tests::did_components_new_rejects_out_of_range_custom_network",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "algorithms.md:encode-method-specific-id-lowercase",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "encode the unencoded data bytes with bech32m [^3] to produce the `method-specifi",
-        status: Status::Covered(
+        status: Status::Covered(&[
             "identifier::pinned_mutinynet_vector_tests::encode_reproduces_spec_string",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "algorithms.md:method-specific-id-bech32m-conformant",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "[^3]: the `method-specific-id` must be conformant to bech32m , which extends bec",
-        status: Status::Covered("identifier::tests::test_from_str_rejects_malformed_bech32"),
+        status: Status::Covered(&["identifier::tests::test_from_str_rejects_malformed_bech32"]),
     },
     ConformanceRow {
         id: "algorithms.md:decode-invalid-did-on-error",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "any errors encountered during this algorithm must raise an [`invalid_did`] error",
-        status: Status::Covered("identifier::tests::test_invalid_genesis_length"),
+        status: Status::Covered(&["identifier::tests::test_invalid_genesis_length"]),
     },
     ConformanceRow {
         id: "algorithms.md:identifier-processed-per-resolution",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "a **did:btcr2** identifier must be processed according to the did resolution alg",
-        status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_key_based"]),
     },
     ConformanceRow {
         id: "algorithms.md:decode-method-specific-id-lowercase",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "the `method-specific-id` must be lowercase. decode it as a bech32m encoded strin",
-        status: Status::Covered(
+        status: Status::Covered(&[
             "identifier::tests::parse_did_identifier_rejects_uppercase_method_specific_id",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "algorithms.md:btcr2-version-zero-version-number",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "* `btcr2_version` must be `0`. introduce `version_number` as `btcr2_version + 1`",
-        status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_key_based"]),
     },
     // The cited test maps every row of Table 1 (bitcoin=0 .. mutinynet=5 and
     // custom 12..=15) in both directions, and rejects reserved 6..=11 and
@@ -465,49 +467,49 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "the `network_name` value declares which bitcoin network anchors the identifier.",
-        status: Status::Covered("identifier::tests::test_network_conversion"),
+        status: Status::Covered(&["identifier::tests::test_network_conversion"]),
     },
     ConformanceRow {
         id: "algorithms.md:network-value-handled-per-table",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "* `network_value` must be handled according to its row in table 1: network value",
-        status: Status::Covered("identifier::tests::test_network_conversion"),
+        status: Status::Covered(&["identifier::tests::test_network_conversion"]),
     },
     ConformanceRow {
         id: "algorithms.md:reserved-network-value-rejected-on-decode",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "* a `reserved` value (`6`..`11`) must be rejected until this specification assig",
-        status: Status::Covered("identifier::tests::test_custom_network"),
+        status: Status::Covered(&["identifier::tests::test_custom_network"]),
     },
     ConformanceRow {
         id: "algorithms.md:hrp-k-or-x",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "* the `hrp` must be either `\"k\"` or `\"x\"`.",
-        status: Status::Covered("identifier::tests::test_id_type_hrps"),
+        status: Status::Covered(&["identifier::tests::test_id_type_hrps"]),
     },
     ConformanceRow {
         id: "algorithms.md:hrp-k-genesis-bytes-33-byte",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "if the `hrp` is `\"k\"` (key-based **btcr2:did** identifier), `key_or_hash` must b",
-        status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_key_based"]),
     },
     ConformanceRow {
         id: "algorithms.md:hrp-x-genesis-bytes",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "if the `hrp` is `\"x\"` ([genesis document]-based **btcr2:did** identifier), `key_",
-        status: Status::Covered("identifier::tests::test_encode_decode_external"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_external"]),
     },
     ConformanceRow {
         id: "algorithms.md:decoding-inverts-encoding",
         file: "did-btcr2/src/algorithms.md",
         keyword: "MUST",
         prefix: "decoding inverts encoding exactly: passing the `version_number`, `network_name`,",
-        status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_key_based"]),
     },
     ConformanceRow {
         id: "algorithms.md:smt-proof-fields-decoded-before-hashing",
@@ -554,21 +556,27 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/appendix/security-considerations.md",
         keyword: "MUST",
         prefix: "**did:btcr2** was designed to avoid [late publishing] such that, independent of",
-        status: Status::Covered("resolver::tests::unknown_signal_hash_raises_missing_update_data"),
+        status: Status::Covered(&[
+            "resolver::tests::unknown_signal_hash_raises_missing_update_data",
+        ]),
     },
     ConformanceRow {
         id: "security-considerations.md:invalidation-attacks",
         file: "did-btcr2/src/appendix/security-considerations.md",
         keyword: "MUST",
         prefix: "invalidation attacks are where adversaries are able to publish [beacon signals][",
-        status: Status::Covered("resolver::tests::unknown_signal_hash_raises_missing_update_data"),
+        status: Status::Covered(&[
+            "resolver::tests::unknown_signal_hash_raises_missing_update_data",
+        ]),
     },
     ConformanceRow {
         id: "security-considerations.md:updates-available-at-resolution",
         file: "did-btcr2/src/appendix/security-considerations.md",
         keyword: "MUST",
         prefix: "[btcr2 updates][btcr2 update] must be available to resolver at the time of resol",
-        status: Status::Covered("resolver::tests::unknown_signal_hash_raises_missing_update_data"),
+        status: Status::Covered(&[
+            "resolver::tests::unknown_signal_hash_raises_missing_update_data",
+        ]),
     },
     // ---- beacons/aggregate-beacons.md (aggregation, deferred) -------------
     ConformanceRow {
@@ -612,29 +620,32 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/beacons.md",
         keyword: "MUST",
         prefix: "the resolver must process each [beacon signal] that find beacon signals fin",
-        // The positive half: a signal Find Beacon Signals finds is processed.
-        // The negative half (a signal it does not find is not processed) is
-        // `resolver::tests::a_conflicting_announcement_below_the_current_height_is_not_found`.
-        // The same line's "the Beacon Type defines how Beacon Signals MUST be
-        // processed" is exercised by the Singleton path only; the CAS and SMT
-        // arms are DeferredAggregation elsewhere in this table.
-        status: Status::Covered(
+        // The first test is the positive half: a signal Find Beacon Signals
+        // finds is processed. The other two are the negative half: a
+        // transaction below the `current_block_height` in force when its beacon
+        // is scanned is not found, so it is not processed. The same line's
+        // "the Beacon Type defines how Beacon Signals MUST be processed" is
+        // exercised by the Singleton path only; the CAS and SMT arms are
+        // DeferredAggregation elsewhere in this table.
+        status: Status::Covered(&[
             "resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied",
-        ),
+            "resolver::tests::a_conflicting_announcement_below_the_current_height_is_not_found",
+            "resolver::tests::find_next_signals_skips_transactions_below_the_current_block_height",
+        ]),
     },
     ConformanceRow {
         id: "beacons.md:active-beacons-in-service",
         file: "did-btcr2/src/beacons.md",
         keyword: "MUST",
         prefix: "the current, active, [btcr2 beacons][btcr2 beacon] of a did document are specifi",
-        status: Status::Covered("document::tests::beacons_accessor"),
+        status: Status::Covered(&["document::tests::beacons_accessor"]),
     },
     ConformanceRow {
         id: "beacons.md:resolvers-support-beacon-types",
         file: "did-btcr2/src/beacons.md",
         keyword: "MUST",
         prefix: "all **did:btcr2** did resolvers must support the [beacon types][beacon type] def",
-        status: Status::Covered("beacon::tests::beacon_type_serde_round_trips_spec_strings"),
+        status: Status::Covered(&["beacon::tests::beacon_type_serde_round_trips_spec_strings"]),
     },
     // ---- conformance.md ----------------------------------------------------
     ConformanceRow {
@@ -673,98 +684,98 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "must be encoded as a string using `\"base64url\"` encoding without padding.",
-        status: Status::Covered("update::tests::unsigned_update_hashes_are_base64url_no_pad"),
+        status: Status::Covered(&["update::tests::unsigned_update_hashes_are_base64url_no_pad"]),
     },
     ConformanceRow {
         id: "data-structures.md:did-doc-required-properties",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "the following properties must be included:",
-        status: Status::Covered("document::tests::test_document_validation_missing_elements"),
+        status: Status::Covered(&["document::tests::test_document_validation_missing_elements"]),
     },
     ConformanceRow {
         id: "data-structures.md:relative-did-url-resolved-against-id",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "verification method references in this document may be relative did urls. did co",
-        status: Status::Covered("document::tests::apply_update_resolves_relative_did_url"),
+        status: Status::Covered(&["document::tests::apply_update_resolves_relative_did_url"]),
     },
     ConformanceRow {
         id: "data-structures.md:source-target-hash-json-document-hashing",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "sha-256 hashes (`targethash` and `sourcehash`) must be produced using the [json",
-        status: Status::Covered("document::tests::golden_signed_update_bytes"),
+        status: Status::Covered(&["document::tests::golden_signed_update_bytes"]),
     },
     ConformanceRow {
         id: "data-structures.md:update-context-pinned-array",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `@context`: a context array. it must contain exactly the following context url",
-        status: Status::Covered("document::tests::apply_update_rejects_unpinned_context"),
+        status: Status::Covered(&["document::tests::apply_update_rejects_unpinned_context"]),
     },
     ConformanceRow {
         id: "data-structures.md:patch-result-conformant-doc",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "result of applying the patch must be a conformant did document according to the",
-        status: Status::Covered("document::tests::construct_signed_update_round_trips"),
+        status: Status::Covered(&["document::tests::construct_signed_update_round_trips"]),
     },
     ConformanceRow {
         id: "data-structures.md:target-version-id-plus-one",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "document. the `targetversionid` must be one more than the integer form of the `v",
-        status: Status::Covered("resolver::tests::metadata_version_id_is_an_ascii_string"),
+        status: Status::Covered(&["resolver::tests::metadata_version_id_is_an_ascii_string"]),
     },
     ConformanceRow {
         id: "data-structures.md:source-hash-applied-to",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `sourcehash`: sha-256 hash of the did document that the patch must be applied",
-        status: Status::Covered("document::tests::construct_signed_update_round_trips"),
+        status: Status::Covered(&["document::tests::construct_signed_update_round_trips"]),
     },
     ConformanceRow {
         id: "data-structures.md:target-hash-result-of-patch",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `targethash`: sha-256 hash of the did document that results from applying the",
-        status: Status::Covered("document::tests::construct_signed_update_round_trips"),
+        status: Status::Covered(&["document::tests::construct_signed_update_round_trips"]),
     },
     ConformanceRow {
         id: "data-structures.md:data-integrity-config-properties",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "the following properties must be included in the data integrity config:",
-        status: Status::Covered("document::tests::data_integrity_config_shape"),
+        status: Status::Covered(&["document::tests::data_integrity_config_shape"]),
     },
     ConformanceRow {
         id: "data-structures.md:proof-context-equals-update-context",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `@context`: a context array. it must contain the same context urls, in the sam",
-        status: Status::Covered("document::tests::apply_update_rejects_proof_context_mismatch"),
+        status: Status::Covered(&["document::tests::apply_update_rejects_proof_context_mismatch"]),
     },
     ConformanceRow {
         id: "data-structures.md:capability-action-write",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "string must be set to `\"write\"`.",
-        status: Status::Covered("document::tests::data_integrity_config_shape"),
+        status: Status::Covered(&["document::tests::data_integrity_config_shape"]),
     },
     ConformanceRow {
         id: "data-structures.md:proof-purpose-capability-invocation",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "a [data integrity proof] with the `proofpurpose` set to `\"capabilityinvocation\"`",
-        status: Status::Covered("document::tests::construct_signed_update_round_trips"),
+        status: Status::Covered(&["document::tests::construct_signed_update_round_trips"]),
     },
     ConformanceRow {
         id: "data-structures.md:proof-value-detached-schnorr",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `proofvalue`: must be a detached schnorr signature produced according to schno",
-        status: Status::Covered("document::tests::proof_value_is_base58btc_64_bytes"),
+        status: Status::Covered(&["document::tests::proof_value_is_base58btc_64_bytes"]),
     },
     ConformanceRow {
         id: "data-structures.md:smt-proofs-one-per-smt-signal",
@@ -817,42 +828,42 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "a data structure that maps dids to [btcr2 signed update] hashes. all [btcr2 sign",
-        status: Status::Covered("resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"),
+        status: Status::Covered(&["resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"]),
     },
     ConformanceRow {
         id: "data-structures.md:root-capability-map-only-properties",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "the root capability must be a map containing only the following properties:",
-        status: Status::Covered("zcap::tests::test_round_trip"),
+        status: Status::Covered(&["zcap::tests::test_round_trip"]),
     },
     ConformanceRow {
         id: "data-structures.md:root-capability-context",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `@context`: must be the context string `\"https://w3id.org/zcap/v1\"`",
-        status: Status::Covered("zcap::tests::test_round_trip"),
+        status: Status::Covered(&["zcap::tests::test_round_trip"]),
     },
     ConformanceRow {
         id: "data-structures.md:root-capability-id-urn",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `id`: must be a urn of the following format: `urn:zcap:root:${encodeuricompone",
-        status: Status::Covered("zcap::tests::test_dereference_root_capability"),
+        status: Status::Covered(&["zcap::tests::test_dereference_root_capability"]),
     },
     ConformanceRow {
         id: "data-structures.md:root-capability-invocation-target",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `invocationtarget`: must be the `did`.",
-        status: Status::Covered("zcap::tests::test_dereference_root_capability"),
+        status: Status::Covered(&["zcap::tests::test_dereference_root_capability"]),
     },
     ConformanceRow {
         id: "data-structures.md:root-capability-controller",
         file: "did-btcr2/src/data-structures.md",
         keyword: "MUST",
         prefix: "- `controller`: must be the `did`.",
-        status: Status::Covered("zcap::tests::test_dereference_root_capability"),
+        status: Status::Covered(&["zcap::tests::test_dereference_root_capability"]),
     },
     // ---- operations/create.md ----------------------------------------------
     ConformanceRow {
@@ -860,14 +871,14 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/create.md",
         keyword: "MUST",
         prefix: "an secp256k1 public key can be used as the [genesis bytes]. the key must be",
-        status: Status::Covered("document::tests::deterministically_generate"),
+        status: Status::Covered(&["document::tests::deterministically_generate"]),
     },
     ConformanceRow {
         id: "create.md:genesis-document-hashed",
         file: "did-btcr2/src/operations/create.md",
         keyword: "MUST",
         prefix: "a [genesis document] can be used as the [genesis bytes], but must be hashed",
-        status: Status::Covered("document::tests::test_from_external_intermediate"),
+        status: Status::Covered(&["document::tests::test_from_external_intermediate"]),
     },
     // ---- operations/deactivate.md ------------------------------------------
     ConformanceRow {
@@ -875,7 +886,7 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/deactivate.md",
         keyword: "MUST",
         prefix: "to deactivate a **did:btcr2** identifier, the did controller must add the proper",
-        status: Status::Covered("resolver::tests::metadata_deactivated_follows_the_document"),
+        status: Status::Covered(&["resolver::tests::metadata_deactivated_follows_the_document"]),
     },
     // ---- operations/resolve.md ---------------------------------------------
     ConformanceRow {
@@ -883,7 +894,7 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "input values must first go through decoding the did and [processing sidecar data",
-        status: Status::Covered("resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"),
+        status: Status::Covered(&["resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"]),
     },
     ConformanceRow {
         id: "resolve.md:version-id-parsed-as-integer-invalid-options",
@@ -905,35 +916,35 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "the `did` must be parsed with the [did-btcr2 identifier decoding] algorithm to r",
-        status: Status::Covered("identifier::tests::test_encode_decode_key_based"),
+        status: Status::Covered(&["identifier::tests::test_encode_decode_key_based"]),
     },
     ConformanceRow {
         id: "resolve.md:invalid-did-on-decode-error",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "`network`, and `genesis_bytes`. an [`invalid_did`] error must be raised in respo",
-        status: Status::Covered("identifier::tests::test_invalid_prefix"),
+        status: Status::Covered(&["identifier::tests::test_invalid_prefix"]),
     },
     ConformanceRow {
         id: "resolve.md:process-genesis-document-placeholder",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "process the [genesis document] provided in `sidecar.genesisdocument` by replacin",
-        status: Status::Covered("document::tests::test_from_external_intermediate"),
+        status: Status::Covered(&["document::tests::test_from_external_intermediate"]),
     },
     ConformanceRow {
         id: "resolve.md:render-initial-did-document-bitcoin-uri",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "render the [initial did document] template with these values (bitcoin addresses",
-        status: Status::Covered("document::tests::beacons_accessor"),
+        status: Status::Covered(&["document::tests::beacons_accessor"]),
     },
     ConformanceRow {
         id: "resolve.md:parse-rendered-template-conformant-doc",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "parse the rendered template as json to form `current_document`. the resulting [d",
-        status: Status::Covered("document::tests::test_document_parse"),
+        status: Status::Covered(&["document::tests::test_document_parse"]),
     },
     ConformanceRow {
         id: "resolve.md:signal-confirmed-min-conf",
@@ -945,9 +956,9 @@ const CURATED: &[ConformanceRow] = &[
         // unconfirmed-mempool half (`unconfirmed_needed_signal_is_skipped`,
         // `pending_announcement_resolves_to_the_confirmed_version`) are
         // exercised beside it.
-        status: Status::Covered(
+        status: Status::Covered(&[
             "resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "resolve.md:update-hash-compared-to-signal",
@@ -963,27 +974,27 @@ const CURATED: &[ConformanceRow] = &[
         // `unconfirmed_needed_signal_is_skipped`) is test-only. The
         // CAS-retrieval arm is DeferredAggregation (CAS retrieval returns
         // Unsupported); INVALID_SIGNAL_DATA lands with it.
-        status: Status::Covered(
+        status: Status::Covered(&[
             "resolver::tests::a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "resolve.md:late-publishing-raised",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "* [`late_publishing`] error must be raised.",
-        status: Status::Covered(
+        status: Status::Covered(&[
             "update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "resolve.md:capability-invocation-entry-identifies-proof-vm",
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST",
         prefix: "the resolver must find the entry of `current_document.capabilityinvocation` that",
-        status: Status::Covered(
+        status: Status::Covered(&[
             "document::tests::apply_update_accepts_embedded_capability_invocation",
-        ),
+        ]),
     },
     // ---- operations/update.md ----------------------------------------------
     ConformanceRow {
@@ -991,7 +1002,9 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/update.md",
         keyword: "MUST",
         prefix: "apply `jsonpatch` to `didsourcedocument` to create `didtargetdocument`. an [`inv",
-        status: Status::Covered("document::tests::construct_signed_update_rejects_failing_patch"),
+        status: Status::Covered(&[
+            "document::tests::construct_signed_update_rejects_failing_patch",
+        ]),
     },
     ConformanceRow {
         id: "update.md:target-version-id-from-fresh-resolution",
@@ -1009,30 +1022,32 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/update.md",
         keyword: "MUST",
         prefix: "resulting [btcr2 unsigned update (data structure)] must be conformant to this sp",
-        status: Status::Covered("update::tests::unsigned_update_has_four_contexts"),
+        status: Status::Covered(&["update::tests::unsigned_update_has_four_contexts"]),
     },
     ConformanceRow {
         id: "update.md:invalid-did-update-capability-invocation-lacks-id",
         file: "did-btcr2/src/operations/update.md",
         keyword: "MUST",
         prefix: "an [`invalid_did_update`] error must be raised if no entry of the `didsourcedocu",
-        status: Status::Covered("document::tests::update_rejects_vm_not_in_capability_invocation"),
+        status: Status::Covered(&[
+            "document::tests::update_rejects_vm_not_in_capability_invocation",
+        ]),
     },
     ConformanceRow {
         id: "update.md:invalid-did-update-referenced-vm-missing",
         file: "did-btcr2/src/operations/update.md",
         keyword: "MUST",
         prefix: "if that entry is a reference, find the verification method in the `didsourcedocu",
-        status: Status::Covered(
+        status: Status::Covered(&[
             "document::tests::construct_signed_update_rejects_reference_to_missing_verification_method",
-        ),
+        ]),
     },
     ConformanceRow {
         id: "update.md:data-integrity-config-conformant",
         file: "did-btcr2/src/operations/update.md",
         keyword: "MUST",
         prefix: "resulting [data integrity config (data structure)] must be conformant to verifia",
-        status: Status::Covered("document::tests::data_integrity_config_shape"),
+        status: Status::Covered(&["document::tests::data_integrity_config_shape"]),
     },
     // ---- terminology.md ----------------------------------------------------
     ConformanceRow {
@@ -1040,28 +1055,30 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/terminology.md",
         keyword: "MUST",
         prefix: "did. it must be either a [singleton beacon], [smt beacon], or a [cas beacon].",
-        status: Status::Covered("beacon::tests::beacon_type_serde_round_trips_spec_strings"),
+        status: Status::Covered(&["beacon::tests::beacon_type_serde_round_trips_spec_strings"]),
     },
     ConformanceRow {
         id: "terminology.md:must-not-complete-resolution-if-data-missing",
         file: "did-btcr2/src/terminology.md",
         keyword: "MUST NOT",
         prefix: "if some data is needed but not available, the did method must not allow did reso",
-        status: Status::Covered("resolver::tests::unknown_signal_hash_raises_missing_update_data"),
+        status: Status::Covered(&[
+            "resolver::tests::unknown_signal_hash_raises_missing_update_data",
+        ]),
     },
     ConformanceRow {
         id: "terminology.md:history-changes-detected",
         file: "did-btcr2/src/terminology.md",
         keyword: "MUST",
         prefix: "any changes to the history, such as may occur if a website edits a file, must be",
-        status: Status::Covered("document::tests::wrong_target_version_id_fails_round_trip"),
+        status: Status::Covered(&["document::tests::wrong_target_version_id_fails_round_trip"]),
     },
     ConformanceRow {
         id: "terminology.md:carry-did-document-history",
         file: "did-btcr2/src/terminology.md",
         keyword: "MUST",
         prefix: "vehicle, the same way the did controller must bring along the did document histo",
-        status: Status::Covered("resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"),
+        status: Status::Covered(&["resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash"]),
     },
     // ---- update-data-distribution.md (CAS/IPFS, deferred) -----------------
     ConformanceRow {
@@ -1078,104 +1095,6 @@ const CURATED: &[ConformanceRow] = &[
         prefix: "for **did:btcr2** identifiers, files stored in ipfs must override the default ch",
         status: Status::DeferredAggregation,
     },
-];
-
-/// Every test path a `Covered` row may reference.
-///
-/// This is a string allow-list. It catches a `Covered` row pointing at a
-/// name not listed here. RESIDUAL (review concern #10): a `#[test]` that is
-/// deleted or renamed AND simultaneously dropped from this list is NOT caught by
-/// the matrix — only by the green suite failing elsewhere. CONFORMANCE.md states
-/// this honestly (`render_matrix` emits the self-check-residual note).
-const KNOWN_TESTS: &[&str] = &[
-    "beacon::tests::beacon_type_serde_round_trips_spec_strings",
-    "cryptosuite::tests::create_proof_accepts_all_string_context",
-    "cryptosuite::tests::vendor_update_proofs_verify_under_this_cryptosuite",
-    "cryptosuite::tests::verify_proof_rejects_prefix_context_forgery",
-    "document::tests::apply_update_accepts_embedded_capability_invocation",
-    "document::tests::apply_update_accepts_proof_times_inside_the_block_bounds",
-    "document::tests::apply_update_failure_after_patch_leaves_document_unchanged",
-    "document::tests::apply_update_rejects_created_after_block_header_time",
-    "document::tests::apply_update_rejects_expires_before_block_mediantime",
-    "document::tests::apply_update_rejects_expires_before_created",
-    "document::tests::apply_update_rejects_expires_when_mediantime_unavailable",
-    "document::tests::apply_update_rejects_foreign_root_capability",
-    "document::tests::apply_update_rejects_non_capability_invocation_proof_purpose",
-    "document::tests::apply_update_rejects_non_write_capability_action",
-    "document::tests::apply_update_rejects_post_patch_id_change",
-    "document::tests::apply_update_rejects_proof_context_mismatch",
-    "document::tests::apply_update_rejects_reference_to_missing_verification_method",
-    "document::tests::apply_update_rejects_unpinned_context",
-    "document::tests::apply_update_rejects_vm_not_in_capability_invocation",
-    "document::tests::apply_update_resolves_relative_did_url",
-    "document::tests::beacons_accessor",
-    "document::tests::capability_invocation_embedded_foreign_key_is_rejected_as_invoker",
-    "document::tests::construct_signed_update_accepts_embedded_capability_invocation",
-    "document::tests::construct_signed_update_rejects_failing_patch",
-    "document::tests::construct_signed_update_rejects_reference_to_missing_verification_method",
-    "document::tests::construct_signed_update_resolves_relative_did_url",
-    "document::tests::construct_signed_update_round_trips",
-    "document::tests::data_integrity_config_shape",
-    "document::tests::deactivated_parse_distinguishes_absent_bool_non_bool",
-    "document::tests::deterministically_generate",
-    "document::tests::duplicate_signals_do_not_raise_false_late_publishing",
-    "document::tests::golden_signed_update_bytes",
-    "document::tests::golden_signed_update_with_expires_bytes",
-    "document::tests::external_genesis_without_sidecar_is_not_found",
-    "document::tests::top_level_method_with_publickeymultibase_must_declare_multikey",
-    "document::tests::proof_value_is_base58btc_64_bytes",
-    "document::tests::relationship_arrays_accept_foreign_embedded_methods",
-    "document::tests::relationship_entry_names_the_array_in_id_errors",
-    "document::tests::relationship_entry_rejects_non_string_public_key_multibase",
-    "document::tests::test_document_parse",
-    "document::tests::test_document_validation_missing_elements",
-    "document::tests::test_from_external_intermediate",
-    "document::tests::top_level_foreign_key_is_rejected_as_invoker",
-    "document::tests::update_rejects_unknown_vm",
-    "document::tests::update_rejects_vm_not_in_capability_invocation",
-    "document::tests::verification_method_array_accepts_foreign_methods",
-    "document::tests::wrong_target_version_id_fails_round_trip",
-    "error::tests::not_found_problem_details_shape",
-    "error::tests::unsupported_problem_details_carries_provisional_code_and_detail",
-    "identifier::pinned_mutinynet_vector_tests::encode_reproduces_spec_string",
-    "identifier::tests::did_components_new_rejects_out_of_range_custom_network",
-    "identifier::tests::parse_did_identifier_rejects_uppercase_method_specific_id",
-    "identifier::tests::test_custom_network",
-    "identifier::tests::test_encode_decode_external",
-    "identifier::tests::test_encode_decode_key_based",
-    "identifier::tests::test_from_str_rejects_malformed_bech32",
-    "identifier::tests::test_id_type_hrps",
-    "identifier::tests::test_invalid_genesis_length",
-    "identifier::tests::test_invalid_prefix",
-    "identifier::tests::test_network_conversion",
-    "identifier::sha256_hash_serde_tests::sha256_hash_deserializes_escaped_string",
-    "key::tests::test_drop_runs_the_scrub",
-    "key::tests::test_scrub_overwrites_the_secret_in_place",
-    "resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied",
-    "resolver::tests::a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data",
-    "resolver::tests::cas_service_request_returns_unsupported",
-    "resolver::tests::smt_service_request_returns_unsupported",
-    "resolver::tests::cas_signal_returns_unsupported",
-    "resolver::tests::smt_signal_returns_unsupported",
-    "resolver::tests::sidecar_lookup_table_keyed_by_jcs_hash",
-    "resolver::tests::metadata_version_id_is_an_ascii_string",
-    "resolver::tests::metadata_deactivated_follows_the_document",
-    "resolver::tests::resolver_errors_when_the_requested_mediantime_is_not_supplied",
-    "resolver::tests::resolver_never_requests_blocks_for_duplicate_announcements",
-    "resolver::tests::resolver_never_requests_blocks_without_expires",
-    "resolver::tests::resolver_rejects_expires_before_the_fetched_mediantime",
-    "resolver::tests::resolver_requests_block_mediantime_when_a_proof_carries_expires",
-    "resolver::tests::resolver_requests_only_the_applicable_block_in_a_mixed_round",
-    "resolver::tests::source_hash_mismatch_raises_invalid_did_update",
-    "resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies",
-    "resolver::tests::unconfirmed_needed_signal_is_skipped",
-    "resolver::tests::unknown_signal_hash_raises_missing_update_data",
-    "update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing",
-    "update::tests::ensure_pinned_context_rejects_old_reordered_short_and_proof_mismatch",
-    "update::tests::unsigned_update_has_four_contexts",
-    "update::tests::unsigned_update_hashes_are_base64url_no_pad",
-    "zcap::tests::test_dereference_root_capability",
-    "zcap::tests::test_round_trip",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1129,7 @@ fn bless_or_assert(produced: &str, golden_path: &str) {
 // ---------------------------------------------------------------------------
 
 /// Render the curated table into the `CONFORMANCE.md` markdown document: a
-/// status matrix, a gap list, and the honest self-check-residual note.
+/// status matrix, a gap list, and the self-check scope note.
 fn render_matrix() -> String {
     let mut out = String::new();
     out.push_str("# did:btcr2 Singleton Conformance Matrix\n\n");
@@ -1225,7 +1144,7 @@ fn render_matrix() -> String {
          coverage status:\n\n",
     );
     out.push_str(
-        "- **Covered** — exercised by a named, currently-asserting `#[test]` in the suite.\n\
+        "- **Covered** — exercised by one or more named, currently-asserting `#[test]`s in the crate.\n\
          - **DeferredAggregation** — applies only to CAS / SMT / aggregation beacons; deferred to a future\n  \
          milestone (not a Singleton gap).\n\
          - **NotApplicable** — out of scope for this method implementation, with a reason.\n\
@@ -1258,7 +1177,13 @@ fn render_matrix() -> String {
     out.push_str("|----|---------|--------|---------------|\n");
     for row in CURATED {
         let (status, detail) = match row.status {
-            Status::Covered(t) => ("Covered", format!("`{t}`")),
+            Status::Covered(ts) => (
+                "Covered",
+                ts.iter()
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
             Status::DeferredAggregation => (
                 "DeferredAggregation",
                 String::from("CAS/SMT/aggregation — future milestone"),
@@ -1315,19 +1240,193 @@ fn render_matrix() -> String {
     }
     out.push('\n');
 
-    // Self-check residual note (review concern #10).
-    out.push_str("## Self-Check Scope (residual)\n\n");
+    // What the matrix checks about itself.
+    out.push_str("## Self-Check Scope\n\n");
     out.push_str(
-        "This matrix auto-detects NEW spec MUST/SHALL rows — the INDEX cross-check guard\n\
+        "This matrix detects NEW or drifted spec MUST/SHALL rows: the INDEX cross-check guard\n\
          (`index_guard`) fails CI on any unaccounted row, and `curated_len_matches_parsed_must_rows`\n\
-         fails on a row-count drift. However, a DELETED or RENAMED referenced test is caught only by\n\
-         the green test suite failing elsewhere — NOT by this matrix. `every_covered_row_names_a_real_test`\n\
-         only verifies that each Covered row names a test in the `KNOWN_TESTS` allow-list; a test that\n\
-         is renamed AND simultaneously dropped from that list would slip past this matrix until the\n\
-         suite breaks. This residual is accepted and documented (no-half-implementations constraint).\n",
+         fails on a row-count drift. `every_covered_row_names_a_real_test` reads the library source and\n\
+         fails on any Covered citation that names no `#[test] fn` at that module path, or one that is\n\
+         `#[ignore]`d, so a deleted, renamed or ignored test fails the matrix itself. Its limit:\n\
+         citations must be library unit tests in inline modules (`<module>::<inline mod>::<fn>`); any\n\
+         other form fails the check rather than passing it.\n",
     );
 
     out.trim_end().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Citation check: every Covered test exists in the library source
+// ---------------------------------------------------------------------------
+
+/// The library source a citation is resolved against, read at test run time
+/// so an edited source is seen without a rebuild.
+const SRC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+
+/// Why a cited test does not resolve to a real, currently-asserting `#[test]`.
+#[derive(Debug, PartialEq)]
+enum CitationProblem {
+    /// Fewer than two `::` segments, or a segment that is not an identifier.
+    Malformed,
+    /// Neither `src/<top>.rs` nor `src/<top>/mod.rs` exists.
+    NoSourceFile(String),
+    /// No inline `mod <m> {` at the expected indent.
+    ModuleNotFound(String),
+    /// `mod <m>;`: a module in its own file, a form this check does not follow.
+    OutOfLineModule(String),
+    /// No `fn` of that name directly in the module.
+    NoSuchFunction,
+    /// The `fn` exists but carries no `#[test]`.
+    NotATest,
+    /// `#[test]` together with `#[ignore…]`: the test does not currently assert.
+    Ignored,
+}
+
+impl std::fmt::Display for CitationProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const FORM: &str = "citations must be library unit tests in inline modules, \
+                            `<module>::<inline mod>::<fn>`";
+        match self {
+            Self::Malformed => write!(f, "not a test path; {FORM}"),
+            Self::NoSourceFile(top) => write!(
+                f,
+                "no src/{top}.rs or src/{top}/mod.rs in this crate; {FORM}"
+            ),
+            Self::ModuleNotFound(m) => write!(f, "no inline `mod {m} {{` on this path"),
+            Self::OutOfLineModule(m) => write!(
+                f,
+                "`mod {m};` is an out-of-line module, which this check does not follow; {FORM}"
+            ),
+            Self::NoSuchFunction => write!(f, "no fn of that name in that module"),
+            Self::NotATest => write!(f, "the fn carries no #[test]"),
+            Self::Ignored => write!(f, "the test is #[ignore]d, so it does not assert"),
+        }
+    }
+}
+
+/// `line` with exactly `indent` spaces of indentation stripped, or `None` if
+/// it is indented differently.
+fn at_indent(line: &str, indent: usize) -> Option<&str> {
+    let rest = line.get(indent..)?;
+    (line[..indent].bytes().all(|b| b == b' ') && !rest.starts_with(' ')).then_some(rest)
+}
+
+/// `item` with an optional `pub ` or `pub(crate) ` visibility stripped.
+fn strip_visibility(item: &str) -> &str {
+    item.strip_prefix("pub(crate) ")
+        .or_else(|| item.strip_prefix("pub "))
+        .unwrap_or(item)
+}
+
+/// Whether `name` is a `#[test] fn` directly inside the inline module path
+/// `modules` of `source`, which must be in rustfmt layout.
+///
+/// That layout makes the scan exact without a Rust lexer: a module body ends
+/// at the first later line equal to its own indent plus `}`, its items sit at
+/// exactly that indent plus four, and a test's attributes sit on the lines
+/// directly above its `fn`. A layout the scan does not expect makes the test
+/// *not found*; it never makes an absent test pass, because a pass needs a
+/// `#[test] fn <name>(` at the exact item indent inside the exact module body.
+fn find_test_in_source(source: &str, modules: &[&str], name: &str) -> Result<(), CitationProblem> {
+    let lines: Vec<&str> = source.lines().collect();
+    let (mut from, mut to, mut indent) = (0, lines.len(), 0);
+    for m in modules {
+        let open = format!("mod {m} {{");
+        let decl = format!("mod {m};");
+        let mut body = None;
+        for (i, line) in lines.iter().enumerate().take(to).skip(from) {
+            let Some(item) = at_indent(line, indent) else {
+                continue;
+            };
+            let item = strip_visibility(item);
+            if item == decl {
+                return Err(CitationProblem::OutOfLineModule(m.to_string()));
+            }
+            if item == open {
+                body = Some(i + 1);
+                break;
+            }
+        }
+        let Some(start) = body else {
+            return Err(CitationProblem::ModuleNotFound(m.to_string()));
+        };
+        let close = format!("{}}}", " ".repeat(indent));
+        let Some(end) = (start..to).find(|&i| lines[i] == close) else {
+            return Err(CitationProblem::ModuleNotFound(m.to_string()));
+        };
+        (from, to, indent) = (start, end, indent + 4);
+    }
+
+    let head = format!("fn {name}(");
+    let Some(fn_line) = (from..to).find(|&i| {
+        at_indent(lines[i], indent).is_some_and(|item| strip_visibility(item).starts_with(&head))
+    }) else {
+        return Err(CitationProblem::NoSuchFunction);
+    };
+
+    let attributes: Vec<&str> = lines[from..fn_line]
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .take_while(|line| {
+            !line.is_empty()
+                && !line.starts_with("//")
+                && !line.ends_with('}')
+                && !line.ends_with(';')
+                && !line.ends_with('{')
+        })
+        .collect();
+    if !attributes.contains(&"#[test]") {
+        return Err(CitationProblem::NotATest);
+    }
+    if attributes.iter().any(|line| line.starts_with("#[ignore")) {
+        return Err(CitationProblem::Ignored);
+    }
+    Ok(())
+}
+
+/// Resolve one citation against the crate source under `src_dir`.
+///
+/// Supported form: `<top>::<inline mod>…::<fn>`, a library unit test in one or
+/// more inline modules of `src/<top>.rs` or `src/<top>/mod.rs`. Every other
+/// form (an integration test under `tests/`, a doctest, a test in another
+/// crate, a test in an out-of-line module) fails with a problem naming the
+/// supported form; none is skipped. Supporting another form means a new arm
+/// here, with a test.
+fn check_citation(src_dir: &Path, citation: &str) -> Result<(), CitationProblem> {
+    let segments: Vec<&str> = citation.split("::").collect();
+    let identifier =
+        |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if segments.len() < 2 || !segments.iter().all(identifier) {
+        return Err(CitationProblem::Malformed);
+    }
+    let top = segments[0];
+    let source = std::fs::read_to_string(src_dir.join(format!("{top}.rs")))
+        .or_else(|_| std::fs::read_to_string(src_dir.join(top).join("mod.rs")))
+        .map_err(|_| CitationProblem::NoSourceFile(top.to_string()))?;
+    let (name, modules) = segments[1..].split_last().expect("at least two segments");
+    find_test_in_source(&source, modules, name)
+}
+
+/// One line per citation of a `Covered` row in `rows` that does not resolve
+/// under `src_dir`, naming the row and the citation, plus one per `Covered`
+/// row that cites no test at all: such a row claims coverage it does not have.
+fn citation_problems(rows: &[ConformanceRow], src_dir: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    for row in rows {
+        let Status::Covered(tests) = row.status else {
+            continue;
+        };
+        if tests.is_empty() {
+            problems.push(format!("  row `{}`: Covered but cites no test", row.id));
+        }
+        for citation in tests {
+            if let Err(problem) = check_citation(src_dir, citation) {
+                problems.push(format!("  row `{}` -> `{citation}`: {problem}", row.id));
+            }
+        }
+    }
+    problems
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,41 +1478,235 @@ fn curated_len_matches_parsed_must_rows() {
     );
 }
 
-/// every `Covered(test)` row names a test enumerated in the hand-maintained
-/// `KNOWN_TESTS` allow-list.
-///
-/// Exact property: this proves the referenced *string* is present in
-/// `KNOWN_TESTS`, NOT that a `#[test]` of that name compiles or exists. The two
-/// hand-edited sides (the `Covered(...)` reference and `KNOWN_TESTS`) can drift
-/// together past this guard if a test is renamed and dropped from the list at the
-/// same time — caught only by the suite breaking elsewhere. Accepted residual
-/// (see the module doc and the `CONFORMANCE.md` "Self-Check Scope" note); a
-/// stronger fix generates `KNOWN_TESTS` from `cargo test -- --list`.
+/// Every test a `Covered` row cites is a `#[test] fn` of that name at that
+/// module path in the library source, and is not `#[ignore]`d. FAILS, naming
+/// the row and the citation, on a test that was deleted, renamed, is not a
+/// `#[test]`, or is ignored, and on a `Covered` row that cites no test.
 #[test]
 fn every_covered_row_names_a_real_test() {
-    let known: HashSet<&str> = KNOWN_TESTS.iter().copied().collect();
-    // Sanity: the allow-list is non-trivial (guards against a degenerate
-    // `== 0`-on-an-empty-list assertion that would always pass).
+    let problems = citation_problems(CURATED, Path::new(SRC_DIR));
     assert!(
-        known.len() >= 20,
-        "KNOWN_TESTS shrank unexpectedly to {} entries",
-        known.len(),
+        problems.is_empty(),
+        "{} Covered citation(s) name no real, currently-asserting test \
+         (fix the citation, or restore the test):\n{}",
+        problems.len(),
+        problems.join("\n"),
     );
 
-    let mut missing = Vec::new();
-    for row in CURATED {
-        if let Status::Covered(test) = row.status
-            && !known.contains(test)
-        {
-            missing.push(format!("  row `{}` -> `{}`", row.id, test));
+    // Sanity: the check actually looked at something, so an empty problem
+    // list is not the degenerate result of checking nothing.
+    let covered_rows = CURATED
+        .iter()
+        .filter(|row| matches!(row.status, Status::Covered(_)))
+        .count();
+    let citations: usize = CURATED
+        .iter()
+        .map(|row| match row.status {
+            Status::Covered(tests) => tests.len(),
+            _ => 0,
+        })
+        .sum();
+    assert!(covered_rows > 0, "no Covered rows to check");
+    assert!(
+        citations >= covered_rows,
+        "{citations} citations checked across {covered_rows} Covered rows"
+    );
+}
+
+/// A `#[test] fn` directly inside an inline module is found: plainly, under
+/// doc comments, and next to a `#[should_panic(…)]` spread over several lines.
+#[test]
+fn find_test_in_source_accepts_a_test_in_an_inline_module() {
+    let plain = "fn helper() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn name() {\n        assert!(true);\n    }\n}\n";
+    assert_eq!(find_test_in_source(plain, &["tests"], "name"), Ok(()));
+
+    let documented = "mod tests {\n    /// What it checks.\n    ///\n    /// More detail.\n    #[test]\n    fn name() {}\n}\n";
+    assert_eq!(find_test_in_source(documented, &["tests"], "name"), Ok(()));
+
+    let should_panic = "mod tests {\n    fn other() {}\n\n    #[test]\n    #[should_panic(\n        expected = \"a long expected message\"\n    )]\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(should_panic, &["tests"], "name"),
+        Ok(())
+    );
+
+    let nested = "pub(crate) mod outer {\n    mod inner {\n        #[test]\n        fn name() {}\n    }\n}\n";
+    assert_eq!(
+        find_test_in_source(nested, &["outer", "inner"], "name"),
+        Ok(())
+    );
+}
+
+/// A name with no `fn` in the module is reported as missing.
+#[test]
+fn find_test_in_source_reports_a_missing_function() {
+    let source = "mod tests {\n    #[test]\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(source, &["tests"], "other"),
+        Err(CitationProblem::NoSuchFunction)
+    );
+    // A longer name sharing the prefix is a different function.
+    assert_eq!(
+        find_test_in_source(source, &["tests"], "nam"),
+        Err(CitationProblem::NoSuchFunction)
+    );
+}
+
+/// A helper `fn` of the cited name, with no `#[test]`, is not a test, even
+/// when another attribute or a doc comment sits above it.
+#[test]
+fn find_test_in_source_rejects_a_function_without_the_test_attribute() {
+    let bare = "mod tests {\n    #[test]\n    fn other() {}\n\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(bare, &["tests"], "name"),
+        Err(CitationProblem::NotATest)
+    );
+    let attributed =
+        "mod tests {\n    /// A helper.\n    #[allow(dead_code)]\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(attributed, &["tests"], "name"),
+        Err(CitationProblem::NotATest)
+    );
+    // The previous item's `#[test]` does not leak onto an adjacent helper.
+    let adjacent = "mod tests {\n    #[test]\n    fn other() {}\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(adjacent, &["tests"], "name"),
+        Err(CitationProblem::NotATest)
+    );
+}
+
+/// A `#[test]` that is also `#[ignore]`d, with or without a reason, does not
+/// currently assert, so it does not count.
+#[test]
+fn find_test_in_source_rejects_an_ignored_test() {
+    for ignore in ["#[ignore]", "#[ignore = \"needs a live node\"]"] {
+        for source in [
+            format!("mod tests {{\n    #[test]\n    {ignore}\n    fn name() {{}}\n}}\n"),
+            format!("mod tests {{\n    {ignore}\n    #[test]\n    fn name() {{}}\n}}\n"),
+        ] {
+            assert_eq!(
+                find_test_in_source(&source, &["tests"], "name"),
+                Err(CitationProblem::Ignored),
+                "{source}"
+            );
         }
     }
+}
+
+/// A same-named `#[test]` in a module nested inside the cited one, or in a
+/// sibling module, does not satisfy the cited path.
+#[test]
+fn find_test_in_source_does_not_match_a_nested_or_sibling_module() {
+    let nested = "mod tests {\n    mod deeper {\n        #[test]\n        fn name() {}\n    }\n}\n";
+    assert_eq!(
+        find_test_in_source(nested, &["tests"], "name"),
+        Err(CitationProblem::NoSuchFunction)
+    );
+    let sibling = "mod tests {\n    #[test]\n    fn other() {}\n}\n\nmod more_tests {\n    #[test]\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(sibling, &["tests"], "name"),
+        Err(CitationProblem::NoSuchFunction)
+    );
+}
+
+/// A module path whose inline module is absent is reported by module name,
+/// and an out-of-line `mod m;` is reported as a form the check does not follow.
+#[test]
+fn find_test_in_source_reports_missing_and_out_of_line_modules() {
+    let source = "mod tests {\n    #[test]\n    fn name() {}\n}\n";
+    assert_eq!(
+        find_test_in_source(source, &["other"], "name"),
+        Err(CitationProblem::ModuleNotFound("other".into()))
+    );
+    assert_eq!(
+        find_test_in_source(source, &["tests", "deeper"], "name"),
+        Err(CitationProblem::ModuleNotFound("deeper".into()))
+    );
+    let unclosed = "mod tests {\n    #[test]\n    fn name() {}\n";
+    assert_eq!(
+        find_test_in_source(unclosed, &["tests"], "name"),
+        Err(CitationProblem::ModuleNotFound("tests".into()))
+    );
+    let out_of_line = "#[cfg(test)]\nmod tests;\n";
+    assert_eq!(
+        find_test_in_source(out_of_line, &["tests"], "name"),
+        Err(CitationProblem::OutOfLineModule("tests".into()))
+    );
+}
+
+/// Against the real crate source: an unknown top-level module has no source
+/// file, a path without `::` is malformed, a name absent from a real module is
+/// missing, and a real cited test resolves.
+#[test]
+fn check_citation_resolves_against_the_crate_source() {
+    let src = Path::new(SRC_DIR);
+    assert_eq!(
+        check_citation(src, "nosuchmodule::tests::x"),
+        Err(CitationProblem::NoSourceFile("nosuchmodule".into()))
+    );
+    assert_eq!(
+        check_citation(src, "nocolons"),
+        Err(CitationProblem::Malformed)
+    );
+    assert_eq!(
+        check_citation(src, "resolver::tests::"),
+        Err(CitationProblem::Malformed)
+    );
+    assert_eq!(
+        check_citation(src, "resolver::tests::no_such_test_anywhere"),
+        Err(CitationProblem::NoSuchFunction)
+    );
+    assert_eq!(
+        check_citation(
+            src,
+            "resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied"
+        ),
+        Ok(())
+    );
+}
+
+/// The row-level report names the row and the bad citation, says nothing
+/// about a good one, and flags a `Covered` row that cites nothing.
+#[test]
+fn citation_problems_names_the_row_and_the_bad_citation() {
+    const GOOD: &str =
+        "resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied";
+    const BOGUS: &str = "resolver::tests::a_test_that_was_renamed_away";
+    let rows = [
+        ConformanceRow {
+            id: "synthetic.md:good-and-bogus",
+            file: "synthetic.md",
+            keyword: "MUST",
+            prefix: "",
+            status: Status::Covered(&[GOOD, BOGUS]),
+        },
+        ConformanceRow {
+            id: "synthetic.md:not-covered",
+            file: "synthetic.md",
+            keyword: "MUST",
+            prefix: "",
+            status: Status::Gap("not implemented"),
+        },
+    ];
+    let problems = citation_problems(&rows, Path::new(SRC_DIR));
+    assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        missing.is_empty(),
-        "{} Covered row(s) name a test not in KNOWN_TESTS \
-         (add the test to KNOWN_TESTS, or fix the reference):\n{}",
-        missing.len(),
-        missing.join("\n"),
+        problems[0].contains("synthetic.md:good-and-bogus") && problems[0].contains(BOGUS),
+        "{problems:?}"
+    );
+    assert!(!problems[0].contains(GOOD), "{problems:?}");
+
+    let empty = [ConformanceRow {
+        id: "synthetic.md:empty",
+        file: "synthetic.md",
+        keyword: "MUST",
+        prefix: "",
+        status: Status::Covered(&[]),
+    }];
+    let problems = citation_problems(&empty, Path::new(SRC_DIR));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("synthetic.md:empty") && problems[0].contains("cites no test"),
+        "{problems:?}"
     );
 }
 

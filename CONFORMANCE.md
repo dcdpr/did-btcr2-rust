@@ -7,7 +7,7 @@ It enumerates every did:btcr2 method-spec **MUST** / **SHALL** requirement (from
 vendored `specs-snapshot/method-spec-index.md`) and tags each with its Singleton-milestone
 coverage status:
 
-- **Covered** — exercised by a named, currently-asserting `#[test]` in the suite.
+- **Covered** — exercised by one or more named, currently-asserting `#[test]`s in the crate.
 - **DeferredAggregation** — applies only to CAS / SMT / aggregation beacons; deferred to a future
   milestone (not a Singleton gap).
 - **NotApplicable** — out of scope for this method implementation, with a reason.
@@ -50,7 +50,7 @@ coverage status:
 | `aggregate-beacons.md:smt-service-constructs-tree` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `aggregate-beacons.md:cas-participant-checks-index` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
 | `aggregate-beacons.md:smt-participant-validates-index` | MUST | DeferredAggregation | CAS/SMT/aggregation — future milestone |
-| `beacons.md:process-each-found-signal` | MUST | Covered | `resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied` |
+| `beacons.md:process-each-found-signal` | MUST | Covered | `resolver::tests::a_later_update_at_the_introducing_height_is_found_and_applied`, `resolver::tests::a_conflicting_announcement_below_the_current_height_is_not_found`, `resolver::tests::find_next_signals_skips_transactions_below_the_current_block_height` |
 | `beacons.md:active-beacons-in-service` | MUST | Covered | `document::tests::beacons_accessor` |
 | `beacons.md:resolvers-support-beacon-types` | MUST | Covered | `beacon::tests::beacon_type_serde_round_trips_spec_strings` |
 | `conformance.md:bcp14-keyword-interpretation` | MUST NOT | NotApplicable | BCP 14 boilerplate: names the RFC 2119 keywords and how to read them; imposes no requirement on an implementation |
@@ -141,12 +141,12 @@ The justified non-gaps are:
 - `update-data-distribution.md:cas-retrieval-hash-verified` (MUST NOT) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 - `update-data-distribution.md:ipfs-chunking` (MUST) — DeferredAggregation: CAS/SMT/aggregation, out of the Singleton scope.
 
-## Self-Check Scope (residual)
+## Self-Check Scope
 
-This matrix auto-detects NEW spec MUST/SHALL rows — the INDEX cross-check guard
+This matrix detects NEW or drifted spec MUST/SHALL rows: the INDEX cross-check guard
 (`index_guard`) fails CI on any unaccounted row, and `curated_len_matches_parsed_must_rows`
-fails on a row-count drift. However, a DELETED or RENAMED referenced test is caught only by
-the green test suite failing elsewhere — NOT by this matrix. `every_covered_row_names_a_real_test`
-only verifies that each Covered row names a test in the `KNOWN_TESTS` allow-list; a test that
-is renamed AND simultaneously dropped from that list would slip past this matrix until the
-suite breaks. This residual is accepted and documented (no-half-implementations constraint).
+fails on a row-count drift. `every_covered_row_names_a_real_test` reads the library source and
+fails on any Covered citation that names no `#[test] fn` at that module path, or one that is
+`#[ignore]`d, so a deleted, renamed or ignored test fails the matrix itself. Its limit:
+citations must be library unit tests in inline modules (`<module>::<inline mod>::<fn>`); any
+other form fails the check rather than passing it.
