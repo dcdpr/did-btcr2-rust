@@ -35,6 +35,48 @@ pub(crate) fn chain_fixture_path(vector_id: &str) -> PathBuf {
     chain_fixture_root().join(format!("{vector_id}.json"))
 }
 
+/// The `ALL_CHAIN_FIXTURES` key of a file under the chain-fixture root, given
+/// its path relative to that root: the path without `.json`. Anything that
+/// is not a `.json` file (a README, notes) or that sits under or is a dot
+/// entry is not a fixture and yields `None`.
+fn chain_fixture_key(rel: &Path) -> Option<String> {
+    if rel.extension().is_none_or(|ext| ext != "json") {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for component in rel.with_extension("").components() {
+        let name = component.as_os_str().to_str()?;
+        if is_dot_entry(name) {
+            return None;
+        }
+        parts.push(name.to_string());
+    }
+    Some(parts.join("/"))
+}
+
+/// Every fixture key under `root`, found by walking the tree. An unreadable
+/// directory panics naming it: a walk that silently stops short would let the
+/// list guard pass on a partial view.
+fn chain_fixture_keys_on_disk(root: &Path) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", dir.display()))
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Some(key) = path.strip_prefix(root).ok().and_then(chain_fixture_key) {
+                keys.insert(key);
+            }
+        }
+    }
+    keys
+}
+
 /// One corpus of operation vectors in the test-suite layout, together with the
 /// captured chain snapshots that go with it.
 ///
@@ -4878,6 +4920,53 @@ fn sidecar_target_version_rejects_every_non_integer_form() {
             );
         }
     }
+}
+
+/// A fixture key is the relative path of a `.json` file without its
+/// extension; READMEs, extensionless files and anything under or named by a
+/// dot entry are not fixtures.
+#[test]
+fn chain_fixture_key_keeps_json_and_ignores_everything_else() {
+    for (rel, key) in [
+        ("regtest/k1/qgph7nre.json", Some("regtest/k1/qgph7nre")),
+        (
+            "minted/clean-rotating-beacons.json",
+            Some("minted/clean-rotating-beacons"),
+        ),
+        ("README.md", None),
+        ("regtest/README", None),
+        ("regtest/.DS_Store", None),
+        (".git/x.json", None),
+        ("regtest/k1/.hidden.json", None),
+    ] {
+        assert_eq!(
+            chain_fixture_key(Path::new(rel)).as_deref(),
+            key,
+            "chain_fixture_key({rel:?})"
+        );
+    }
+}
+
+/// Every fixture on disk is listed, and every listed fixture is on disk. An
+/// unlisted capture would never go through the consistency check; a listed
+/// one that is gone would fail only where it is read, not as a list drift.
+#[test]
+fn chain_fixture_tree_matches_the_list() {
+    let on_disk = chain_fixture_keys_on_disk(&chain_fixture_root());
+    let declared: BTreeSet<String> = ALL_CHAIN_FIXTURES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        ALL_CHAIN_FIXTURES.len(),
+        declared.len(),
+        "ALL_CHAIN_FIXTURES lists a fixture more than once"
+    );
+    let only_on_disk: Vec<&String> = on_disk.difference(&declared).collect();
+    let only_declared: Vec<&String> = declared.difference(&on_disk).collect();
+    assert!(
+        only_on_disk.is_empty() && only_declared.is_empty(),
+        "fixtures/chain/ does not match ALL_CHAIN_FIXTURES.\n \
+         on disk but not declared: {only_on_disk:?}\n \
+         declared but not on disk: {only_declared:?}"
+    );
 }
 
 /// A vector id resolves under the crate's own `fixtures/chain/` tree, not the
