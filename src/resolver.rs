@@ -2477,9 +2477,11 @@ mod tests {
     /// The rejection-cause check of a negative set's main Resolve pair.
     ///
     /// A set with an entry in `table` must be rejected with a detail that
-    /// contains every one of the entry's cause substrings; a set with no entry
-    /// (a synthetic corpus, a keyed suite) is held to its code only. The
-    /// mismatches are collected and reported together by [`CauseCheck::finish`],
+    /// contains every one of the entry's cause substrings. Every live negative
+    /// set has an entry, enforced by `negative_set_table_matches_the_corpus`;
+    /// an entry whose cause list is empty is one whose Resolve row is not
+    /// driven. Only synthetic corpora and keyed suites have no entry, and they
+    /// are held to their code alone. The mismatches are collected and reported together by [`CauseCheck::finish`],
     /// so a wrong entry names every set it touches, on every network.
     struct CauseCheck<'t> {
         table: &'t [NegativeSetExpectation],
@@ -3781,47 +3783,51 @@ mod tests {
     }
 
     /// The Resolve driver compares a negative set's rejection detail with its
-    /// scenario's cause: with n24's cause replaced by text no rejection
-    /// carries, the driver fails on the regtest n24 set, naming the set, the
-    /// scenario and the cause check, although the code still matches.
+    /// scenario's cause, on a set with update steps (n24) and on one without
+    /// (n04, the genesis-hash comparison): with the scenario's cause replaced
+    /// by text no rejection carries, the driver fails on the regtest set,
+    /// naming the set, the scenario and the cause check, although the code
+    /// still matches.
     #[test]
     fn a_wrong_expected_cause_fails_naming_the_set() {
         let Some(vectors) = discovered_vectors_or_skip() else {
             return;
         };
-        let mut wrong = NEGATIVE_SET_EXPECTATIONS.to_vec();
-        let n24 = wrong
-            .iter()
-            .position(|e| e.scenario == "n24")
-            .expect("the table has an n24 entry");
-        wrong[n24].cause = &["this text is not in any rejection"];
+        for scenario in ["n24", "n04"] {
+            let mut wrong = NEGATIVE_SET_EXPECTATIONS.to_vec();
+            let at = wrong
+                .iter()
+                .position(|e| e.scenario == scenario)
+                .unwrap_or_else(|| panic!("the table has an {scenario} entry"));
+            wrong[at].cause = &["this text is not in any rejection"];
 
-        let subset: Vec<Vector> = vectors
-            .iter()
-            .filter(|v| {
-                v.network_dir == "regtest"
-                    && v.is_negative()
-                    && negative_set_expectation(&wrong, v).map(|e| e.scenario) == Some("n24")
-            })
-            .cloned()
-            .collect();
-        assert_eq!(subset.len(), 1, "n24 has one regtest set");
+            let subset: Vec<Vector> = vectors
+                .iter()
+                .filter(|v| {
+                    v.network_dir == "regtest"
+                        && v.is_negative()
+                        && negative_set_expectation(&wrong, v).map(|e| e.scenario) == Some(scenario)
+                })
+                .cloned()
+                .collect();
+            assert_eq!(subset.len(), 1, "{scenario} has one regtest set");
 
-        drive_resolve_with_expectations(
-            &subset,
-            &[],
-            ERROR_CODE_DIVERGENCES,
-            NEGATIVE_SET_EXPECTATIONS,
-        );
-        let message = panic_text(|| {
-            drive_resolve_with_expectations(&subset, &[], ERROR_CODE_DIVERGENCES, &wrong)
-        });
-        assert!(
-            message.contains(&subset[0].id)
-                && message.contains("n24")
-                && message.contains("rejection cause"),
-            "the failure names the set, the scenario and the cause check: {message}"
-        );
+            drive_resolve_with_expectations(
+                &subset,
+                &[],
+                ERROR_CODE_DIVERGENCES,
+                NEGATIVE_SET_EXPECTATIONS,
+            );
+            let message = panic_text(|| {
+                drive_resolve_with_expectations(&subset, &[], ERROR_CODE_DIVERGENCES, &wrong)
+            });
+            assert!(
+                message.contains(&subset[0].id)
+                    && message.contains(scenario)
+                    && message.contains("rejection cause"),
+                "the failure names the set, the scenario and the cause check: {message}"
+            );
+        }
     }
 
     /// A negative set with no table entry is refused by name, never passed
@@ -4032,7 +4038,9 @@ mod tests {
     /// A positive set must pass every check of [`update_crypto_set`]. A
     /// negative set must have an entry in `table`, and its outcome must be the
     /// entry's: a `Passes` set must pass, and a `FailsAt` set must fail with a
-    /// message carrying every recorded substring. Every mismatching set is
+    /// message carrying every recorded substring. A `NoUpdateSteps` set ships
+    /// no update steps, so update-crypto never applies to it; driving one is a
+    /// mismatch. Every mismatching set is
     /// collected, and the driver then fails naming each set and its scenario.
     fn drive_update_crypto_with(
         vectors: &[Vector],
@@ -4071,6 +4079,10 @@ mod tests {
                         .unwrap_or_default()
                 });
                 let mismatch = match (entry.update_crypto, outcome) {
+                    (UpdateCryptoExpectation::NoUpdateSteps, _) => Some(format!(
+                        "{id} ({scenario}): the entry says the set ships no update steps, but \
+                         update-crypto drove it{note}"
+                    )),
                     (UpdateCryptoExpectation::Passes, Ok(())) => None,
                     (UpdateCryptoExpectation::Passes, Err(msg)) => Some(format!(
                         "{id} ({scenario}): update-crypto must pass for this negative set, but \

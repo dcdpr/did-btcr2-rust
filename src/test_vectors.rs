@@ -5683,6 +5683,9 @@ pub(crate) enum UpdateCryptoExpectation {
     /// The driver fails, and its message contains every one of these: the
     /// check that failed and the reason it gives.
     FailsAt(&'static [&'static str]),
+    /// The set ships no update steps, so there is nothing for update-crypto to
+    /// check; the driver never runs on it.
+    NoUpdateSteps,
 }
 
 /// A negative scenario's expectations, the same on every network.
@@ -5690,6 +5693,8 @@ pub(crate) enum UpdateCryptoExpectation {
 pub(crate) struct NegativeSetExpectation {
     /// `other.json.scenarioId` prefix, e.g. `n24`.
     pub(crate) scenario: &'static str,
+    /// What the update-crypto driver observes; `NoUpdateSteps` exactly when
+    /// the set ships no update steps.
     pub(crate) update_crypto: UpdateCryptoExpectation,
     /// Text the rejection's problem-details detail must contain, in this
     /// crate's own wording; empty exactly when the set's Resolve row is not
@@ -5701,17 +5706,45 @@ pub(crate) struct NegativeSetExpectation {
     pub(crate) note: &'static str,
 }
 
-/// Every negative scenario of the checked-out suite that ships update steps.
-/// Synthetic corpora have no entry.
+/// Every negative scenario of the checked-out suite. Synthetic corpora have
+/// no entry.
 ///
 /// Each entry is what the update-crypto driver observes on that scenario's
 /// sets, on every network, and the text the Resolve row's rejection detail
-/// must carry. A cause is this crate's own wording, never the vector's
+/// must carry. The invalid-DID scenarios n01-n04 ship no update steps and
+/// carry `NoUpdateSteps`; their cause names the scenario's fault and differs
+/// between the four, so a set rejected on another parse path, or failing to
+/// parse where it should reach the genesis-hash comparison, fails. A cause is this crate's own wording, never the vector's
 /// `errorMessage`, which is another implementation's text; the same
 /// fault-class text may serve two scenarios. An upstream change to a negative scenario is taken
 /// in by re-observing the sets and editing the entry, never by editing the
 /// vector.
 pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
+    NegativeSetExpectation {
+        scenario: "n01",
+        update_crypto: UpdateCryptoExpectation::NoUpdateSteps,
+        cause: &["Bech32 error:", "invalid checksum"],
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n02",
+        update_crypto: UpdateCryptoExpectation::NoUpdateSteps,
+        cause: &["Bech32 error:", "failed to convert bits"],
+        note: "the bech32 decoder reports bad padding as a failed 5-to-8-bit conversion; \
+               that is the only failure of the conversion on decode",
+    },
+    NegativeSetExpectation {
+        scenario: "n03",
+        update_crypto: UpdateCryptoExpectation::NoUpdateSteps,
+        cause: &["Invalid network identifier"],
+        note: "",
+    },
+    NegativeSetExpectation {
+        scenario: "n04",
+        update_crypto: UpdateCryptoExpectation::NoUpdateSteps,
+        cause: &["genesisDocument does not match the DID's genesis hash"],
+        note: "",
+    },
     NegativeSetExpectation {
         scenario: "n05",
         update_crypto: UpdateCryptoExpectation::Passes,
@@ -5915,9 +5948,8 @@ pub(crate) fn negative_set_expectation<'t>(
     table.iter().find(|entry| entry.scenario == scenario)
 }
 
-/// What is wrong with the cause column of `table` over the negative
-/// update-bearing sets of `vectors`, one line per fault; empty when the column
-/// is sound.
+/// What is wrong with the cause column of `table` over the live negative
+/// sets of `vectors`, one line per fault; empty when the column is sound.
 ///
 /// A cause list is empty exactly when the set's Resolve row is not driven
 /// under `overrides`: a driven row with no cause would pass on the code
@@ -5931,10 +5963,7 @@ pub(crate) fn cause_column_problems(
     overrides: &[SkipOverride],
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    for v in vectors
-        .iter()
-        .filter(|v| v.is_negative() && !v.update_layout.step_prefixes().is_empty())
-    {
+    for v in vectors.iter().filter(|v| v.is_negative()) {
         let Some(entry) = negative_set_expectation(table, v) else {
             continue;
         };
@@ -5951,6 +5980,36 @@ pub(crate) fn cause_column_problems(
                     "{id} ({scenario}): cause {s:?} must name the fault, not only the code"
                 ));
             }
+        }
+    }
+    problems
+}
+
+/// What is wrong with the update-crypto column of `table` over the negative
+/// sets of `vectors`, one line per fault; empty when the column is sound.
+///
+/// An entry is `NoUpdateSteps` exactly when its set ships no update steps:
+/// update-crypto never drives such a set, so any other expectation on it is
+/// never checked, and `NoUpdateSteps` on a set with steps would hide what the
+/// driver observes. A set with no entry is the scenario-level guard's to
+/// report, not this one's.
+pub(crate) fn update_crypto_column_problems(
+    table: &[NegativeSetExpectation],
+    vectors: &[Vector],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for v in vectors.iter().filter(|v| v.is_negative()) {
+        let Some(entry) = negative_set_expectation(table, v) else {
+            continue;
+        };
+        let (id, scenario) = (&v.id, entry.scenario);
+        if (entry.update_crypto == UpdateCryptoExpectation::NoUpdateSteps)
+            != v.update_layout.step_prefixes().is_empty()
+        {
+            problems.push(format!(
+                "{id} ({scenario}): update-crypto is NoUpdateSteps exactly when the set ships \
+                 no update steps"
+            ));
         }
     }
     problems
@@ -6073,10 +6132,11 @@ fn resolve_driven_set_is_every_set_outside_the_cas_and_smt_scenarios() {
     assert_eq!(observed.len(), 164, "the floor and this set must agree");
 }
 
-/// The negative-set expectation table names exactly the negative scenarios of
-/// the checked-out suite that ship update steps, each once, and every such set
-/// on every network has an entry. An upstream negative scenario appearing,
-/// losing its update steps or disappearing fails here by name.
+/// The negative-set expectation table names exactly every negative scenario
+/// of the checked-out suite, each once, and every negative set on every
+/// network has an entry whose cause and update-crypto columns agree with the
+/// set. An upstream negative scenario appearing, gaining or losing its update
+/// steps or disappearing fails here by name.
 #[test]
 fn negative_set_table_matches_the_corpus() {
     if !test_suite_checked_out() {
@@ -6091,7 +6151,7 @@ fn negative_set_table_matches_the_corpus() {
 
     let derived: BTreeSet<(String, String)> = vectors
         .iter()
-        .filter(|v| v.is_negative() && !v.update_layout.step_prefixes().is_empty())
+        .filter(|v| v.is_negative())
         .map(|v| (v.network_dir.clone(), scenario_number(v).to_string()))
         .collect();
     let scenarios: Vec<&str> = NEGATIVE_SET_EXPECTATIONS
@@ -6107,7 +6167,7 @@ fn negative_set_table_matches_the_corpus() {
         "negative sets without a table entry: {only_derived:?}\n \
          table entries with no negative set: {only_declared:?}"
     );
-    assert_eq!(derived.len(), 92, "23 scenarios on each of four networks");
+    assert_eq!(derived.len(), 108, "27 scenarios on each of four networks");
     assert_eq!(
         scenarios.iter().collect::<BTreeSet<_>>().len(),
         scenarios.len(),
@@ -6120,12 +6180,19 @@ fn negative_set_table_matches_the_corpus() {
         "the cause column disagrees with the corpus:\n{}",
         problems.join("\n")
     );
+    let problems = update_crypto_column_problems(NEGATIVE_SET_EXPECTATIONS, &vectors);
+    assert!(
+        problems.is_empty(),
+        "the update-crypto column disagrees with the corpus:\n{}",
+        problems.join("\n")
+    );
 }
 
 /// The cause-column check refuses an empty list on a driven Resolve row, a
 /// list on an undriven one, an empty substring and a bare code, and accepts
 /// a fault-describing list on a driven row and an empty one on an undriven
-/// row. A set outside the table is left to the scenario-level guard.
+/// row. A set with no update steps is checked like any other; a set outside
+/// the table is left to the scenario-level guard.
 #[test]
 fn cause_column_problems_names_each_fault() {
     const SET: &str = "regtest/k1/qgppexmy";
@@ -6183,9 +6250,67 @@ fn cause_column_problems_names_each_fault() {
         );
     }
 
+    let mut no_steps = vectors[0].clone();
+    no_steps.update_layout = UpdateLayout::None;
+    assert!(no_steps.should_drive_with(AssertionKind::Resolve, &[]));
+    let empty_without_steps = cause_column_problems(&table(&[]), &[no_steps], &[]);
+    assert_eq!(empty_without_steps, empty_on_driven);
+
     let mut outside = vectors[0].clone();
     outside.scenario_id = Some("n99-x".into());
     assert!(cause_column_problems(&table(&[]), &[outside], &[]).is_empty());
+}
+
+/// The update-crypto column check ties `NoUpdateSteps` to a set without
+/// update steps: it accepts `NoUpdateSteps` on such a set and `Passes` or
+/// `FailsAt` on a set with steps, and refuses every other pairing, naming the
+/// set and its scenario.
+#[test]
+fn update_crypto_column_problems_names_each_fault() {
+    const SET: &str = "regtest/k1/qgppexmy";
+    fn table(update_crypto: UpdateCryptoExpectation) -> [NegativeSetExpectation; 1] {
+        [NegativeSetExpectation {
+            scenario: "n24",
+            update_crypto,
+            cause: &["x"],
+            note: "",
+        }]
+    }
+    let mut stepped = negative_vector(SET, "k1");
+    stepped.scenario_id = Some("n24-x".into());
+    let mut no_steps = stepped.clone();
+    no_steps.update_layout = UpdateLayout::None;
+    assert!(!stepped.update_layout.step_prefixes().is_empty());
+    assert!(no_steps.update_layout.step_prefixes().is_empty());
+
+    let fine = [
+        (UpdateCryptoExpectation::NoUpdateSteps, &no_steps),
+        (UpdateCryptoExpectation::Passes, &stepped),
+        (UpdateCryptoExpectation::FailsAt(&["x"]), &stepped),
+    ];
+    for (expectation, v) in fine {
+        assert_eq!(
+            update_crypto_column_problems(&table(expectation), std::slice::from_ref(v)),
+            Vec::<String>::new(),
+            "{expectation:?}"
+        );
+    }
+
+    let wrong = [
+        (UpdateCryptoExpectation::NoUpdateSteps, &stepped),
+        (UpdateCryptoExpectation::Passes, &no_steps),
+        (UpdateCryptoExpectation::FailsAt(&["x"]), &no_steps),
+    ];
+    for (expectation, v) in wrong {
+        let problems = update_crypto_column_problems(&table(expectation), std::slice::from_ref(v));
+        assert_eq!(problems.len(), 1, "{expectation:?}: {problems:?}");
+        assert!(
+            problems[0].contains(SET)
+                && problems[0].contains("(n24)")
+                && problems[0].contains("NoUpdateSteps exactly when the set ships no update steps"),
+            "{expectation:?}: {problems:?}"
+        );
+    }
 }
 
 /// The lookup finds an entry by the scenario prefix of the set's scenario id,

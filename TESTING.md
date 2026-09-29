@@ -213,11 +213,12 @@ on its own.
 
 ### Negative-set expectation table
 
-`NEGATIVE_SET_EXPECTATIONS` (`src/test_vectors.rs`) holds, for each negative
-scenario of the checked-out suite that ships update steps (n05, n10–n31), what
-the `update-crypto` driver observes on its sets on every network: `Passes`, or
-`FailsAt` with the substrings the failure must carry (the check that failed and
-the reason it gives), the cause its Resolve rejection must carry, plus a note
+`NEGATIVE_SET_EXPECTATIONS` (`src/test_vectors.rs`) holds, for every negative
+scenario of the checked-out suite (n01–n05, n10–n31), what the `update-crypto`
+driver observes on its sets on every network: `Passes`, `FailsAt` with the
+substrings the failure must carry (the check that failed and the reason it
+gives), or `NoUpdateSteps` for a set that ships no update steps (n01–n04), to
+which `update-crypto` does not apply; then the cause its Resolve rejection must carry, plus a note
 where the outcome is not obvious from the scenario. A set expected to pass must pass; a set expected to fail must fail
 with every substring. Either mismatch fails naming the set and its scenario, and
 `a_flipped_negative_set_expectation_fails_naming_the_set` keeps that comparison
@@ -225,8 +226,9 @@ live. A negative set with no entry is refused by name.
 
 The table covers the checked-out suite only; synthetic corpora have no entry.
 `negative_set_table_matches_the_corpus` pins it to that corpus in both
-directions: a negative update-bearing set without an entry, or an entry with no
-set, fails by name, and the 92 sets are counted.
+directions: a negative set without an entry, or an entry with no set, fails by
+name, and the 108 sets are counted. It also ties `NoUpdateSteps` to the set's
+layout: an entry is `NoUpdateSteps` exactly when its set ships no update steps.
 
 On every set, positive and negative, `update-crypto` first checks each step's
 own `signedUpdate` proof under the key its `sourceDocument` names, before any
@@ -241,16 +243,25 @@ own wording, taken from the details the resolver emits. The vector's
 would test that implementation's phrasing, not our reason. A cause names the
 fault, never only the code; a fault-class substring may be shared between
 scenarios (n10/n11, n16/n17, n26/n27 are rejected for the same stated reason).
+The four invalid-DID scenarios are the exception: each cause names the fault
+the scenario is built to test (n01 the bech32 checksum, n02 the padding, which
+the bech32 decoder reports as a failed bit conversion, n03 the network
+identifier, n04 the genesis-hash comparison) and is not contained in the detail
+of the other three, so a set rejected on another parse path, or an n04 DID that
+fails to parse before its genesis document is compared, fails. n01 and n02 pair
+this crate's `Bech32 error:` wrapper with the decoder's own reason.
 The list is empty exactly when the set's `resolve` row is not driven (n29–n31,
 SMT-delivered); `negative_set_table_matches_the_corpus` enforces that in both
 directions, with no waiver. `a_wrong_expected_cause_fails_naming_the_set` keeps
-the comparison live: with n24's cause replaced, the regtest n24 set fails
+the comparison live: with n24's cause replaced (a set with update steps), and
+again with n04's (a set without), the regtest set fails
 naming the set, the scenario and the cause check, although its code still
 matches. Cause mismatches are collected and reported together, so a wrong entry
 names its set on every network.
 
-Synthetic corpora (the reshaped fork corpora) and keyed suites have no entry:
-their negative `resolve` rows keep the code check and get no cause check.
+Every live negative set has an entry. Only synthetic corpora (the reshaped fork
+corpora) and keyed suites have none: their negative `resolve` rows keep the code
+check and get no cause check.
 
 An upstream change to a negative scenario is taken in by re-observing its sets
 and editing the entry, never by editing the vector.
@@ -360,7 +371,7 @@ under `test-suite/`. `resolve/NN` counts the numbered resolve cases.
 | 11a/b | v2 | `SMTBeacon`, CAS-delivered update | `CasDelivery`, `SmtDelivery`, `UnsupportedBeaconType` | driven |
 | 12a/b, 25a | v2 | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | driven |
 | 25b, 25c | v1 | `SMTBeacon`, genesis-only | `SmtDelivery`, `UnsupportedBeaconType` | none |
-| n01–n04 | `INVALID_DID` | genesis-only, raised before any request | driven | none |
+| n01–n04 | `INVALID_DID` | genesis-only, raised before any request | driven, code and cause | none (`NoUpdateSteps` in the expectation table) |
 | n05, n10–n28 | `MISSING_UPDATE_DATA`, `INVALID_DID_UPDATE`, `LATE_PUBLISHING_ERROR` | Singleton beacons, captured | driven off the capture | update-crypto driven against the expectation table; end-state `ExpectedError` |
 | n29–n31 | `INVALID_SIGNAL_DATA`, `MISSING_UPDATE_DATA` | `SMTBeacon` | `SmtDelivery`, `UnsupportedBeaconType` | update-crypto driven against the expectation table; end-state `ExpectedError` |
 
@@ -580,7 +591,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 130 `#[test]` functions; `src/test_vectors.rs` holds 174.
+`src/resolver.rs` holds 130 `#[test]` functions; `src/test_vectors.rs` holds 175.
 
 ## 8. When `test-suite/` is absent
 
