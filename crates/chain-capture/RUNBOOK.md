@@ -862,7 +862,6 @@ cargo run -p chain-capture -- capture --network testnet4 --suite-root "$SCRATCH/
 ```
 
 Nothing under `$SCRATCH` is committed; delete it when done. The smoke confirms
-the endpoints and the pacing against the real indexers, not a fixture. A
-resolution mismatch on signet may be the test suite's own open "Recreate Signet
-Test Vectors" item rather than a fault in this tool; check that before
-debugging.
+the endpoints and the pacing against the real indexers, not a fixture. If a
+resolution disagrees with the set, first check that the network, the endpoint
+and the suite checkout match the set.

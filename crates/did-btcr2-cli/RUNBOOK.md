@@ -226,8 +226,10 @@ writes nothing.
 
 ## Step 5 — Resolve after the update confirms (`versionId "2"`)
 
-Once the step-4 transaction confirms (~30s), resolve with the sidecar file you
-emitted in Step 4, advancing `versionId` to `"2"`:
+Once the step-4 transaction has **six confirmations** (~3 minutes on mutinynet),
+resolve with the sidecar file you emitted in Step 4, advancing `versionId` to `"2"`.
+Six is the resolver's default `--min-conf`; with fewer the resolve stays at
+`versionId "1"`. Pass `--min-conf 1` to see the update after one confirmation:
 
 ```bash
 cargo run -q -p did-btcr2-cli -- resolve --sidecar ./update-v2.sidecar.json \
@@ -282,7 +284,8 @@ cargo run -q -p did-btcr2-cli -- deactivate "$DID" \
   --yes
 ```
 
-Once it confirms, resolve once more with the accumulated sidecar —
+Once it has **six confirmations** (~3 minutes on mutinynet; or pass `--min-conf 1`),
+resolve once more with the accumulated sidecar —
 `deactivated` flips to `true` and `versionId` reaches `"3"`:
 
 ```bash

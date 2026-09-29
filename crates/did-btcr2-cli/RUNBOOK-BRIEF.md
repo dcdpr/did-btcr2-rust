@@ -158,6 +158,9 @@ The on-chain signal is only a 32-byte commitment, not the update itself — so `
 the sidecar payload from Step 4 to reconstruct v2. Without it, a singleton update fails with
 `MISSING_UPDATE_DATA`.
 
+Wait for six confirmations (~3 minutes on mutinynet), the default `--min-conf`, or pass
+`--min-conf 1` to see it after one.
+
 ```bash
 cargo run -q -p did-btcr2-cli -- resolve --sidecar ./update-v2.sidecar.json \
   --network mutinynet "$DID"
@@ -199,7 +202,7 @@ cargo run -q -p did-btcr2-cli -- deactivate "$DID" \
   --yes
 ```
 
-Once it confirms, resolve with the accumulated sidecar:
+Once it has six confirmations (or with `--min-conf 1`), resolve with the accumulated sidecar:
 
 ```bash
 cargo run -q -p did-btcr2-cli -- resolve --sidecar ./deactivate-v3.sidecar.json \
