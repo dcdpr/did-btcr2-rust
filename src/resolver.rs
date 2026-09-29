@@ -2442,22 +2442,81 @@ mod tests {
         .unwrap_or_else(|e| panic!("{id}: the resolved document must round-trip: {e}"))
     }
 
-    /// The code an error carries: the fragment after `#` of its problem-details
-    /// `type`, e.g. `NOT_FOUND` out of `https://www.w3.org/ns/did#NOT_FOUND`.
+    /// The code and detail an error carries. The code is the fragment after
+    /// `#` of its problem-details `type`, e.g. `NOT_FOUND` out of
+    /// `https://www.w3.org/ns/did#NOT_FOUND`.
     ///
     /// An error with no problem details is a failure of the harness or the
     /// driver, not an answer the specification defines, so it panics rather than
     /// being compared against an expected code.
-    fn emitted_code<E: ProblemDetails + std::fmt::Display>(err: &E, ctx: &str) -> String {
+    ///
+    /// Beside the code, the problem-details `detail`: the cause, in this
+    /// crate's words. `Display` is not the cause: a wrapped spec error
+    /// displays only its wrapper's summary. Every spec error carries a string
+    /// detail, so a missing one panics like a missing `type`.
+    fn emitted_code_and_detail<E: ProblemDetails + std::fmt::Display>(
+        err: &E,
+        ctx: &str,
+    ) -> (String, String) {
         let details = err
             .details()
             .unwrap_or_else(|| panic!("{ctx}: `{err}` is a driver error, not a spec error code"));
         let kind = details["type"].as_str().unwrap_or_else(|| {
             panic!("{ctx}: the problem details of `{err}` carry no string `type`: {details}")
         });
-        kind.rsplit_once('#')
+        let code = kind
+            .rsplit_once('#')
             .map(|(_, code)| code.to_string())
-            .unwrap_or_else(|| panic!("{ctx}: problem-details type `{kind}` has no `#CODE`"))
+            .unwrap_or_else(|| panic!("{ctx}: problem-details type `{kind}` has no `#CODE`"));
+        let detail = details["detail"].as_str().unwrap_or_else(|| {
+            panic!("{ctx}: the problem details of `{err}` carry no string `detail`: {details}")
+        });
+        (code, detail.to_string())
+    }
+
+    /// The rejection-cause check of a negative set's main Resolve pair.
+    ///
+    /// A set with an entry in `table` must be rejected with a detail that
+    /// contains every one of the entry's cause substrings; a set with no entry
+    /// (a synthetic corpus, a keyed suite) is held to its code only. The
+    /// mismatches are collected and reported together by [`CauseCheck::finish`],
+    /// so a wrong entry names every set it touches, on every network.
+    struct CauseCheck<'t> {
+        table: &'t [NegativeSetExpectation],
+        mismatches: Vec<String>,
+    }
+
+    impl<'t> CauseCheck<'t> {
+        fn new(table: &'t [NegativeSetExpectation]) -> Self {
+            Self {
+                table,
+                mismatches: Vec::new(),
+            }
+        }
+
+        fn check(&mut self, vector: &Vector, ctx: &str, detail: &str) {
+            let Some(entry) = negative_set_expectation(self.table, vector) else {
+                return;
+            };
+            for want in entry.cause {
+                if !detail.contains(want) {
+                    self.mismatches.push(format!(
+                        "{ctx} ({}): the rejection cause must contain {want:?}, got detail \
+                         {detail:?}",
+                        entry.scenario
+                    ));
+                }
+            }
+        }
+
+        fn finish(self) {
+            assert!(
+                self.mismatches.is_empty(),
+                "{} rejection(s) differ from their scenario's cause:\n{}",
+                self.mismatches.len(),
+                self.mismatches.join("\n")
+            );
+        }
     }
 
     /// The chain snapshot a set's resolves replay, or `None` for a set resolved
@@ -2589,10 +2648,13 @@ mod tests {
     /// `confirmations` (`None` for an expected error), so a caller can assert
     /// more strictly than the corpus rule does.
     ///
-    /// AN EXPECTED ERROR asserts the CODE only: the error's problem-details
-    /// type fragment must equal the recorded code mapped through
-    /// `divergences` ([`expected_emitted_code`]). The recorded `errorMessage`
-    /// is another implementation's text and is not compared. A DID that does
+    /// AN EXPECTED ERROR asserts the CODE: the error's problem-details type
+    /// fragment must equal the recorded code mapped through `divergences`
+    /// ([`expected_emitted_code`]). On the main pair of a negative set it also
+    /// asserts the CAUSE through `causes` ([`CauseCheck`]): the detail must
+    /// carry the scenario's cause substrings, in this crate's own wording. The
+    /// recorded `errorMessage` is another implementation's text and is never
+    /// compared. A DID that does
     /// not parse is an outcome too (`INVALID_DID` / `METHOD_NOT_SUPPORTED`), as
     /// is an error `Document::resolve` raises before any request
     /// (`INVALID_OPTIONS`).
@@ -2617,6 +2679,7 @@ mod tests {
         outcome: &Outcome,
         fixture: Option<&ChainFixture>,
         divergences: &[CodeDivergence],
+        causes: &mut CauseCheck,
     ) -> Option<u32> {
         use crate::identifier::Did;
 
@@ -2625,16 +2688,16 @@ mod tests {
         let input = vector.fixture(&format!("{case_dir}/input.json"));
         let output = vector.fixture(&format!("{case_dir}/output.json"));
 
-        let result: Result<ResolutionResult, String> =
+        let result: Result<ResolutionResult, (String, String)> =
             match field_str(&input, "did", &ctx).parse::<Did>() {
-                Err(e) => Err(emitted_code(&Btcr2Error::from(e), &ctx)),
+                Err(e) => Err(emitted_code_and_detail(&Btcr2Error::from(e), &ctx)),
                 Ok(did) => match Document::resolve(&did, case_options(&input, fixture, &ctx)) {
-                    Err(e) => Err(emitted_code(&e, &ctx)),
+                    Err(e) => Err(emitted_code_and_detail(&e, &ctx)),
                     Ok(resolver) => match fixture {
                         Some(f) => drive_to_resolved_from_capture(resolver, f, id),
                         None => try_resolve_with_no_signals(resolver),
                     }
-                    .map_err(|e| emitted_code(&e, &ctx)),
+                    .map_err(|e| emitted_code_and_detail(&e, &ctx)),
                 },
             };
 
@@ -2642,10 +2705,15 @@ mod tests {
             Outcome::Error { code } => {
                 let spec = expected_emitted_code(code, divergences);
                 match result {
-                    Err(emitted) => assert!(
-                        emitted == spec,
-                        "{ctx}: expected error {code} (emit {spec}), got {emitted}"
-                    ),
+                    Err((emitted, detail)) => {
+                        assert!(
+                            emitted == spec,
+                            "{ctx}: expected error {code} (emit {spec}), got {emitted}: {detail}"
+                        );
+                        if case_dir == "resolve" && vector.is_negative() {
+                            causes.check(vector, &ctx, &detail);
+                        }
+                    }
                     Ok(resolved) => panic!(
                         "{ctx}: expected error {code} (emit {spec}), but the resolve succeeded \
                          at versionId {}",
@@ -2667,8 +2735,8 @@ mod tests {
                 Document::from_json_string(&output["didDocument"].to_string()).unwrap_or_else(
                     |e| panic!("{ctx}/output.json didDocument must parse as a Document: {e}"),
                 );
-                let result = result.unwrap_or_else(|code| {
-                    panic!("{ctx}: expected a resolved document, got error {code}")
+                let result = result.unwrap_or_else(|(code, detail)| {
+                    panic!("{ctx}: expected a resolved document, got error {code}: {detail}")
                 });
 
                 // Every content field — id, `@context`, verificationMethod,
@@ -2738,13 +2806,29 @@ mod tests {
     /// real walk from a short-circuit. Mid-walk target conditions are covered
     /// where a set records them, as `resolve/NN/` cases
     /// ([`drive_resolve_options_with`]).
+    ///
+    /// A negative set's rejection is held to its cause in
+    /// [`NEGATIVE_SET_EXPECTATIONS`] as well as to its code
+    /// ([`drive_resolve_with_expectations`]).
     fn drive_resolve_with(
         vectors: &[Vector],
         overrides: &[SkipOverride],
         divergences: &[CodeDivergence],
     ) {
+        drive_resolve_with_expectations(vectors, overrides, divergences, NEGATIVE_SET_EXPECTATIONS);
+    }
+
+    /// [`drive_resolve_with`] over an explicit negative-set table, so a wrong
+    /// expected cause can be exercised in place.
+    fn drive_resolve_with_expectations(
+        vectors: &[Vector],
+        overrides: &[SkipOverride],
+        divergences: &[CodeDivergence],
+        table: &[NegativeSetExpectation],
+    ) {
         use crate::identifier::Did;
 
+        let mut causes = CauseCheck::new(table);
         let mut observed = BTreeSet::new();
         for vector in vectors {
             let id = &vector.id;
@@ -2802,6 +2886,7 @@ mod tests {
                 &vector.outcome,
                 fixture.as_ref(),
                 divergences,
+                &mut causes,
             );
 
             if let (Some(f), true) = (&fixture, walk_probes_apply(vector)) {
@@ -2866,6 +2951,7 @@ mod tests {
 
             observed.insert(RowKey::set(id.clone()));
         }
+        causes.finish();
         reconcile_driven_with(AssertionKind::Resolve, vectors, &observed, overrides);
     }
 
@@ -2898,6 +2984,7 @@ mod tests {
         overrides: &[SkipOverride],
         divergences: &[CodeDivergence],
     ) {
+        let mut causes = CauseCheck::new(NEGATIVE_SET_EXPECTATIONS);
         let mut observed = BTreeSet::new();
         for vector in vectors {
             let cases: Vec<_> = vector
@@ -2922,10 +3009,12 @@ mod tests {
                     &case.outcome,
                     fixture.as_ref(),
                     divergences,
+                    &mut causes,
                 );
                 observed.insert(RowKey::case(vector.id.clone(), case.name.clone()));
             }
         }
+        causes.finish();
         reconcile_driven_with(AssertionKind::ResolveOption, vectors, &observed, overrides);
     }
 
@@ -3015,6 +3104,7 @@ mod tests {
     /// resolved `confirmations` to EQUAL the recorded value. Returns the
     /// `(case, recorded)` pairs checked.
     fn check_exact_confirmations(vectors: &[Vector]) -> Vec<(String, Option<u64>)> {
+        let mut causes = CauseCheck::new(NEGATIVE_SET_EXPECTATIONS);
         let mut checked = Vec::new();
         for vector in vectors {
             let fixture = replay_fixture(vector);
@@ -3034,12 +3124,14 @@ mod tests {
                     outcome,
                     fixture.as_ref(),
                     ERROR_CODE_DIVERGENCES,
+                    &mut causes,
                 );
                 confirmations_exact(resolved, *confirmations)
                     .unwrap_or_else(|e| panic!("{} {case_dir}: {e}", vector.id));
                 checked.push((case_dir, *confirmations));
             }
         }
+        causes.finish();
         checked
     }
 
@@ -3686,6 +3778,50 @@ mod tests {
                 "{scenario}: the failure names the set and the scenario: {message}"
             );
         }
+    }
+
+    /// The Resolve driver compares a negative set's rejection detail with its
+    /// scenario's cause: with n24's cause replaced by text no rejection
+    /// carries, the driver fails on the regtest n24 set, naming the set, the
+    /// scenario and the cause check, although the code still matches.
+    #[test]
+    fn a_wrong_expected_cause_fails_naming_the_set() {
+        let Some(vectors) = discovered_vectors_or_skip() else {
+            return;
+        };
+        let mut wrong = NEGATIVE_SET_EXPECTATIONS.to_vec();
+        let n24 = wrong
+            .iter()
+            .position(|e| e.scenario == "n24")
+            .expect("the table has an n24 entry");
+        wrong[n24].cause = &["this text is not in any rejection"];
+
+        let subset: Vec<Vector> = vectors
+            .iter()
+            .filter(|v| {
+                v.network_dir == "regtest"
+                    && v.is_negative()
+                    && negative_set_expectation(&wrong, v).map(|e| e.scenario) == Some("n24")
+            })
+            .cloned()
+            .collect();
+        assert_eq!(subset.len(), 1, "n24 has one regtest set");
+
+        drive_resolve_with_expectations(
+            &subset,
+            &[],
+            ERROR_CODE_DIVERGENCES,
+            NEGATIVE_SET_EXPECTATIONS,
+        );
+        let message = panic_text(|| {
+            drive_resolve_with_expectations(&subset, &[], ERROR_CODE_DIVERGENCES, &wrong)
+        });
+        assert!(
+            message.contains(&subset[0].id)
+                && message.contains("n24")
+                && message.contains("rejection cause"),
+            "the failure names the set, the scenario and the cause check: {message}"
+        );
     }
 
     /// A negative set with no table entry is refused by name, never passed

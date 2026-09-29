@@ -5691,6 +5691,10 @@ pub(crate) struct NegativeSetExpectation {
     /// `other.json.scenarioId` prefix, e.g. `n24`.
     pub(crate) scenario: &'static str,
     pub(crate) update_crypto: UpdateCryptoExpectation,
+    /// Text the rejection's problem-details detail must contain, in this
+    /// crate's own wording; empty exactly when the set's Resolve row is not
+    /// driven.
+    pub(crate) cause: &'static [&'static str],
     /// Why the outcome is what it is when that is not obvious from the
     /// scenario (a vector that differs from what its scenario describes, a
     /// fault caught by an earlier check); empty otherwise.
@@ -5701,13 +5705,17 @@ pub(crate) struct NegativeSetExpectation {
 /// Synthetic corpora have no entry.
 ///
 /// Each entry is what the update-crypto driver observes on that scenario's
-/// sets, on every network. An upstream change to a negative scenario is taken
+/// sets, on every network, and the text the Resolve row's rejection detail
+/// must carry. A cause is this crate's own wording, never the vector's
+/// `errorMessage`, which is another implementation's text; the same
+/// fault-class text may serve two scenarios. An upstream change to a negative scenario is taken
 /// in by re-observing the sets and editing the entry, never by editing the
 /// vector.
 pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
     NegativeSetExpectation {
         scenario: "n05",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &["update_hash="],
         note: "the update is sound; the set is rejected because the update data is missing \
                at resolution",
     },
@@ -5717,6 +5725,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "Proof context does not match update context",
         ]),
+        cause: &["update @context is not the pinned BTCR2 Unsigned Update context array"],
         note: "",
     },
     NegativeSetExpectation {
@@ -5725,6 +5734,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "Proof context does not match update context",
         ]),
+        cause: &["update @context is not the pinned BTCR2 Unsigned Update context array"],
         note: "",
     },
     NegativeSetExpectation {
@@ -5733,17 +5743,20 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "Proof context does not match update context",
         ]),
+        cause: &["update proof @context is not the pinned BTCR2 Unsigned Update context array"],
         note: "",
     },
     NegativeSetExpectation {
         scenario: "n13",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &["proof capabilityAction is not \"Write\""],
         note: "the wrong capabilityAction is signed data under a valid proof; only the \
                resolver checks its value",
     },
     NegativeSetExpectation {
         scenario: "n14",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &["proof capability is not the root capability URN of this DID"],
         note: "the wrong capability is signed data under a valid proof; only the resolver \
                checks its value",
     },
@@ -5753,6 +5766,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "Proof purpose was expected to be capabilityInvocation",
         ]),
+        cause: &["proof proofPurpose is not capabilityInvocation"],
         note: "",
     },
     NegativeSetExpectation {
@@ -5761,6 +5775,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "verificationMethod id not present in the capabilityInvocation set",
         ]),
+        cause: &["verificationMethod id not present in the capabilityInvocation set"],
         note: "",
     },
     NegativeSetExpectation {
@@ -5769,6 +5784,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "verificationMethod id not present in the capabilityInvocation set",
         ]),
+        cause: &["verificationMethod id not present in the capabilityInvocation set"],
         note: "",
     },
     NegativeSetExpectation {
@@ -5777,17 +5793,23 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "the vendor signedUpdate proof must verify",
             "Verification failed",
         ]),
+        cause: &["update proof failed verification", "Verification failed"],
         note: "",
     },
     NegativeSetExpectation {
         scenario: "n19",
         update_crypto: UpdateCryptoExpectation::FailsAt(&["update sourceHash"]),
+        cause: &[
+            "update sourceHash",
+            "does not match the contemporary document hash",
+        ],
         note: "the re-derived sourceHash differs from the stated one; the check names only \
                the field",
     },
     NegativeSetExpectation {
         scenario: "n20",
         update_crypto: UpdateCryptoExpectation::FailsAt(&["update targetHash"]),
+        cause: &["Hash of updated document does not match target hash"],
         note: "the re-derived targetHash differs from the stated one; the check names only \
                the field",
     },
@@ -5796,6 +5818,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
         update_crypto: UpdateCryptoExpectation::FailsAt(&[
             "signedUpdate.targetVersionId must be sourceVersionId + 1",
         ]),
+        cause: &["late publishing detected at update sort step"],
         note: "the update skips a version; the version-linkage check refuses it before any \
                hash is derived",
     },
@@ -5806,6 +5829,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "Unable to apply JSON Patch",
             "'/service/9'",
         ]),
+        cause: &["Unable to apply JSON Patch"],
         note: "the patch replaces a service entry that does not exist, so the update cannot \
                be built",
     },
@@ -5815,6 +5839,7 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "construct_signed_update must succeed",
             "update may not change the DID document id",
         ]),
+        cause: &["may not change the DID document id"],
         note: "the patch changes the document id, so the update cannot be built",
     },
     NegativeSetExpectation {
@@ -5824,24 +5849,28 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
             "patched document is non-conformant",
             "not Multikey",
         ]),
+        cause: &["Updated DID document is non-conformant", "not Multikey"],
         note: "the patch leaves a non-conformant verification method, so the update cannot be \
                built",
     },
     NegativeSetExpectation {
         scenario: "n25",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &["proof created is after the announcing block's header timestamp"],
         note: "the fault is the proof's created time against the announcing block, which only \
                the resolver sees",
     },
     NegativeSetExpectation {
         scenario: "n26",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &["proof expires is before the announcing block's mediantime"],
         note: "the fault is the proof's expires time against the announcing block, which only \
                the resolver sees",
     },
     NegativeSetExpectation {
         scenario: "n27",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &["proof expires is before the announcing block's mediantime"],
         note: "expires is before created, but on every network it is also before the \
                announcing block's mediantime, so the vector never isolates the \
                created-versus-expires fault; the fault is only the resolver's to see \
@@ -5850,22 +5879,26 @@ pub(crate) const NEGATIVE_SET_EXPECTATIONS: &[NegativeSetExpectation] = &[
     NegativeSetExpectation {
         scenario: "n28",
         update_crypto: UpdateCryptoExpectation::FailsAt(&["must be update number 2 in the chain"]),
+        cause: &["Found hash", ", expected"],
         note: "the second update is a conflicting update for version 2; the version-linkage \
                check refuses it, and both proofs verify",
     },
     NegativeSetExpectation {
         scenario: "n29",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &[],
         note: "the fault is in the SMT proof, which the update itself does not carry",
     },
     NegativeSetExpectation {
         scenario: "n30",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &[],
         note: "the fault is in the SMT proof, which the update itself does not carry",
     },
     NegativeSetExpectation {
         scenario: "n31",
         update_crypto: UpdateCryptoExpectation::Passes,
+        cause: &[],
         note: "the fault is in the SMT proof, which the update itself does not carry",
     },
 ];
@@ -5880,6 +5913,47 @@ pub(crate) fn negative_set_expectation<'t>(
     let id = vector.scenario_id.as_deref()?;
     let scenario = id.split('-').next().unwrap_or(id);
     table.iter().find(|entry| entry.scenario == scenario)
+}
+
+/// What is wrong with the cause column of `table` over the negative
+/// update-bearing sets of `vectors`, one line per fault; empty when the column
+/// is sound.
+///
+/// A cause list is empty exactly when the set's Resolve row is not driven
+/// under `overrides`: a driven row with no cause would pass on the code
+/// alone, and a cause on an undriven row is never checked. Every cause names
+/// the fault: it is non-empty and not code-shaped (only upper-case letters and
+/// underscores). A set with no entry is the scenario-level guard's to report,
+/// not this one's.
+pub(crate) fn cause_column_problems(
+    table: &[NegativeSetExpectation],
+    vectors: &[Vector],
+    overrides: &[SkipOverride],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for v in vectors
+        .iter()
+        .filter(|v| v.is_negative() && !v.update_layout.step_prefixes().is_empty())
+    {
+        let Some(entry) = negative_set_expectation(table, v) else {
+            continue;
+        };
+        let (id, scenario) = (&v.id, entry.scenario);
+        if entry.cause.is_empty() == v.should_drive_with(AssertionKind::Resolve, overrides) {
+            problems.push(format!(
+                "{id} ({scenario}): cause list must be empty exactly when the Resolve row is \
+                 not driven"
+            ));
+        }
+        for s in entry.cause {
+            if s.is_empty() || s.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                problems.push(format!(
+                    "{id} ({scenario}): cause {s:?} must name the fault, not only the code"
+                ));
+            }
+        }
+    }
+    problems
 }
 
 /// The scenarios whose genesis document declares a CAS or SMT beacon.
@@ -6039,6 +6113,79 @@ fn negative_set_table_matches_the_corpus() {
         scenarios.len(),
         "each scenario has one entry: {scenarios:?}"
     );
+
+    let problems = cause_column_problems(NEGATIVE_SET_EXPECTATIONS, &vectors, SKIP_OVERRIDES);
+    assert!(
+        problems.is_empty(),
+        "the cause column disagrees with the corpus:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// The cause-column check refuses an empty list on a driven Resolve row, a
+/// list on an undriven one, an empty substring and a bare code, and accepts
+/// a fault-describing list on a driven row and an empty one on an undriven
+/// row. A set outside the table is left to the scenario-level guard.
+#[test]
+fn cause_column_problems_names_each_fault() {
+    const SET: &str = "regtest/k1/qgppexmy";
+    const RESOLVE_SKIPPED: &[SkipOverride] = &[SkipOverride {
+        vector: SET,
+        kind: AssertionKind::Resolve,
+        case: None,
+        reason: "a hand-written skip for this test",
+    }];
+    fn table(cause: &'static [&'static str]) -> [NegativeSetExpectation; 1] {
+        [NegativeSetExpectation {
+            scenario: "n24",
+            update_crypto: UpdateCryptoExpectation::Passes,
+            cause,
+            note: "",
+        }]
+    }
+    let mut v = negative_vector(SET, "k1");
+    v.scenario_id = Some("n24-x".into());
+    assert!(v.should_drive_with(AssertionKind::Resolve, &[]));
+    assert!(!v.should_drive_with(AssertionKind::Resolve, RESOLVE_SKIPPED));
+    let vectors = [v];
+
+    assert_eq!(
+        cause_column_problems(&table(&["not Multikey"]), &vectors, &[]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        cause_column_problems(&table(&[]), &vectors, RESOLVE_SKIPPED),
+        Vec::<String>::new()
+    );
+
+    let empty_on_driven = cause_column_problems(&table(&[]), &vectors, &[]);
+    assert_eq!(empty_on_driven.len(), 1, "{empty_on_driven:?}");
+    assert!(
+        empty_on_driven[0].contains(SET)
+            && empty_on_driven[0].contains("(n24)")
+            && empty_on_driven[0]
+                .contains("cause list must be empty exactly when the Resolve row is not driven"),
+        "{empty_on_driven:?}"
+    );
+
+    let listed_on_undriven =
+        cause_column_problems(&table(&["not Multikey"]), &vectors, RESOLVE_SKIPPED);
+    assert_eq!(listed_on_undriven, empty_on_driven);
+
+    let bad_lists: [&'static [&'static str]; 2] = [&[""], &["INVALID_DID_UPDATE"]];
+    for causes in bad_lists {
+        let bad = causes[0];
+        let problems = cause_column_problems(&table(causes), &vectors, &[]);
+        assert_eq!(problems.len(), 1, "{bad:?}: {problems:?}");
+        assert!(
+            problems[0].contains(&format!("cause {bad:?} must name the fault")),
+            "{problems:?}"
+        );
+    }
+
+    let mut outside = vectors[0].clone();
+    outside.scenario_id = Some("n99-x".into());
+    assert!(cause_column_problems(&table(&[]), &[outside], &[]).is_empty());
 }
 
 /// The lookup finds an entry by the scenario prefix of the set's scenario id,
@@ -6050,11 +6197,13 @@ fn negative_set_expectation_is_none_outside_the_table() {
         NegativeSetExpectation {
             scenario: "n10",
             update_crypto: UpdateCryptoExpectation::FailsAt(&["x"]),
+            cause: &["x"],
             note: "",
         },
         NegativeSetExpectation {
             scenario: "n24",
             update_crypto: UpdateCryptoExpectation::Passes,
+            cause: &["y"],
             note: "",
         },
     ];

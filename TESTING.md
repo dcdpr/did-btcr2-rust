@@ -71,14 +71,16 @@ walks `test-suite/` only, and the synthetic corpora under `fixtures/layout/`
 |---|---|---|
 | `derivation` | `create/input.json` → encoded DID equals `create/output.json.did` | `op_vectors_create_derives_expected_did` |
 | `genesis-key` | `other.json.genesisKeys.secret` derives `genesisKeys.public`, and every update step signs with the genesis secret or an `other.json.extraKeys` secret whose public key is the one the step's `sourceDocument` names | `op_vectors_create_genesis_key_corroborated` |
-| `resolve` | the resolver FSM resolves the vector's main pair (`resolve/input.json`) to `resolve/output.json` | `op_vectors_resolve_matches_output` |
+| `resolve` | the resolver FSM resolves the vector's main pair (`resolve/input.json`) to `resolve/output.json`; a negative set's rejection carries its scenario's cause | `op_vectors_resolve_matches_output` |
 | `update-crypto` | each step's own `signedUpdate` proof verifies under the key its source document names, first; then each step's content-bound triple and BIP340 proof re-derive from its own inputs and verify against its source document; a step over a deactivated source is refused, and the vendor's proof on it is verified instead. A negative set is held to its entry in the negative-set expectation table | `op_vectors_update_signs_to_expected_hashes` |
 | `end-state` | applying the update steps in order to the genesis document reproduces `resolve/output.json.didDocument`; the walk stops at the resolved version, so a step no resolver applies (after deactivation, from a removed beacon, below the current height) is not applied | `op_vectors_updates_apply_to_expected_end_state` |
 | `resolve-option` | one row per `resolve/NN/` case: the resolver, given that case's `resolutionOptions` (`versionId`, `versionTime`, both, `minConf`), produces its `output.json` | `op_vectors_resolve_cases_match_output` |
 
 `resolve` and `resolve-option` share one per-case driver. An output carrying
-`didResolutionMetadata.error` is asserted by **code only** (the `errorMessage`
-is the generating implementation's text). A positive output is asserted on
+`didResolutionMetadata.error` is asserted by its **code**, and, on the main pair
+of a negative set of the checked-out suite, by its **cause** from the
+negative-set expectation table; the `errorMessage` is never compared (it is the
+generating implementation's text). A positive output is asserted on
 `didDocument`, `versionId` (a string, no coercion), `deactivated`, and
 `confirmations` compared as **at least** the recorded value. The resolver's
 `confirmations` must also **equal** the derived count: `0` at genesis, where no
@@ -215,8 +217,8 @@ on its own.
 scenario of the checked-out suite that ships update steps (n05, n10–n31), what
 the `update-crypto` driver observes on its sets on every network: `Passes`, or
 `FailsAt` with the substrings the failure must carry (the check that failed and
-the reason it gives), plus a note where the outcome is not obvious from the
-scenario. A set expected to pass must pass; a set expected to fail must fail
+the reason it gives), the cause its Resolve rejection must carry, plus a note
+where the outcome is not obvious from the scenario. A set expected to pass must pass; a set expected to fail must fail
 with every substring. Either mismatch fails naming the set and its scenario, and
 `a_flipped_negative_set_expectation_fails_naming_the_set` keeps that comparison
 live. A negative set with no entry is refused by name.
@@ -231,6 +233,24 @@ own `signedUpdate` proof under the key its `sourceDocument` names, before any
 other check, so a set that fails a later check still has each signature pinned.
 A step over a deactivated source is left to the deactivated-source check, which
 verifies the same proof.
+
+The `cause` column lists substrings the problem-details `detail` of the set's
+`resolve` rejection must contain, after its code matches. They are this crate's
+own wording, taken from the details the resolver emits. The vector's
+`errorMessage` is not used: it is another implementation's text, and matching it
+would test that implementation's phrasing, not our reason. A cause names the
+fault, never only the code; a fault-class substring may be shared between
+scenarios (n10/n11, n16/n17, n26/n27 are rejected for the same stated reason).
+The list is empty exactly when the set's `resolve` row is not driven (n29–n31,
+SMT-delivered); `negative_set_table_matches_the_corpus` enforces that in both
+directions, with no waiver. `a_wrong_expected_cause_fails_naming_the_set` keeps
+the comparison live: with n24's cause replaced, the regtest n24 set fails
+naming the set, the scenario and the cause check, although its code still
+matches. Cause mismatches are collected and reported together, so a wrong entry
+names its set on every network.
+
+Synthetic corpora (the reshaped fork corpora) and keyed suites have no entry:
+their negative `resolve` rows keep the code check and get no cause check.
 
 An upstream change to a negative scenario is taken in by re-observing its sets
 and editing the entry, never by editing the vector.
@@ -560,7 +580,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 129 `#[test]` functions; `src/test_vectors.rs` holds 173.
+`src/resolver.rs` holds 130 `#[test]` functions; `src/test_vectors.rs` holds 174.
 
 ## 8. When `test-suite/` is absent
 
