@@ -5948,14 +5948,36 @@ pub(crate) fn negative_set_expectation<'t>(
     table.iter().find(|entry| entry.scenario == scenario)
 }
 
+/// Fewest letters and digits a negative-set substring may carry.
+///
+/// The shortest live substrings carry exactly eight: `", expected"` in a cause
+/// list and `"'/service/9'"` in an update-crypto `FailsAt` list. Eight rejects
+/// the short lone words that turn up in almost any harness panic (`hash`,
+/// `error`, `failed`, `update`, `invalid`). Every substring is an excerpt of a
+/// real failure message, so one that is too short can always be lengthened
+/// from that same message.
+pub(crate) const MIN_SUBSTRING_ALNUM: usize = 8;
+
+/// Whether `s` is too weak to pin a failure: blank, padded with leading or
+/// trailing whitespace, or carrying fewer than [`MIN_SUBSTRING_ALNUM`] letters
+/// and digits. Such a substring matches almost any failure, the harness's own
+/// panics included, so an expectation built on it proves nothing.
+///
+/// Letters and digits are counted rather than non-whitespace characters:
+/// `"::::::::"` is eight characters long and matches any Rust path in a
+/// panic. This does not check which check the substring names.
+pub(crate) fn vacuous_substring(s: &str) -> bool {
+    s != s.trim() || s.chars().filter(|c| c.is_alphanumeric()).count() < MIN_SUBSTRING_ALNUM
+}
+
 /// What is wrong with the cause column of `table` over the live negative
 /// sets of `vectors`, one line per fault; empty when the column is sound.
 ///
 /// A cause list is empty exactly when the set's Resolve row is not driven
 /// under `overrides`: a driven row with no cause would pass on the code
 /// alone, and a cause on an undriven row is never checked. Every cause names
-/// the fault: it is non-empty and not code-shaped (only upper-case letters and
-/// underscores). A set with no entry is the scenario-level guard's to report,
+/// the fault: it is not vacuous (see [`vacuous_substring`]) and not
+/// code-shaped (only upper-case letters and underscores). A set with no entry is the scenario-level guard's to report,
 /// not this one's.
 pub(crate) fn cause_column_problems(
     table: &[NegativeSetExpectation],
@@ -5975,7 +5997,7 @@ pub(crate) fn cause_column_problems(
             ));
         }
         for s in entry.cause {
-            if s.is_empty() || s.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+            if vacuous_substring(s) || s.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
                 problems.push(format!(
                     "{id} ({scenario}): cause {s:?} must name the fault, not only the code"
                 ));
@@ -5995,8 +6017,9 @@ pub(crate) fn cause_column_problems(
 /// report, not this one's.
 ///
 /// Every `FailsAt` entry, with or without a set, carries at least one
-/// substring and no empty one: an empty list or an empty substring matches
-/// any failure, so it would accept a harness panic as the expected one.
+/// substring and none is vacuous (see [`vacuous_substring`]): an empty list or
+/// a vacuous substring matches almost any failure, so it would accept a
+/// harness panic as the expected one.
 pub(crate) fn update_crypto_column_problems(
     table: &[NegativeSetExpectation],
     vectors: &[Vector],
@@ -6013,7 +6036,7 @@ pub(crate) fn update_crypto_column_problems(
                  an empty list matches any failure"
             ));
         }
-        for s in subs.iter().filter(|s| s.is_empty()) {
+        for s in subs.iter().filter(|s| vacuous_substring(s)) {
             problems.push(format!(
                 "{scenario}: update-crypto FailsAt substring {s:?} matches any failure"
             ));
@@ -6210,7 +6233,7 @@ fn negative_set_table_matches_the_corpus() {
 }
 
 /// The cause-column check refuses an empty list on a driven Resolve row, a
-/// list on an undriven one, an empty substring and a bare code, and accepts
+/// list on an undriven one, a vacuous substring and a bare code, and accepts
 /// a fault-describing list on a driven row and an empty one on an undriven
 /// row. A set with no update steps is checked like any other; a set outside
 /// the table is left to the scenario-level guard.
@@ -6260,7 +6283,14 @@ fn cause_column_problems_names_each_fault() {
         cause_column_problems(&table(&["not Multikey"]), &vectors, RESOLVE_SKIPPED);
     assert_eq!(listed_on_undriven, empty_on_driven);
 
-    let bad_lists: [&'static [&'static str]; 2] = [&[""], &["INVALID_DID_UPDATE"]];
+    let bad_lists: [&'static [&'static str]; 6] = [
+        &[""],
+        &["INVALID_DID_UPDATE"],
+        &[" "],
+        &[":"],
+        &["hash"],
+        &[" not Multikey"],
+    ];
     for causes in bad_lists {
         let bad = causes[0];
         let problems = cause_column_problems(&table(causes), &vectors, &[]);
@@ -6286,7 +6316,8 @@ fn cause_column_problems_names_each_fault() {
 /// update steps: it accepts `NoUpdateSteps` on such a set and `Passes` or
 /// `FailsAt` on a set with steps, and refuses every other pairing, naming the
 /// set and its scenario. It also refuses a `FailsAt` entry with no substring
-/// or an empty one, which would match any failure, with no set needed.
+/// or a vacuous one (blank, padded or too short), which would match almost any
+/// failure, with no set needed.
 #[test]
 fn update_crypto_column_problems_names_each_fault() {
     const SET: &str = "regtest/k1/qgppexmy";
@@ -6308,7 +6339,10 @@ fn update_crypto_column_problems_names_each_fault() {
     let fine = [
         (UpdateCryptoExpectation::NoUpdateSteps, &no_steps),
         (UpdateCryptoExpectation::Passes, &stepped),
-        (UpdateCryptoExpectation::FailsAt(&["x"]), &stepped),
+        (
+            UpdateCryptoExpectation::FailsAt(&["not Multikey"]),
+            &stepped,
+        ),
     ];
     for (expectation, v) in fine {
         assert_eq!(
@@ -6321,7 +6355,10 @@ fn update_crypto_column_problems_names_each_fault() {
     let wrong = [
         (UpdateCryptoExpectation::NoUpdateSteps, &stepped),
         (UpdateCryptoExpectation::Passes, &no_steps),
-        (UpdateCryptoExpectation::FailsAt(&["x"]), &no_steps),
+        (
+            UpdateCryptoExpectation::FailsAt(&["not Multikey"]),
+            &no_steps,
+        ),
     ];
     for (expectation, v) in wrong {
         let problems = update_crypto_column_problems(&table(expectation), std::slice::from_ref(v));
@@ -6334,7 +6371,7 @@ fn update_crypto_column_problems_names_each_fault() {
         );
     }
 
-    let vacuous: [(&'static [&'static str], &str); 3] = [
+    let vacuous: [(&'static [&'static str], &str); 8] = [
         (
             &[],
             "update-crypto FailsAt needs at least one substring; an empty list matches any failure",
@@ -6344,8 +6381,28 @@ fn update_crypto_column_problems_names_each_fault() {
             "update-crypto FailsAt substring \"\" matches any failure",
         ),
         (
-            &["x", ""],
+            &["not Multikey", ""],
             "update-crypto FailsAt substring \"\" matches any failure",
+        ),
+        (
+            &[" "],
+            "update-crypto FailsAt substring \" \" matches any failure",
+        ),
+        (
+            &[":"],
+            "update-crypto FailsAt substring \":\" matches any failure",
+        ),
+        (
+            &["hash"],
+            "update-crypto FailsAt substring \"hash\" matches any failure",
+        ),
+        (
+            &[" update sourceHash"],
+            "update-crypto FailsAt substring \" update sourceHash\" matches any failure",
+        ),
+        (
+            &["update sourceHash", ":"],
+            "update-crypto FailsAt substring \":\" matches any failure",
         ),
     ];
     for (subs, want) in vacuous {
@@ -6390,6 +6447,62 @@ fn negative_set_expectation_is_none_outside_the_table() {
 
     v.scenario_id = None;
     assert!(negative_set_expectation(TABLE, &v).is_none());
+}
+
+/// A substring is vacuous when it is blank, padded, or carries fewer than
+/// eight letters and digits, however long it is in characters; a real excerpt
+/// of a failure message at or above the floor is not.
+#[test]
+fn vacuous_substring_rejects_blank_padded_and_short() {
+    for s in [
+        "",
+        " ",
+        ":",
+        "::::::::",
+        "hash",
+        "failed",
+        " not Multikey",
+        "not Multikey ",
+    ] {
+        assert!(vacuous_substring(s), "{s:?} must be vacuous");
+    }
+    for s in [
+        ", expected",
+        "'/service/9'",
+        "not Multikey",
+        "update sourceHash",
+    ] {
+        assert!(!vacuous_substring(s), "{s:?} must not be vacuous");
+    }
+}
+
+/// Every cause and update-crypto substring of the live expectation table is
+/// strong enough to pin its failure. Needs no test-suite checkout: it reads
+/// only the table.
+#[test]
+fn negative_set_substrings_are_not_vacuous() {
+    let mut checked = 0;
+    for entry in NEGATIVE_SET_EXPECTATIONS {
+        for s in entry.cause {
+            assert!(
+                !vacuous_substring(s),
+                "{}: cause {s:?} is vacuous",
+                entry.scenario
+            );
+            checked += 1;
+        }
+        if let UpdateCryptoExpectation::FailsAt(subs) = entry.update_crypto {
+            for s in subs {
+                assert!(
+                    !vacuous_substring(s),
+                    "{}: update-crypto FailsAt substring {s:?} is vacuous",
+                    entry.scenario
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "the table carries substrings to check");
 }
 
 /// `Override` stays LAST in the derived ordering: `PartialOrd`/`Ord` are derived

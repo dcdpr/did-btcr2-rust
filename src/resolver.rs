@@ -1129,7 +1129,8 @@ mod tests {
         network_dirs_with_vectors, parse_outcome, read_chain_fixture, read_chain_fixture_in,
         read_vendor_copy, reconcile_driven_with, redundant_overrides, render_minted_summary,
         render_summary_with, replayed_confirmations, signals_match, stale_overrides,
-        test_suite_checked_out, unclassified_rows_with, unused_divergences, version_id_matches,
+        test_suite_checked_out, unclassified_rows_with, unused_divergences, vacuous_substring,
+        version_id_matches,
     };
     use std::collections::BTreeMap;
 
@@ -4092,9 +4093,9 @@ mod tests {
     /// not text.
     ///
     /// A `NoUpdateSteps` entry never agrees: update-crypto does not apply to
-    /// such a set. A `FailsAt` entry with no substrings, or with an empty one,
-    /// never agrees either: it would match any failure, the harness's own
-    /// included. A payload that is not text cannot be matched against any
+    /// such a set. A `FailsAt` entry with no substrings or a vacuous one (see
+    /// [`vacuous_substring`]) never agrees either: it would match almost any
+    /// failure, the harness's own included. A payload that is not text cannot be matched against any
     /// entry.
     fn update_crypto_mismatch(
         id: &str,
@@ -4113,7 +4114,7 @@ mod tests {
                  update-crypto drove it{note}"
             )),
             (UpdateCryptoExpectation::FailsAt(subs), _)
-                if subs.is_empty() || subs.iter().any(|s| s.is_empty()) =>
+                if subs.is_empty() || subs.iter().any(|s| vacuous_substring(s)) =>
             {
                 Some(format!(
                     "{id} ({scenario}): the entry's FailsAt substrings {subs:?} match any \
@@ -4146,9 +4147,10 @@ mod tests {
 
     /// The comparison of a negative set's update-crypto outcome with its entry
     /// refuses what cannot be matched: a `NoUpdateSteps` entry, a `FailsAt`
-    /// entry with no substrings or an empty one, and a panic payload that is
-    /// not text. It agrees only when a `Passes` set passes and a `FailsAt` set
-    /// fails carrying every substring.
+    /// entry with no substrings or a vacuous one, and a panic payload that is
+    /// not text. A vacuous substring is refused even when the failure carries
+    /// it: the refusal comes before any matching. It agrees only when a
+    /// `Passes` set passes and a `FailsAt` set fails carrying every substring.
     #[test]
     fn update_crypto_mismatch_refuses_what_cannot_be_matched() {
         const ID: &str = "regtest/k1/qgppexmy";
@@ -4165,19 +4167,40 @@ mod tests {
 
         assert_eq!(update_crypto_mismatch(ID, &entry(Passes), Ok(())), None);
         assert_eq!(
-            update_crypto_mismatch(ID, &entry(FailsAt(&["x", "y"])), fail("a x b y c")),
+            update_crypto_mismatch(
+                ID,
+                &entry(FailsAt(&["update sourceHash", "not Multikey"])),
+                fail("a update sourceHash b not Multikey c")
+            ),
             None
         );
 
+        let carries_them = "the hash of the key: not Multikey";
         type RunOutcome = Result<(), Option<String>>;
-        let refused: [(UpdateCryptoExpectation, RunOutcome, &str); 10] = [
-            (FailsAt(&["x"]), Err(None), "a payload that is not text"),
+        let refused: [(UpdateCryptoExpectation, RunOutcome, &str); 14] = [
+            (
+                FailsAt(&["not Multikey"]),
+                Err(None),
+                "a payload that is not text",
+            ),
             (Passes, Err(None), "a payload that is not text"),
             (FailsAt(&[]), fail("anything"), "match any failure"),
             (FailsAt(&[]), Err(None), "match any failure"),
             (FailsAt(&[""]), fail("anything"), "match any failure"),
-            (FailsAt(&["x"]), Ok(()), "but passed"),
-            (FailsAt(&["x"]), fail("y"), "but failed with: y"),
+            (FailsAt(&[" "]), fail(carries_them), "match any failure"),
+            (FailsAt(&[":"]), fail(carries_them), "match any failure"),
+            (FailsAt(&["hash"]), fail(carries_them), "match any failure"),
+            (
+                FailsAt(&[" not Multikey"]),
+                fail(carries_them),
+                "match any failure",
+            ),
+            (FailsAt(&["not Multikey"]), Ok(()), "but passed"),
+            (
+                FailsAt(&["not Multikey"]),
+                fail("unrelated failure"),
+                "but failed with: unrelated failure",
+            ),
             (Passes, fail("y"), "must pass for this negative set"),
             (NoUpdateSteps, Ok(()), "ships no update steps"),
             (NoUpdateSteps, fail("y"), "ships no update steps"),
