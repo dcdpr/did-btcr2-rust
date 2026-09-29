@@ -4062,12 +4062,6 @@ mod tests {
                         vector.scenario_id
                     )
                 };
-                let scenario = entry.scenario;
-                let note = if entry.note.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n  recorded: {}", entry.note)
-                };
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     update_crypto_set(vector)
                 }))
@@ -4076,32 +4070,8 @@ mod tests {
                         .downcast_ref::<String>()
                         .cloned()
                         .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                        .unwrap_or_default()
                 });
-                let mismatch = match (entry.update_crypto, outcome) {
-                    (UpdateCryptoExpectation::NoUpdateSteps, _) => Some(format!(
-                        "{id} ({scenario}): the entry says the set ships no update steps, but \
-                         update-crypto drove it{note}"
-                    )),
-                    (UpdateCryptoExpectation::Passes, Ok(())) => None,
-                    (UpdateCryptoExpectation::Passes, Err(msg)) => Some(format!(
-                        "{id} ({scenario}): update-crypto must pass for this negative set, but \
-                         failed: {msg}{note}"
-                    )),
-                    (UpdateCryptoExpectation::FailsAt(subs), Ok(())) => Some(format!(
-                        "{id} ({scenario}): update-crypto must fail with {subs:?} for this \
-                         negative set, but passed{note}"
-                    )),
-                    (UpdateCryptoExpectation::FailsAt(subs), Err(msg)) => {
-                        (!subs.iter().all(|sub| msg.contains(sub))).then(|| {
-                            format!(
-                                "{id} ({scenario}): update-crypto must fail with {subs:?}, but \
-                                 failed with: {msg}{note}"
-                            )
-                        })
-                    }
-                };
-                mismatches.extend(mismatch);
+                mismatches.extend(update_crypto_mismatch(id, entry, outcome));
             } else {
                 update_crypto_set(vector);
             }
@@ -4114,6 +4084,115 @@ mod tests {
             mismatches.join("\n")
         );
         reconcile_driven_with(AssertionKind::UpdateCrypto, vectors, &observed, overrides);
+    }
+
+    /// Whether a negative set's update-crypto outcome differs from its
+    /// entry, as the line to report; `None` when it agrees. `outcome` is the
+    /// panic text of a failing run, or `Err(None)` when the panic payload is
+    /// not text.
+    ///
+    /// A `NoUpdateSteps` entry never agrees: update-crypto does not apply to
+    /// such a set. A `FailsAt` entry with no substrings, or with an empty one,
+    /// never agrees either: it would match any failure, the harness's own
+    /// included. A payload that is not text cannot be matched against any
+    /// entry.
+    fn update_crypto_mismatch(
+        id: &str,
+        entry: &NegativeSetExpectation,
+        outcome: Result<(), Option<String>>,
+    ) -> Option<String> {
+        let scenario = entry.scenario;
+        let note = if entry.note.is_empty() {
+            String::new()
+        } else {
+            format!("\n  recorded: {}", entry.note)
+        };
+        match (entry.update_crypto, outcome) {
+            (UpdateCryptoExpectation::NoUpdateSteps, _) => Some(format!(
+                "{id} ({scenario}): the entry says the set ships no update steps, but \
+                 update-crypto drove it{note}"
+            )),
+            (UpdateCryptoExpectation::FailsAt(subs), _)
+                if subs.is_empty() || subs.iter().any(|s| s.is_empty()) =>
+            {
+                Some(format!(
+                    "{id} ({scenario}): the entry's FailsAt substrings {subs:?} match any \
+                     failure, so they cannot pin this one{note}"
+                ))
+            }
+            (_, Err(None)) => Some(format!(
+                "{id} ({scenario}): update-crypto panicked with a payload that is not text, so \
+                 it cannot be matched against the entry{note}"
+            )),
+            (UpdateCryptoExpectation::Passes, Ok(())) => None,
+            (UpdateCryptoExpectation::Passes, Err(Some(msg))) => Some(format!(
+                "{id} ({scenario}): update-crypto must pass for this negative set, but \
+                 failed: {msg}{note}"
+            )),
+            (UpdateCryptoExpectation::FailsAt(subs), Ok(())) => Some(format!(
+                "{id} ({scenario}): update-crypto must fail with {subs:?} for this \
+                 negative set, but passed{note}"
+            )),
+            (UpdateCryptoExpectation::FailsAt(subs), Err(Some(msg))) => {
+                (!subs.iter().all(|sub| msg.contains(sub))).then(|| {
+                    format!(
+                        "{id} ({scenario}): update-crypto must fail with {subs:?}, but \
+                         failed with: {msg}{note}"
+                    )
+                })
+            }
+        }
+    }
+
+    /// The comparison of a negative set's update-crypto outcome with its entry
+    /// refuses what cannot be matched: a `NoUpdateSteps` entry, a `FailsAt`
+    /// entry with no substrings or an empty one, and a panic payload that is
+    /// not text. It agrees only when a `Passes` set passes and a `FailsAt` set
+    /// fails carrying every substring.
+    #[test]
+    fn update_crypto_mismatch_refuses_what_cannot_be_matched() {
+        const ID: &str = "regtest/k1/qgppexmy";
+        fn entry(update_crypto: UpdateCryptoExpectation) -> NegativeSetExpectation {
+            NegativeSetExpectation {
+                scenario: "n24",
+                update_crypto,
+                cause: &["x"],
+                note: "",
+            }
+        }
+        let fail = |msg: &str| Err(Some(msg.to_string()));
+        use UpdateCryptoExpectation::{FailsAt, NoUpdateSteps, Passes};
+
+        assert_eq!(update_crypto_mismatch(ID, &entry(Passes), Ok(())), None);
+        assert_eq!(
+            update_crypto_mismatch(ID, &entry(FailsAt(&["x", "y"])), fail("a x b y c")),
+            None
+        );
+
+        type RunOutcome = Result<(), Option<String>>;
+        let refused: [(UpdateCryptoExpectation, RunOutcome, &str); 10] = [
+            (FailsAt(&["x"]), Err(None), "a payload that is not text"),
+            (Passes, Err(None), "a payload that is not text"),
+            (FailsAt(&[]), fail("anything"), "match any failure"),
+            (FailsAt(&[]), Err(None), "match any failure"),
+            (FailsAt(&[""]), fail("anything"), "match any failure"),
+            (FailsAt(&["x"]), Ok(()), "but passed"),
+            (FailsAt(&["x"]), fail("y"), "but failed with: y"),
+            (Passes, fail("y"), "must pass for this negative set"),
+            (NoUpdateSteps, Ok(()), "ships no update steps"),
+            (NoUpdateSteps, fail("y"), "ships no update steps"),
+        ];
+        for (expectation, outcome, want) in refused {
+            let line = update_crypto_mismatch(ID, &entry(expectation), outcome.clone())
+                .unwrap_or_else(|| panic!("{expectation:?} with {outcome:?} must be refused"));
+            assert!(
+                line.contains(ID) && line.contains("(n24)") && line.contains(want),
+                "{expectation:?} with {outcome:?}: {line}"
+            );
+        }
+        let line = update_crypto_mismatch(ID, &entry(NoUpdateSteps), Err(None))
+            .expect("NoUpdateSteps with an unreadable payload is refused");
+        assert!(line.contains("ships no update steps"), "{line}");
     }
 
     /// Check a step's own `signedUpdate` proof under the key its

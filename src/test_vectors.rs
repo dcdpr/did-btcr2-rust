@@ -5993,11 +5993,32 @@ pub(crate) fn cause_column_problems(
 /// never checked, and `NoUpdateSteps` on a set with steps would hide what the
 /// driver observes. A set with no entry is the scenario-level guard's to
 /// report, not this one's.
+///
+/// Every `FailsAt` entry, with or without a set, carries at least one
+/// substring and no empty one: an empty list or an empty substring matches
+/// any failure, so it would accept a harness panic as the expected one.
 pub(crate) fn update_crypto_column_problems(
     table: &[NegativeSetExpectation],
     vectors: &[Vector],
 ) -> Vec<String> {
     let mut problems = Vec::new();
+    for entry in table {
+        let UpdateCryptoExpectation::FailsAt(subs) = entry.update_crypto else {
+            continue;
+        };
+        let scenario = entry.scenario;
+        if subs.is_empty() {
+            problems.push(format!(
+                "{scenario}: update-crypto FailsAt needs at least one substring; \
+                 an empty list matches any failure"
+            ));
+        }
+        for s in subs.iter().filter(|s| s.is_empty()) {
+            problems.push(format!(
+                "{scenario}: update-crypto FailsAt substring {s:?} matches any failure"
+            ));
+        }
+    }
     for v in vectors.iter().filter(|v| v.is_negative()) {
         let Some(entry) = negative_set_expectation(table, v) else {
             continue;
@@ -6264,7 +6285,8 @@ fn cause_column_problems_names_each_fault() {
 /// The update-crypto column check ties `NoUpdateSteps` to a set without
 /// update steps: it accepts `NoUpdateSteps` on such a set and `Passes` or
 /// `FailsAt` on a set with steps, and refuses every other pairing, naming the
-/// set and its scenario.
+/// set and its scenario. It also refuses a `FailsAt` entry with no substring
+/// or an empty one, which would match any failure, with no set needed.
 #[test]
 fn update_crypto_column_problems_names_each_fault() {
     const SET: &str = "regtest/k1/qgppexmy";
@@ -6309,6 +6331,30 @@ fn update_crypto_column_problems_names_each_fault() {
                 && problems[0].contains("(n24)")
                 && problems[0].contains("NoUpdateSteps exactly when the set ships no update steps"),
             "{expectation:?}: {problems:?}"
+        );
+    }
+
+    let vacuous: [(&'static [&'static str], &str); 3] = [
+        (
+            &[],
+            "update-crypto FailsAt needs at least one substring; an empty list matches any failure",
+        ),
+        (
+            &[""],
+            "update-crypto FailsAt substring \"\" matches any failure",
+        ),
+        (
+            &["x", ""],
+            "update-crypto FailsAt substring \"\" matches any failure",
+        ),
+    ];
+    for (subs, want) in vacuous {
+        let problems =
+            update_crypto_column_problems(&table(UpdateCryptoExpectation::FailsAt(subs)), &[]);
+        assert_eq!(problems.len(), 1, "{subs:?}: {problems:?}");
+        assert!(
+            problems[0].contains("n24") && problems[0].contains(want),
+            "{subs:?}: {problems:?}"
         );
     }
 }

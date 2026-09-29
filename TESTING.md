@@ -229,6 +229,10 @@ The table covers the checked-out suite only; synthetic corpora have no entry.
 directions: a negative set without an entry, or an entry with no set, fails by
 name, and the 108 sets are counted. It also ties `NoUpdateSteps` to the set's
 layout: an entry is `NoUpdateSteps` exactly when its set ships no update steps.
+It refuses a `FailsAt` entry with an empty list or an empty substring, since
+either matches any failure, the harness's own included; the driver refuses
+such an entry again, and treats a panic whose payload is not text as a
+mismatch rather than as an empty message.
 
 On every set, positive and negative, `update-crypto` first checks each step's
 own `signedUpdate` proof under the key its `sourceDocument` names, before any
@@ -591,7 +595,7 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 130 `#[test]` functions; `src/test_vectors.rs` holds 175.
+`src/resolver.rs` holds 131 `#[test]` functions; `src/test_vectors.rs` holds 175.
 
 ## 8. When `test-suite/` is absent
 
