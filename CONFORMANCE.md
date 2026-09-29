@@ -92,7 +92,7 @@ coverage status:
 | `resolve.md:process-genesis-document-placeholder` | MUST | Covered | `document::tests::test_from_external_intermediate` |
 | `resolve.md:render-initial-did-document-bitcoin-uri` | MUST | Covered | `document::tests::beacons_accessor` |
 | `resolve.md:parse-rendered-template-conformant-doc` | MUST | Covered | `document::tests::test_document_parse` |
-| `resolve.md:signal-confirmed-min-conf` | MUST NOT | Covered | `resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies` |
+| `resolve.md:signal-confirmed-min-conf` | MUST NOT | Covered | `resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies`, `resolver::tests::min_conf_one_applies_a_one_confirmation_signal`, `resolver::tests::unconfirmed_needed_signal_is_skipped`, `resolver::tests::pending_announcement_resolves_to_the_confirmed_version` |
 | `resolve.md:update-hash-compared-to-signal` | MUST | Covered | `resolver::tests::a_sidecar_update_not_hashing_to_the_signal_bytes_is_missing_update_data` |
 | `resolve.md:late-publishing-raised` | MUST | Covered | `update::tests::confirm_duplicate_in_range_mismatch_is_late_publishing` |
 | `resolve.md:capability-invocation-entry-identifies-proof-vm` | MUST | Covered | `document::tests::apply_update_accepts_embedded_capability_invocation` |

@@ -951,13 +951,13 @@ const CURATED: &[ConformanceRow] = &[
         file: "did-btcr2/src/operations/resolve.md",
         keyword: "MUST NOT",
         prefix: "a transaction must be included in a bitcoin block and have at least `resolutiono",
-        // The 5-vs-6 boundary under the default `minConf`; the `minConf: 1`
-        // override (`min_conf_one_applies_a_one_confirmation_signal`) and the
-        // unconfirmed-mempool half (`unconfirmed_needed_signal_is_skipped`,
-        // `pending_announcement_resolves_to_the_confirmed_version`) are
-        // exercised beside it.
+        // The 5-vs-6 boundary under the default `minConf`, the `minConf: 1`
+        // override, and the unconfirmed-mempool half.
         status: Status::Covered(&[
             "resolver::tests::signal_below_min_conf_is_skipped_and_at_min_conf_applies",
+            "resolver::tests::min_conf_one_applies_a_one_confirmation_signal",
+            "resolver::tests::unconfirmed_needed_signal_is_skipped",
+            "resolver::tests::pending_announcement_resolves_to_the_confirmed_version",
         ]),
     },
     ConformanceRow {
@@ -1106,7 +1106,7 @@ const CURATED: &[ConformanceRow] = &[
 ///
 /// INTENTIONALLY DUPLICATED from the `bless_or_assert` in
 /// `src/document.rs`: Rust test helpers cannot be shared across
-/// the unit-test / integration-test crate boundary (review concern #11). Both
+/// the unit-test / integration-test crate boundary. Both
 /// copies use runtime `std::fs` on read AND write so the path the writer wrote
 /// is the path the asserter reads (never `include_str!` for a blessed file).
 fn bless_or_assert(produced: &str, golden_path: &str) {
@@ -1461,7 +1461,7 @@ fn index_guard() {
     );
 }
 
-/// Review concern #9: the curated table has EXACTLY as many rows as the
+/// The curated table has EXACTLY as many rows as the
 /// snapshot's MUST/SHALL universe. Catches a typo'd join-key prefix that
 /// `index_guard` might accept as a "different" row — an off-by-one with no clear
 /// miss.
