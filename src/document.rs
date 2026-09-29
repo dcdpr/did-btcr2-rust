@@ -118,6 +118,23 @@ impl ProblemDetails for Error {
     }
 }
 
+/// The reason a document failed to parse, for an update rejection message.
+///
+/// The spec-level reason is the useful part: a `Btcr2Error` wrapped by this
+/// enum displays only as the wrapper's summary, so it is unwrapped, and any
+/// other variant is rendered with its source chain.
+fn conformance_cause(err: &Error) -> String {
+    match err {
+        Error::Btcr2Error(inner) => inner.to_string(),
+        other => std::iter::successors(Some(other as &(dyn std::error::Error + 'static)), |e| {
+            e.source()
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": "),
+    }
+}
+
 /// Sealed marker trait that selects the sequence type for fields constrained
 /// by the spec's "updatable document" invariant (≥1 capabilityInvocation and
 /// ≥1 service for resolved DIDs; unconstrained for intermediate placeholder-DID
@@ -1004,8 +1021,9 @@ impl Document {
         // apply_update applies the identical call to its own json_data, so the
         // two target documents canonicalize to the same JCS bytes.
         let mut target_value = self.json_data.clone();
-        json_patch::patch(&mut target_value, patch)
-            .map_err(|_| Btcr2Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
+        json_patch::patch(&mut target_value, patch).map_err(|e| {
+            Btcr2Error::InvalidDidUpdate(format!("Unable to apply JSON Patch: {e}"))
+        })?;
 
         // The DID document identifier is immutable across an update.
         if target_value.get("id") != self.json_data.get("id") {
@@ -1017,7 +1035,12 @@ impl Document {
         // Re-validate conformance (mirrors apply_update's DocumentFields check)
         // and hash the patched document for the targetHash.
         let target_hash = Document::from_json_value(target_value)
-            .map_err(|_| Btcr2Error::InvalidDidUpdate("patched document is non-conformant".into()))?
+            .map_err(|e| {
+                Btcr2Error::InvalidDidUpdate(format!(
+                    "patched document is non-conformant: {}",
+                    conformance_cause(&e)
+                ))
+            })?
             .hash();
 
         let unsigned =
@@ -1551,11 +1574,15 @@ impl InitialDocument {
         // passes, so a rejected update never leaves a half-mutated document
         // behind for the resolver to keep iterating with.
         let mut patched = self.json_data.clone();
-        json_patch::patch(&mut patched, &update.patch)
-            .map_err(|_| Btcr2Error::InvalidDidUpdate("Unable to apply JSON Patch".into()))?;
+        json_patch::patch(&mut patched, &update.patch).map_err(|e| {
+            Btcr2Error::InvalidDidUpdate(format!("Unable to apply JSON Patch: {e}"))
+        })?;
 
-        let fields = DocumentFields::try_from((&patched, None)).map_err(|_| {
-            Btcr2Error::InvalidDidUpdate("Updated DID document is non-conformant".into())
+        let fields = DocumentFields::try_from((&patched, None)).map_err(|e| {
+            Btcr2Error::InvalidDidUpdate(format!(
+                "Updated DID document is non-conformant: {}",
+                conformance_cause(&e)
+            ))
         })?;
 
         // The document identifier is immutable across an update: the post-patch
@@ -4620,10 +4647,53 @@ mod tests {
         assert_eq!(methods[1].public_key_multibase, None);
     }
 
+    /// Sign an update over `patch` by hand, bypassing construction's checks,
+    /// so the apply path can be exercised with a patch construction would
+    /// refuse. `target_hash` is taken as given.
+    fn hand_signed_update(
+        initial: &InitialDocument,
+        vm_id: &str,
+        patch: &Patch,
+        target_hash: Sha256Hash,
+        version: NonZeroU64,
+    ) -> Update {
+        let unsigned = UnsecuredUpdate::construct(patch, initial.hash(), target_hash, version);
+        let capability = derive_root_capability(initial.fields.id.clone());
+        let inner = ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: vm_id.to_string(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability,
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        };
+        let proof = CryptoSuite
+            .create_proof(&unsigned, inner, &source_secret_key())
+            .expect("the hand-built update signs");
+        let mut signed_json = unsigned.as_ref().clone();
+        if let Value::Object(map) = &mut signed_json {
+            map.insert(
+                "proof".to_string(),
+                serde_json::to_value(&proof).expect("proof serializes"),
+            );
+        }
+        Update::from_json_value(signed_json).expect("the signed update parses")
+    }
+
     /// A signed update whose patch retypes the secp256k1 method to
     /// `JsonWebKey2020` produces a document that no longer conforms, so
     /// resolve.md ("the current document conforms to DID Core") makes it
     /// INVALID_DID_UPDATE on apply; construction refuses the same patch.
+    /// Both rejections name the method, its declared type and `Multikey`.
     /// The update is built by hand because construction would refuse it.
     #[test]
     fn apply_update_rejects_a_patch_that_retypes_a_multikey_method() {
@@ -4643,67 +4713,99 @@ mod tests {
         ]))
         .expect("retype patch is a valid RFC 6902 op array");
         let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let names_the_cause = |m: &str| {
+            m.contains("non-conformant")
+                && m.contains(&vm_id)
+                && m.contains("JsonWebKey2020")
+                && m.contains("Multikey")
+        };
 
         // Construct path.
         let err = document
             .construct_signed_update(retype_patch.clone(), version, &vm_id, source_secret_key())
             .expect_err("construction must refuse a patch that retypes the method");
         assert!(
-            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if m.contains("non-conformant")),
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if names_the_cause(m)),
             "got: {err:?}"
         );
 
         // Apply path: target hash over the raw patched JSON so the hash check
         // cannot be what rejects it.
-        let source_hash = initial.hash();
         let mut target_value = initial.as_ref().clone();
         json_patch::patch(&mut target_value, &retype_patch)
             .expect("the retype patch applies to the genesis json");
         let target_hash = RawDocument(target_value).hash();
-        let unsigned = UnsecuredUpdate::construct(&retype_patch, source_hash, target_hash, version);
-
-        let capability = derive_root_capability(initial.fields.id.clone());
-        let inner = ProofInner {
-            id: None,
-            proof_type: ProofType::DataIntegrityProof,
-            proof_purpose: ProofPurpose::CapabilityInvocation,
-            verification_method: vm_id.clone(),
-            cryptosuite: CryptoSuiteName::Jcs,
-            created: None,
-            expires: None,
-            domain: None,
-            challenge: None,
-            previous_proof: None,
-            nonce: None,
-            context: vec![],
-            capability,
-            capability_action: "Write".to_string(),
-            invocation_target: None,
-        };
-        let proof = CryptoSuite
-            .create_proof(&unsigned, inner, &source_secret_key())
-            .expect("the retyping update signs");
-        let mut signed_json = unsigned.as_ref().clone();
-        if let Value::Object(map) = &mut signed_json {
-            map.insert(
-                "proof".to_string(),
-                serde_json::to_value(&proof).expect("proof serializes"),
-            );
-        }
-        let update = Update::from_json_value(signed_json).expect("the signed update parses");
+        let update = hand_signed_update(&initial, &vm_id, &retype_patch, target_hash, version);
 
         let mut target = initial.clone();
         let err = target
             .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("a patch that retypes a Multikey method must be rejected on apply");
         assert!(
-            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if m.contains("non-conformant")),
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if names_the_cause(m)),
             "got: {err:?}"
         );
         assert_eq!(
             target.hash(),
             initial.hash(),
             "a rejected update leaves the document unchanged"
+        );
+    }
+
+    /// A JSON Patch that cannot apply (removing a member that does not exist)
+    /// is INVALID_DID_UPDATE on both the construct and the apply path, and
+    /// the message names the path that failed.
+    #[test]
+    fn update_rejects_a_patch_that_cannot_apply_naming_the_path() {
+        let (_did, vm_id, initial, document) = source_documents();
+        let remove_patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "remove", "path": "/doesNotExist"}
+        ]))
+        .expect("remove patch is a valid RFC 6902 op array");
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let names_the_path =
+            |m: &str| m.contains("Unable to apply JSON Patch") && m.contains("/doesNotExist");
+
+        // Construct path.
+        let err = document
+            .construct_signed_update(remove_patch.clone(), version, &vm_id, source_secret_key())
+            .expect_err("construction must refuse a patch that cannot apply");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if names_the_path(m)),
+            "got: {err:?}"
+        );
+
+        // Apply path: the proof is valid and the patch fails before the
+        // target hash is compared, so any target hash will do.
+        let update = hand_signed_update(&initial, &vm_id, &remove_patch, initial.hash(), version);
+        let mut target = initial.clone();
+        let err = target
+            .apply_update(&update, &AnnouncingBlock::fixed())
+            .expect_err("a patch that cannot apply must be rejected on apply");
+        assert!(
+            matches!(err, Btcr2Error::InvalidDidUpdate(ref m) if names_the_path(m)),
+            "got: {err:?}"
+        );
+        assert_eq!(
+            target.hash(),
+            initial.hash(),
+            "a rejected update leaves the document unchanged"
+        );
+    }
+
+    /// A spec-level error is unwrapped to its own title and detail; any
+    /// other parse error is rendered with its source, not only the
+    /// wrapper's summary.
+    #[test]
+    fn conformance_cause_renders_the_source_of_a_non_spec_error() {
+        let json_err = serde_json::from_str::<Value>("{").expect_err("truncated JSON fails");
+        let cause = conformance_cause(&Error::from(json_err));
+        assert!(cause.contains("EOF"), "got: {cause}");
+
+        let spec = Error::Btcr2Error(Btcr2Error::InvalidDidDocument("x".into()));
+        assert_eq!(
+            conformance_cause(&spec),
+            "The DID document was malformed: x"
         );
     }
 

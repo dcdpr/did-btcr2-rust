@@ -264,6 +264,8 @@ fn bip340_verify(
         .expect("Sha256Hash is exactly 32 bytes; Message::from_slice requires 32");
 
     // Verify signature
+    // verify_schnorr reports every failure as InvalidSignature ("malformed signature"), including a
+    // valid signature under another key, so its error is dropped rather than shown.
     secp.verify_schnorr(&signature, &message, public_key)
         .map_err(|_| Btcr2Error::InvalidUpdateProof("Verification failed".into()))
 }
