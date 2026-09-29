@@ -471,6 +471,25 @@ pub(crate) fn test_suite_present() -> bool {
     false
 }
 
+/// Set (non-empty) to make an absent test-suite submodule a failure rather
+/// than a skip. CI sets it; a local non-recursive clone leaves it unset.
+#[cfg(test)]
+pub(crate) const REQUIRE_TEST_SUITE_VAR: &str = "BTCR2_REQUIRE_TEST_SUITE";
+
+/// Whether the run may go ahead: always when the variable is unset or empty,
+/// otherwise only when the suite is checked out.
+#[cfg(test)]
+fn require_test_suite(var: Option<&std::ffi::OsStr>, present: bool) -> Result<(), String> {
+    if present || var.is_none_or(|v| v.is_empty()) {
+        return Ok(());
+    }
+    Err(format!(
+        "{REQUIRE_TEST_SUITE_VAR} is set but the test-suite submodule is absent: run \
+         `git submodule update --init --recursive`, or unset {REQUIRE_TEST_SUITE_VAR} to let \
+         the vector tests skip"
+    ))
+}
+
 /// Map a `test-suite/` network directory name onto a [`Network`].
 ///
 /// Nothing is defaulted: an unrecognized name is a typed error naming the value,
@@ -1260,6 +1279,38 @@ fn confirmations(vector: &str, path: &Path, value: &Value) -> Result<Option<u64>
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// With `BTCR2_REQUIRE_TEST_SUITE` set, an empty submodule fails here by
+    /// name instead of letting every vector test skip green.
+    #[test]
+    fn test_suite_is_checked_out_when_required() {
+        require_test_suite(
+            std::env::var_os(REQUIRE_TEST_SUITE_VAR).as_deref(),
+            test_suite_present_in(&test_suite_root()),
+        )
+        .unwrap_or_else(|message| panic!("{message}"));
+    }
+
+    /// The decision table: only a set, non-empty variable with no checkout fails,
+    /// and its message names the variable and the command that fixes it.
+    #[test]
+    fn require_test_suite_decides_from_the_variable_and_the_checkout() {
+        let set = Some(std::ffi::OsStr::new("1"));
+        let empty = Some(std::ffi::OsStr::new(""));
+        for (var, present) in [(None, false), (empty, false), (set, true), (None, true)] {
+            assert_eq!(
+                require_test_suite(var, present),
+                Ok(()),
+                "var {var:?}, present {present}"
+            );
+        }
+        let message = require_test_suite(set, false).expect_err("set and absent must fail");
+        assert!(
+            message.contains("BTCR2_REQUIRE_TEST_SUITE")
+                && message.contains("git submodule update --init --recursive"),
+            "{message}"
+        );
+    }
 
     /// The resolved expectation's fields, for the assertions written before the
     /// outcome could be an expected error.

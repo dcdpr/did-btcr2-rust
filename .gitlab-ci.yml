@@ -92,6 +92,8 @@ cargo-test:
   stage: test
   tags:
     - shell-executor
+  variables:
+    BTCR2_REQUIRE_TEST_SUITE: "1"
   script:
     - cargo test --workspace
 
@@ -100,5 +102,7 @@ cargo-test:release:
   stage: test
   tags:
     - shell-executor
+  variables:
+    BTCR2_REQUIRE_TEST_SUITE: "1"
   script:
     - cargo test --workspace --release

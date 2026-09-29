@@ -528,13 +528,21 @@ Tests worth grepping for:
 | `interleaved_history_across_a_rotated_in_beacon_resolves` (`src/resolver.rs`) | a beacon an applied update introduces is scanned before the next tuple is processed |
 | `*_returns_unsupported` (`src/resolver.rs`, `src/document.rs`) | CAS and SMT beacons return `Unsupported` |
 
-`src/resolver.rs` holds 123 `#[test]` functions; `src/test_vectors.rs` holds 153.
+`src/resolver.rs` holds 126 `#[test]` functions; `src/test_vectors.rs` holds 171.
 
 ## 8. When `test-suite/` is absent
 
 The operation-vector drivers **skip** rather than fail, via
 `discovered_vectors_or_skip` (`src/resolver.rs`). The minted-scenario tests still
 run, because their fixtures are in-repo.
+
+A skip is right for a local non-recursive clone and wrong in CI, where an empty
+submodule would let every vector test pass vacuously. Set
+`BTCR2_REQUIRE_TEST_SUITE=1` to turn the absence into a failure: the guard test
+`test_suite_is_checked_out_when_required` (in `did-btcr2` and in `chain-capture`)
+then fails, naming the variable and `git submodule update --init --recursive`.
+CI sets it on both test jobs (`cargo-test` and `cargo-test:release`). Unset or
+empty, the drivers skip as before.
 
 To check the submodule out, see the one-time setup in
 [README.md](./README.md): `git submodule init && git submodule update`.
