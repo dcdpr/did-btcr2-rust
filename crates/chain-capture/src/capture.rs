@@ -459,35 +459,6 @@ pub fn capture_one_with<T: BtcTransport + Clone, C: Clock + Clone>(
     )
 }
 
-/// The specification error code a client error carries, or `None` for a
-/// failure that is not a resolution outcome (transport, endpoint selection,
-/// JSON, funding).
-///
-/// The same mapping the HTTP resolver uses for its problem details: the core's
-/// own errors report their problem details, an identifier error is an invalid
-/// DID, and the code is the fragment after `#` in the problem `type`.
-fn client_error_code(err: &did_btcr2_client::Error) -> Option<String> {
-    use did_btcr2::error::{Btcr2Error, ProblemDetails as _};
-    use did_btcr2_client::Error;
-
-    let details = match err {
-        Error::Btcr2(e) => e.details(),
-        Error::Core(e) => e.details(),
-        Error::Resolver(e) => e.details(),
-        // `Btcr2Error`'s conversion takes the parse error by value and the
-        // parse error is not `Clone`, so its two arms are restated here;
-        // `outcome_identifier_codes_follow_the_core_conversion` fails if they
-        // drift apart.
-        Error::Identifier(did_btcr2::identifier::Error::MethodNotSupported(method)) => {
-            Btcr2Error::MethodNotSupported(method.clone()).details()
-        }
-        Error::Identifier(e) => Btcr2Error::InvalidDid(e.to_string()).details(),
-        _ => None,
-    }?;
-    let (_, code) = details["type"].as_str()?.rsplit_once('#')?;
-    (!code.is_empty()).then(|| code.to_string())
-}
-
 /// Judge a resolve against what the set says it produces.
 ///
 /// A resolved expectation is compared on `didDocument`, `versionId`,
@@ -530,7 +501,7 @@ fn check_outcome(
 
     match &target.expected {
         ExpectedOutcome::Error { code } => match resolved {
-            Err(e) if client_error_code(&e).is_some() => Ok(None),
+            Err(e) if e.spec_code().is_some() => Ok(None),
             Err(e) => Err(failed(e)),
             Ok(result) => Err(mismatch(
                 "error",
@@ -1957,7 +1928,7 @@ mod tests {
         let late = did_btcr2_client::Error::Resolver(did_btcr2::resolver::Error::Btcr2Error(
             did_btcr2::error::Btcr2Error::LatePublishingError("late".to_string()),
         ));
-        assert_eq!(client_error_code(&late).as_deref(), Some("LATE_PUBLISHING"));
+        assert_eq!(late.spec_code().as_deref(), Some("LATE_PUBLISHING"));
         assert!(
             judge(&target, Err(late))
                 .expect("a coded failure satisfies an expected error")
@@ -2022,41 +1993,18 @@ mod tests {
     fn outcome_client_error_code_maps_identifier_and_transport() {
         let identifier = Did::from_str("did:btcr2:notbech32").expect_err("not a DID");
         assert_eq!(
-            client_error_code(&did_btcr2_client::Error::Identifier(identifier)).as_deref(),
+            did_btcr2_client::Error::Identifier(identifier)
+                .spec_code()
+                .as_deref(),
             Some("INVALID_DID")
         );
         let transport = did_btcr2_client::Error::Transport(
             did_btcr2_client::TransportError::Malformed("x".to_string()),
         );
-        assert_eq!(client_error_code(&transport), None);
+        assert_eq!(transport.spec_code(), None);
         assert_eq!(
-            client_error_code(&did_btcr2_client::Error::UnknownNetwork("x".to_string())),
+            did_btcr2_client::Error::UnknownNetwork("x".to_string()).spec_code(),
             None
-        );
-    }
-
-    #[test]
-    fn outcome_identifier_codes_follow_the_core_conversion() {
-        use did_btcr2::error::{Btcr2Error, ProblemDetails as _};
-        // Each identifier error, parsed twice: one copy goes through the core's
-        // own conversion, the other through this crate's restatement of it.
-        for did in ["did:btcr2:notbech32", "did:example:123", "not-a-did"] {
-            let owned = Did::from_str(did).expect_err("not a did:btcr2 identifier");
-            let borrowed = Did::from_str(did).expect_err("not a did:btcr2 identifier");
-            let core = Btcr2Error::from(owned).details().expect("details")["type"]
-                .as_str()
-                .and_then(|t| t.rsplit_once('#'))
-                .map(|(_, code)| code.to_string());
-            assert_eq!(
-                client_error_code(&did_btcr2_client::Error::Identifier(borrowed)),
-                core,
-                "{did}"
-            );
-        }
-        let method = Did::from_str("did:example:123").expect_err("another method");
-        assert_eq!(
-            client_error_code(&did_btcr2_client::Error::Identifier(method)).as_deref(),
-            Some("METHOD_NOT_SUPPORTED")
         );
     }
 
@@ -2724,7 +2672,7 @@ mod tests {
                 matches!(
                     error,
                     CaptureError::ResolveFailed { ref source, .. }
-                        if client_error_code(source).as_deref() == Some("MISSING_UPDATE_DATA")
+                        if source.spec_code().as_deref() == Some("MISSING_UPDATE_DATA")
                 ),
                 "got: {error:?}"
             );

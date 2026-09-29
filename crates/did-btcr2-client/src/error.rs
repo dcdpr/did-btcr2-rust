@@ -8,6 +8,7 @@
 //! rejections: an unknown network name, a network with no hosted endpoint,
 //! or a `--network` that contradicts the DID).
 
+use did_btcr2::error::{Btcr2Error, ProblemDetails};
 use onlyerror::Error;
 
 /// An error crossing the HTTP transport seam.
@@ -177,4 +178,197 @@ pub enum Error {
         /// The unparseable txid string from the response.
         txid: String,
     },
+}
+
+/// The problem details of the core error this wraps, or `None` for a facade
+/// failure that is not a resolution outcome (transport, JSON, endpoint
+/// selection, funding).
+impl ProblemDetails for Error {
+    fn details(&self) -> Option<serde_json::Value> {
+        match self {
+            Error::Btcr2(e) => e.details(),
+            Error::Core(e) => e.details(),
+            Error::Resolver(e) => e.details(),
+            Error::Identifier(e) => identifier_details(e),
+            _ => None,
+        }
+    }
+}
+
+/// The core's identifier-to-resolution conversion (`Btcr2Error::from`),
+/// restated by reference because the parse error is not `Clone`.
+/// `identifier_codes_follow_the_core_conversion` fails if the two drift apart.
+fn identifier_details(err: &did_btcr2::identifier::Error) -> Option<serde_json::Value> {
+    match err {
+        did_btcr2::identifier::Error::MethodNotSupported(method) => {
+            Btcr2Error::MethodNotSupported(method.clone()).details()
+        }
+        other => Btcr2Error::InvalidDid(other.to_string()).details(),
+    }
+}
+
+/// The code fragment of a problem `type`, e.g. `NOT_FOUND` from
+/// `https://www.w3.org/ns/did#NOT_FOUND`.
+fn code_of(details: &serde_json::Value) -> Option<String> {
+    let (_, code) = details["type"].as_str()?.rsplit_once('#')?;
+    (!code.is_empty()).then(|| code.to_string())
+}
+
+impl Error {
+    /// The specification error code this error carries, or `None` when it is
+    /// not a resolution outcome.
+    pub fn spec_code(&self) -> Option<String> {
+        code_of(&self.details()?)
+    }
+}
+
+/// The specification error code of the first error in `err`'s source chain
+/// (starting with `err` itself) that carries one, or `None` when none does.
+///
+/// Recognizes this crate's [`enum@Error`] and the core's spec-bearing errors
+/// (`Btcr2Error`, `document::Error`, `resolver::Error`, and an identifier
+/// parse error, which is an invalid DID or an unsupported method).
+pub fn spec_code_in_chain(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    std::iter::successors(Some(err), |e| e.source()).find_map(|e| {
+        if let Some(e) = e.downcast_ref::<Error>() {
+            e.spec_code()
+        } else if let Some(e) = e.downcast_ref::<Btcr2Error>() {
+            code_of(&e.details()?)
+        } else if let Some(e) = e.downcast_ref::<did_btcr2::document::Error>() {
+            code_of(&e.details()?)
+        } else if let Some(e) = e.downcast_ref::<did_btcr2::resolver::Error>() {
+            code_of(&e.details()?)
+        } else if let Some(e) = e.downcast_ref::<did_btcr2::identifier::Error>() {
+            code_of(&identifier_details(e)?)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use did_btcr2::identifier::{Did, Sha256Hash};
+    use std::str::FromStr;
+
+    fn parse_error(did: &str) -> did_btcr2::identifier::Error {
+        Did::from_str(did).expect_err("not a did:btcr2 identifier")
+    }
+
+    #[test]
+    fn missing_update_data_has_its_code() {
+        let err = Error::Btcr2(Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash::from([0u8; 32]),
+        });
+        assert_eq!(err.spec_code().as_deref(), Some("MISSING_UPDATE_DATA"));
+    }
+
+    #[test]
+    fn resolver_unit_variants_have_their_codes() {
+        let late = Error::Resolver(did_btcr2::resolver::Error::LatePublishingError);
+        assert_eq!(late.spec_code().as_deref(), Some("LATE_PUBLISHING"));
+        let mismatch = Error::Resolver(did_btcr2::resolver::Error::UpdateHashMismatch);
+        assert_eq!(mismatch.spec_code().as_deref(), Some("INVALID_DID_UPDATE"));
+    }
+
+    #[test]
+    fn identifier_errors_are_invalid_did_or_method_not_supported() {
+        let malformed = Error::Identifier(parse_error("did:btcr2:notbech32"));
+        assert_eq!(malformed.spec_code().as_deref(), Some("INVALID_DID"));
+        let other_method = Error::Identifier(parse_error("did:example:123"));
+        assert_eq!(
+            other_method.spec_code().as_deref(),
+            Some("METHOD_NOT_SUPPORTED")
+        );
+    }
+
+    #[test]
+    fn identifier_codes_follow_the_core_conversion() {
+        // Each identifier error, parsed twice: one copy goes through the core's
+        // own conversion, the other through this crate's restatement of it.
+        for did in ["did:btcr2:notbech32", "did:example:123", "not-a-did"] {
+            let owned = parse_error(did);
+            let borrowed = parse_error(did);
+            let core = code_of(&Btcr2Error::from(owned).details().expect("details"));
+            assert!(core.is_some(), "{did}");
+            assert_eq!(Error::Identifier(borrowed).spec_code(), core, "{did}");
+        }
+    }
+
+    #[test]
+    fn facade_failures_have_no_code() {
+        let transport = Error::Transport(TransportError::Malformed("x".to_string()));
+        assert_eq!(transport.spec_code(), None);
+        assert_eq!(Error::UnknownNetwork("x".to_string()).spec_code(), None);
+        let mismatch = Error::NetworkMismatch {
+            flag: "signet".to_string(),
+            did_network: "mutinynet".to_string(),
+        };
+        assert_eq!(mismatch.spec_code(), None);
+    }
+
+    /// A caller's error that wraps a client error as its source.
+    #[derive(Debug)]
+    struct Wrapper(Error);
+
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the command failed")
+        }
+    }
+
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn chain_lookup_finds_a_wrapped_client_code() {
+        let wrapped = Wrapper(Error::Btcr2(Btcr2Error::MissingUpdateData {
+            update_hash: Sha256Hash::from([0u8; 32]),
+        }));
+        assert_eq!(
+            spec_code_in_chain(&wrapped).as_deref(),
+            Some("MISSING_UPDATE_DATA")
+        );
+    }
+
+    #[test]
+    fn chain_lookup_skips_a_wrapper_whose_source_has_no_code() {
+        let wrapped = Wrapper(Error::UnknownNetwork("x".to_string()));
+        assert_eq!(spec_code_in_chain(&wrapped), None);
+    }
+
+    #[test]
+    fn chain_lookup_returns_none_for_an_io_error() {
+        assert_eq!(spec_code_in_chain(&std::io::Error::other("x")), None);
+    }
+
+    #[test]
+    fn chain_lookup_reads_a_bare_identifier_error() {
+        assert_eq!(
+            spec_code_in_chain(&parse_error("did:btcr2:notbech32")).as_deref(),
+            Some("INVALID_DID")
+        );
+        assert_eq!(
+            spec_code_in_chain(&parse_error("did:example:123")).as_deref(),
+            Some("METHOD_NOT_SUPPORTED")
+        );
+    }
+
+    #[test]
+    fn chain_lookup_reads_bare_core_errors() {
+        let late = did_btcr2::resolver::Error::LatePublishingError;
+        assert_eq!(
+            spec_code_in_chain(&late).as_deref(),
+            Some("LATE_PUBLISHING")
+        );
+        let btcr2 = Btcr2Error::InvalidDidUpdate("x".to_string());
+        assert_eq!(
+            spec_code_in_chain(&btcr2).as_deref(),
+            Some("INVALID_DID_UPDATE")
+        );
+    }
 }

@@ -48,7 +48,7 @@ mod transport;
 mod url;
 
 pub use client::Client;
-pub use error::{Error, TransportError};
+pub use error::{Error, TransportError, spec_code_in_chain};
 pub use funding::{
     DEFAULT_CONF_TARGET, EsploraUtxo, Fee, UtxoStatus, confirmed_total, fetch_fee_estimates,
     fetch_utxos, rate_from_estimates, resolve_fee, select,

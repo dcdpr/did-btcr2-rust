@@ -1258,6 +1258,23 @@ fn run() -> Result<(), CliRunError> {
     Ok(())
 }
 
+/// What `main` prints for a failed command: the error, one `Caused by:` line
+/// per source, and a `Code:` line with the specification error code when an
+/// error in the chain carries one. Every subcommand's failure passes through
+/// here, so a malformed DID reports `INVALID_DID` (or `METHOD_NOT_SUPPORTED`)
+/// whichever subcommand parsed it, while argument, I/O, key and JSON failures
+/// print no `Code:` line.
+fn render_error(error: &CliRunError) -> String {
+    let mut out = format!("Error: {error}\n");
+    for source in error.sources().skip(1) {
+        out.push_str(&format!("  Caused by: {source}\n"));
+    }
+    if let Some(code) = did_btcr2_client::spec_code_in_chain(error) {
+        out.push_str(&format!("  Code: {code}\n"));
+    }
+    out
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -1270,10 +1287,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("Error: {error}");
-            for source in error.sources().skip(1) {
-                eprintln!("  Caused by: {source}");
-            }
+            eprint!("{}", render_error(&error));
             ExitCode::FAILURE
         }
     }
@@ -2424,14 +2438,159 @@ mod tests {
             ),
             "got {err:?}"
         );
-        let mut printed = format!("Error: {err}\n");
-        for source in err.sources().skip(1) {
-            printed.push_str(&format!("  Caused by: {source}\n"));
-        }
+        let printed = render_error(&err);
         assert!(
             printed.contains("--network signet") && printed.contains("anchored to mainnet"),
             "the printed chain names the flag and the DID's network: {printed}"
         );
+        assert!(
+            !printed.contains("Code:"),
+            "a network contradiction is not a resolution outcome: {printed}"
+        );
+    }
+
+    // ── main's error rendering: the specification error code ─────────────────
+
+    /// The `Caused by:` lines `render_error` prints, one per source.
+    fn caused_by_lines(printed: &str) -> usize {
+        printed
+            .lines()
+            .filter(|l| l.starts_with("  Caused by: "))
+            .count()
+    }
+
+    /// A resolve that reaches an on-chain update without its sidecar fails
+    /// with `MISSING_UPDATE_DATA`, and the rendered error says so on its last
+    /// line, after the cause chain.
+    #[test]
+    fn render_error_names_missing_update_data_for_a_resolve_without_its_sidecar() {
+        let (transport, _state) = GrowingTransport::new();
+        let client = Client::new("http://fake".to_string(), transport);
+        let (did, vm_id) = genesis_did(&client);
+
+        let patch_path = std::env::temp_dir().join(format!(
+            "did-btcr2-cli-code-patch-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &patch_path,
+            serde_json::json!([{"op": "add", "path": "/assertionMethod/-", "value": vm_id}])
+                .to_string(),
+        )
+        .expect("write patch file");
+
+        let written = execute_write(
+            &client,
+            WriteParams {
+                did: did.clone(),
+                patch: Some(patch_path.clone()),
+                vm_id,
+                update_sk: test_update_sk(),
+                beacon_sk: test_secret_key(),
+                beacon_idx: 1,
+                fee: Fee::Absolute(1_000),
+                change: None,
+                dry_run: false,
+                yes: true,
+                sidecar: None,
+                sidecar_out: None,
+                min_conf: None,
+            },
+            || unreachable!("--yes skips the broadcast confirm"),
+        );
+        let _ = std::fs::remove_file(&patch_path);
+        written.expect("the update write broadcasts");
+
+        let err = match client.resolve(&did, load_sidecar(None, None).expect("no sidecar")) {
+            Err(e) => e,
+            Ok(r) => panic!(
+                "a resolve without the update's sidecar must fail, got versionId {}",
+                r.document_metadata.version_id
+            ),
+        };
+        let err = CliRunError::Client(err);
+        let printed = render_error(&err);
+        assert!(printed.starts_with("Error: "), "{printed}");
+        assert_eq!(
+            caused_by_lines(&printed),
+            err.sources().skip(1).count(),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("\n  Code: MISSING_UPDATE_DATA\n"),
+            "{printed}"
+        );
+        assert_eq!(
+            printed.lines().last(),
+            Some("  Code: MISSING_UPDATE_DATA"),
+            "the code follows the cause chain: {printed}"
+        );
+    }
+
+    /// A malformed DID is a resolution outcome on every subcommand: each one
+    /// turns the parse failure into `CliRunError::DidParse`, and the rendered
+    /// error carries `INVALID_DID`, or `METHOD_NOT_SUPPORTED` for another
+    /// method.
+    #[test]
+    fn render_error_names_invalid_did_for_a_malformed_did() {
+        let err = run_resolve("did:btcr2:notbech32", None, None, None, None)
+            .expect_err("a malformed DID is refused");
+        assert!(matches!(err, CliRunError::DidParse(_)), "got {err:?}");
+        let printed = render_error(&err);
+        assert!(printed.starts_with("Error: "), "{printed}");
+        assert_eq!(
+            printed.lines().last(),
+            Some("  Code: INVALID_DID"),
+            "{printed}"
+        );
+
+        let other_method = CliRunError::DidParse(
+            "did:example:123"
+                .parse::<did_btcr2::identifier::Did>()
+                .expect_err("another method"),
+        );
+        let printed = render_error(&other_method);
+        assert!(
+            printed.ends_with("\n  Code: METHOD_NOT_SUPPORTED\n"),
+            "{printed}"
+        );
+
+        let malformed = CliRunError::DidParse(
+            "did:btcr2:notbech32"
+                .parse::<did_btcr2::identifier::Did>()
+                .expect_err("not bech32"),
+        );
+        let printed = render_error(&malformed);
+        assert!(printed.ends_with("\n  Code: INVALID_DID\n"), "{printed}");
+    }
+
+    /// Failures that are not resolution outcomes (argument conflicts, I/O,
+    /// JSON, network selection) print their chain and no `Code:` line.
+    #[test]
+    fn render_error_prints_no_code_for_errors_outside_the_spec() {
+        let json = serde_json::from_str::<serde_json::Value>("{").expect_err("truncated JSON");
+        let bogus = network_from_str(Some("bogus")).expect_err("an unknown network");
+        let mismatch = CliRunError::Client(did_btcr2_client::Error::NetworkMismatch {
+            flag: "signet".to_string(),
+            did_network: "mainnet".to_string(),
+        });
+        let cases = [
+            CliRunError::StdinConflict,
+            CliRunError::Io(std::io::Error::other("x")),
+            CliRunError::Json(json),
+            bogus,
+            mismatch,
+        ];
+        for err in cases {
+            let printed = render_error(&err);
+            assert!(printed.starts_with("Error: "), "{printed}");
+            assert_eq!(
+                caused_by_lines(&printed),
+                err.sources().skip(1).count(),
+                "{printed}"
+            );
+            assert!(!printed.contains("Code:"), "{err:?} printed: {printed}");
+        }
     }
 
     #[test]

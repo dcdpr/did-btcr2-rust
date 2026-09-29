@@ -130,30 +130,30 @@ pub fn map_client_error(err: did_btcr2_client::Error) -> (Value, Option<String>)
         }
         s
     };
-    let details = match err {
-        Error::Btcr2(e) => e.details(),
-        Error::Core(e) => e.details(),
-        Error::Resolver(e) => e.details(),
-        Error::Identifier(e) => did_btcr2::error::Btcr2Error::from(e).details(),
-        Error::NoDefaultEndpoint(network) => Problem::FeatureNotSupported(format!(
-            "no Esplora endpoint is configured for network `{network}`; DIDs on this network cannot be resolved by this server"
-        ))
-        .details(),
-        Error::Transport(TransportError::Http(_) | TransportError::Io(_)) => {
-            Some(internal("the Bitcoin backend could not be reached"))
-        }
-        Error::Transport(TransportError::Status { .. }) => {
-            Some(internal("the Bitcoin backend returned an error response"))
-        }
-        Error::Transport(TransportError::Malformed(_)) | Error::Json(_) => {
-            Some(internal("the Bitcoin backend returned a malformed response"))
-        }
-        // The remaining variants (network selection, funding, signing) are
-        // not resolution outcomes; a `_` arm also keeps this compiling as the
-        // facade grows.
-        _ => None,
-    }
-    .unwrap_or_else(|| internal("the resolver failed internally"));
+    // The core's errors (and an invalid DID) map through the client's own
+    // problem details; the arms below cover the facade failures it leaves out.
+    let details = err
+        .details()
+        .or_else(|| match &err {
+            Error::NoDefaultEndpoint(network) => Problem::FeatureNotSupported(format!(
+                "no Esplora endpoint is configured for network `{network}`; DIDs on this network cannot be resolved by this server"
+            ))
+            .details(),
+            Error::Transport(TransportError::Http(_) | TransportError::Io(_)) => {
+                Some(internal("the Bitcoin backend could not be reached"))
+            }
+            Error::Transport(TransportError::Status { .. }) => {
+                Some(internal("the Bitcoin backend returned an error response"))
+            }
+            Error::Transport(TransportError::Malformed(_)) | Error::Json(_) => {
+                Some(internal("the Bitcoin backend returned a malformed response"))
+            }
+            // The remaining variants (network selection, funding, signing) are
+            // not resolution outcomes; a `_` arm also keeps this compiling as the
+            // facade grows.
+            _ => None,
+        })
+        .unwrap_or_else(|| internal("the resolver failed internally"));
     let diagnostic = (status_for(details["type"].as_str().unwrap_or("")) == 500).then_some(chain);
     (details, diagnostic)
 }
