@@ -135,6 +135,23 @@ fn conformance_cause(err: &Error) -> String {
     }
 }
 
+/// Rejects an update whose patch changes the DID document `id`.
+///
+/// The DID document identifier is immutable across an update (update.md
+/// identifier immutability), and on resolve the post-patch `id` MUST equal the
+/// DID (resolve.md:222). The comparison is on the raw JSON values, before any
+/// typed parse: the typed parse decodes `id` as a did:btcr2 identifier, so an
+/// `id` rewritten to a DID-Core-valid but non-bech32 value would otherwise
+/// surface as an encoding error instead of the id change it is.
+fn check_id_unchanged(before: &Value, after: &Value) -> Result<(), Btcr2Error> {
+    if after.get("id") != before.get("id") {
+        return Err(Btcr2Error::InvalidDidUpdate(
+            "update may not change the DID document id".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Sealed marker trait that selects the sequence type for fields constrained
 /// by the spec's "updatable document" invariant (≥1 capabilityInvocation and
 /// ≥1 service for resolved DIDs; unconstrained for intermediate placeholder-DID
@@ -1025,12 +1042,7 @@ impl Document {
             Btcr2Error::InvalidDidUpdate(format!("Unable to apply JSON Patch: {e}"))
         })?;
 
-        // The DID document identifier is immutable across an update.
-        if target_value.get("id") != self.json_data.get("id") {
-            return Err(Btcr2Error::InvalidDidUpdate(
-                "update may not change the DID document id".into(),
-            ));
-        }
+        check_id_unchanged(&self.json_data, &target_value)?;
 
         // Re-validate conformance (mirrors apply_update's DocumentFields check)
         // and hash the patched document for the targetHash.
@@ -1578,21 +1590,20 @@ impl InitialDocument {
             Btcr2Error::InvalidDidUpdate(format!("Unable to apply JSON Patch: {e}"))
         })?;
 
+        // The post-patch document id MUST still equal this DID (resolve.md:222).
+        // Checked on the raw JSON before the typed parse, so an id change is
+        // reported as such even when the new id is not a did:btcr2 identifier.
+        check_id_unchanged(&self.json_data, &patched)?;
+
+        // No typed `fields.id != self.fields.id` check follows: `fields.id` is
+        // parsed from the same raw `id` string just compared equal to this
+        // document's, which itself parsed to `self.fields.id`, so it cannot differ.
         let fields = DocumentFields::try_from((&patched, None)).map_err(|e| {
             Btcr2Error::InvalidDidUpdate(format!(
                 "Updated DID document is non-conformant: {}",
                 conformance_cause(&e)
             ))
         })?;
-
-        // The document identifier is immutable across an update: the post-patch
-        // document id MUST still equal this DID (resolve.md:222). Rejecting a
-        // mismatch stops a patch from re-pointing the document identity.
-        if fields.id != self.fields.id {
-            return Err(Btcr2Error::InvalidDidUpdate(
-                "post-patch document id does not equal the DID".into(),
-            ));
-        }
 
         let candidate = InitialDocument {
             fields,
@@ -3778,17 +3789,66 @@ mod tests {
         }
     }
 
+    /// Signs an update over `patch` with the genesis key, bypassing the
+    /// construction primitive (which refuses an id-changing patch), so the
+    /// resolve-path checks can be exercised against it. The caller supplies
+    /// `target_hash` because a re-identified document may not parse.
+    fn sign_update_by_hand(
+        initial: &InitialDocument,
+        vm_id: &str,
+        patch: &Patch,
+        target_hash: Sha256Hash,
+    ) -> Update {
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let unsigned = UnsecuredUpdate::construct(patch, initial.hash(), target_hash, version);
+
+        let capability = derive_root_capability(initial.fields.id.clone());
+        let inner = ProofInner {
+            id: None,
+            proof_type: ProofType::DataIntegrityProof,
+            proof_purpose: ProofPurpose::CapabilityInvocation,
+            verification_method: vm_id.to_string(),
+            cryptosuite: CryptoSuiteName::Jcs,
+            created: None,
+            expires: None,
+            domain: None,
+            challenge: None,
+            previous_proof: None,
+            nonce: None,
+            context: vec![],
+            capability,
+            capability_action: "Write".to_string(),
+            invocation_target: None,
+        };
+        let proof = CryptoSuite
+            .create_proof(&unsigned, inner, &source_secret_key())
+            .expect("the hand-built update signs");
+        let mut signed_json = unsigned.as_ref().clone();
+        if let Value::Object(map) = &mut signed_json {
+            map.insert(
+                "proof".to_string(),
+                serde_json::to_value(&proof).expect("proof serializes"),
+            );
+        }
+        Update::from_json_value(signed_json).expect("the hand-signed update parses")
+    }
+
+    /// Extracts the detail of an `InvalidDidUpdate`, failing on any other variant.
+    fn invalid_did_update_detail(err: Btcr2Error) -> String {
+        match err {
+            Btcr2Error::InvalidDidUpdate(detail) => detail,
+            other => panic!("expected InvalidDidUpdate, got {other:?}"),
+        }
+    }
+
     /// resolve.md:222 — apply_update MUST reject an update whose patch changes the
     /// document `id` (a post-patch `id != did`): a patch cannot re-point the
     /// document identity. Mapped to the spec-literal INVALID_DID_UPDATE
     /// (`Btcr2Error::InvalidDidUpdate`).
     ///
-    /// The construction primitive refuses an id-changing patch, so this builds the
-    /// signed id-changing update directly (mirroring construct_signed_update but
-    /// without the construct-side id-immutability guard), then applies it: the
-    /// signature verifies against the genesis VM, the patch re-parses to a
-    /// conformant (but re-identified) document whose hash matches the update's
-    /// targetHash, and the new resolve-path id==did check is the rejecting gate.
+    /// The update is signed by hand against the genesis VM; its targetHash is
+    /// the hash of the re-identified document, so the id check is the gate. A
+    /// rejected update leaves the document untouched.
     #[test]
     fn apply_update_rejects_post_patch_id_change() {
         let (did, vm_id, initial, _document) = source_documents();
@@ -3816,56 +3876,58 @@ mod tests {
         ]))
         .expect("id-change patch is a valid RFC 6902 op array");
 
-        // Build the signed update by hand (construct_signed_update would reject
-        // the id change). target_hash is computed from the patched document so the
-        // resolve-path hash check passes and the id check is what fires.
-        let source_hash = initial.hash();
         let mut target_value = initial.as_ref().clone();
         json_patch::patch(&mut target_value, &id_change_patch)
             .expect("the id-change patch applies to the genesis json");
         let target_hash = Document::from_json_value(target_value)
             .expect("the re-identified document still parses as conformant")
             .hash();
-        let version = NonZeroU64::new(2).expect("2 is non-zero");
-        let unsigned =
-            UnsecuredUpdate::construct(&id_change_patch, source_hash, target_hash, version);
-
-        let capability = derive_root_capability(initial.fields.id.clone());
-        let inner = ProofInner {
-            id: None,
-            proof_type: ProofType::DataIntegrityProof,
-            proof_purpose: ProofPurpose::CapabilityInvocation,
-            verification_method: vm_id.clone(),
-            cryptosuite: CryptoSuiteName::Jcs,
-            created: None,
-            expires: None,
-            domain: None,
-            challenge: None,
-            previous_proof: None,
-            nonce: None,
-            context: vec![],
-            capability,
-            capability_action: "Write".to_string(),
-            invocation_target: None,
-        };
-        let proof = CryptoSuite
-            .create_proof(&unsigned, inner, &source_secret_key())
-            .expect("the id-changing update signs");
-        let mut signed_json = unsigned.as_ref().clone();
-        if let Value::Object(map) = &mut signed_json {
-            map.insert(
-                "proof".to_string(),
-                serde_json::to_value(&proof).expect("proof serializes"),
-            );
-        }
-        let update =
-            Update::from_json_value(signed_json).expect("the signed id-changing update parses");
+        let update = sign_update_by_hand(&initial, &vm_id, &id_change_patch, target_hash);
 
         let mut target = initial.clone();
+        let before = target.hash();
         let err = target
             .apply_update(&update, &AnnouncingBlock::fixed())
             .expect_err("a patch that changes the document id must be rejected on apply");
-        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
+        let detail = invalid_did_update_detail(err);
+        assert!(
+            detail.contains("may not change the DID document id"),
+            "unexpected detail: {detail}"
+        );
+        assert_eq!(target.hash(), before, "a rejected update must not mutate");
+    }
+
+    /// resolve.md:222 — an id rewritten to a DID-Core-valid but non-bech32
+    /// did:btcr2 string is reported as the id change it is, not as an encoding
+    /// error from parsing the new id.
+    #[test]
+    fn apply_update_reports_an_id_change_to_a_non_btcr2_id_as_an_id_change() {
+        let (_did, vm_id, initial, _document) = source_documents();
+        let id_change_patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "replace", "path": "/id", "value": "did:btcr2:k1qexample"}
+        ]))
+        .expect("id-change patch is a valid RFC 6902 op array");
+
+        // The re-identified document does not parse, so there is no real target
+        // hash; the id check runs before the target-hash check, so any hash will do.
+        let update = sign_update_by_hand(&initial, &vm_id, &id_change_patch, initial.hash());
+
+        let mut target = initial.clone();
+        let before = target.hash();
+        let err = target
+            .apply_update(&update, &AnnouncingBlock::fixed())
+            .expect_err("a patch that changes the document id must be rejected on apply");
+        let detail = invalid_did_update_detail(err);
+        assert!(
+            detail.contains("may not change the DID document id"),
+            "unexpected detail: {detail}"
+        );
+        assert!(!detail.contains("Bech32"), "unexpected detail: {detail}");
+        assert!(
+            !detail.contains("non-conformant"),
+            "unexpected detail: {detail}"
+        );
+        assert_eq!(target.hash(), before, "a rejected update must not mutate");
     }
 
     /// update.md:86 — a vm_id present in verificationMethod but absent from
@@ -5004,7 +5066,32 @@ mod tests {
         let err = document
             .construct_signed_update(patch, version, &vm_id, source_secret_key())
             .expect_err("a patch that changes id must be rejected");
-        assert!(matches!(err, Btcr2Error::InvalidDidUpdate(_)));
+        let detail = invalid_did_update_detail(err);
+        assert!(
+            detail.contains("may not change the DID document id"),
+            "unexpected detail: {detail}"
+        );
+    }
+
+    /// update.md:11 — an id rewritten to a non-bech32 did:btcr2 string is
+    /// rejected on construction with the same id-change detail as on resolve.
+    #[test]
+    fn update_rejects_id_change_to_a_non_btcr2_id() {
+        let (_did, vm_id, _initial, document) = source_documents();
+        let version = NonZeroU64::new(2).expect("2 is non-zero");
+        let patch: Patch = serde_json::from_value(serde_json::json!([
+            {"op": "replace", "path": "/id", "value": "did:btcr2:k1qexample"}
+        ]))
+        .expect("id-change patch is a valid RFC 6902 op array");
+
+        let err = document
+            .construct_signed_update(patch, version, &vm_id, source_secret_key())
+            .expect_err("a patch that changes id must be rejected");
+        let detail = invalid_did_update_detail(err);
+        assert!(
+            detail.contains("may not change the DID document id"),
+            "unexpected detail: {detail}"
+        );
     }
 
     /// The constructor does not mutate `self`: the document hash is unchanged
