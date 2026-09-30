@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests advisory-issue.sh against a stub `gh` that records every call and answers
+# Tests advisory-issue.sh, in both its report and its close mode, against a stub `gh` that
+# records every call and answers
 # `gh issue list` and `gh issue view` by applying the script's own --jq filter to a canned
 # list of open issues and a canned issue body.
 # Needs bash, jq and coreutils; no network and no token.
@@ -47,16 +48,42 @@ chmod +x "$work/bin/gh"
   printf 'error[vulnerability]: sentinel\n'
 } > "$work/deny.log"
 
-# run_case <name> <open-issues-json> [<existing-issue-body>]; the stub's call log is
-# $work/<name>.calls
-run_case() {
-  mkdir -p "$work/$1.tmp"
-  : > "$work/$1.calls"
-  PATH="$work/bin:$PATH" TMPDIR="$work/$1.tmp" GH_STUB_LOG="$work/$1.calls" \
-    GH_STUB_ISSUES="$2" GH_STUB_BODY="${3-}" GITHUB_SHA=abc123 \
+# invoke <name> <open-issues-json> <existing-issue-body> <script-args...>: runs the script
+# against the stub, whose call log is $work/<name>.calls, and returns its exit status.
+invoke() {
+  local name=$1 issues=$2 old_body=$3
+  shift 3
+  mkdir -p "$work/$name.tmp"
+  : > "$work/$name.calls"
+  PATH="$work/bin:$PATH" TMPDIR="$work/$name.tmp" GH_STUB_LOG="$work/$name.calls" \
+    GH_STUB_ISSUES="$issues" GH_STUB_BODY="$old_body" GITHUB_SHA=abc123 \
     RUN_URL=https://example.invalid/run GH_REPO=o/r GH_TOKEN=x \
-    bash "$here/advisory-issue.sh" "$work/deny.log" \
-    || fail "$1: script exited non-zero"
+    bash "$here/advisory-issue.sh" "$@"
+}
+
+# run_case <name> <open-issues-json> [<existing-issue-body>]: a failed scan's report.
+run_case() {
+  invoke "$1" "$2" "${3-}" report "$work/deny.log" || fail "$1: script exited non-zero"
+}
+
+# run_close <name> <open-issues-json>: a passing scan.
+run_close() {
+  invoke "$1" "$2" "" close || fail "$1: script exited non-zero"
+}
+
+# Only the lookup ran: nothing was created, edited, commented on or closed.
+expect_untouched() {
+  if grep -v '^issue list ' "$work/$1.calls" | grep -q .; then
+    fail "$1: unexpected calls: $(grep -v '^issue list ' "$work/$1.calls" | paste -sd ';' -)"
+  fi
+}
+
+expect_close() {
+  grep -q "^issue close $2 --comment .*abc123.*https://example.invalid/run" "$work/$1.calls" \
+    || fail "$1: no issue close $2 with a comment naming the commit and the run"
+  if grep -v -e '^issue list ' -e "^issue close $2 " "$work/$1.calls" | grep -q .; then
+    fail "$1: unexpected calls besides closing $2"
+  fi
 }
 
 expect_create() {
@@ -117,6 +144,31 @@ run_case removed-advisory "[{\"number\":42,\"title\":\"$title\",$bot}]" \
   'old log: RUSTSEC-2025-0099 RUSTSEC-2026-0001 RUSTSEC-2026-0002'
 expect_edit removed-advisory 42
 expect_comment removed-advisory 42 'RUSTSEC-2026-0001 RUSTSEC-2026-0002'
+
+# A passing scan closes the workflow's open issue, with a comment naming the run.
+run_close close-open "[{\"number\":42,\"title\":\"$title\",$bot}]"
+expect_close close-open 42
+
+# A passing scan with no open issue does nothing beyond the lookup.
+run_close close-none '[]'
+expect_untouched close-none
+
+# An issue with the exact title that someone else opened is not the workflow's to close.
+run_close close-by-other-author "[{\"number\":5,\"title\":\"$title\",$other}]"
+expect_untouched close-by-other-author
+
+run_close close-by-both-authors "[{\"number\":5,\"title\":\"$title\",$other},{\"number\":6,\"title\":\"$title\",$bot}]"
+expect_close close-by-both-authors 6
+
+# A missing or unknown mode, or a report without its log, is a usage error that calls nothing.
+for args in "" "bogus" "report" "close extra"; do
+  name="usage-${args// /-}"
+  # shellcheck disable=SC2086 # the words of $args are the script's arguments
+  if invoke "$name" '[]' "" $args 2> /dev/null; then
+    fail "$name: script exited zero"
+  fi
+  if [ -s "$work/$name.calls" ]; then fail "$name: the stub was called"; fi
+done
 
 body=$(sed -n 's/^issue create .* --body-file //p' "$work/none.calls")
 if [ -n "$body" ] && [ -f "$body" ]; then

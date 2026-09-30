@@ -9,12 +9,15 @@ permissions:
   contents: read
 
 jobs:
+  # Runs the third-party code (install-action and the cargo-deny binary it downloads) with a
+  # read-only token. The issue write scope lives in the report job alone.
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
-      issues: write
+    outputs:
+      status: ${{ steps.deny.outputs.status }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,11 +34,38 @@ jobs:
           status=$?
           cat deny.log
           echo "status=$status" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deny-log
+          path: deny.log
+          retention-days: 7
       - if: steps.deny.outputs.status != '0'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          bash .github/scripts/advisory-issue.sh deny.log
-          exit 1
+        run: exit 1
+
+  # Opens or updates the issue when the scan failed, and closes it when the scan passed. It
+  # runs whether the scan job passed or failed, but only once the scan produced a status: a
+  # scan job that broke before running cargo-deny reports nothing either way.
+  report:
+    needs: scan
+    if: ${{ !cancelled() && needs.scan.outputs.status != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: needs.scan.outputs.status != '0'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deny-log
+      - if: needs.scan.outputs.status != '0'
+        run: bash .github/scripts/advisory-issue.sh report deny.log
+      - if: needs.scan.outputs.status == '0'
+        run: bash .github/scripts/advisory-issue.sh close
