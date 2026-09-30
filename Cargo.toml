@@ -70,7 +70,7 @@ urlencoding = "2"
 # WITHOUT changing the published crate's feature surface. `esploda` 0.2
 # does NOT re-expose a `bitcoin/bitcoinconsensus` passthrough feature, so this
 # direct dev-dependency is the supported path; it resolves to the same
-# bitcoin 0.30.2 lock entry as `esploda::bitcoin`.
+# `bitcoin` lock entry as `esploda::bitcoin`.
 bitcoin = { version = "0.30", features = ["bitcoinconsensus"] }
 
 [features]
