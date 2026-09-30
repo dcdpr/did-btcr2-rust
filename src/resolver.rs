@@ -470,7 +470,8 @@ impl Resolver {
                         "update sourceHash `{}` does not match the contemporary document hash `{}`",
                         hex::encode(update.source_hash.as_bytes()),
                         hex::encode(contemporary_hash.as_bytes()),
-                    )))?;
+                    ))
+                    .into());
                 }
 
                 // Step 10.2.2 - 10.2.3.

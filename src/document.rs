@@ -312,7 +312,7 @@ where
 
         // TODO: Might want to abstract this null-check for required keys.
         if value["@context"].is_null() {
-            return Err(JsonError::JsonMissingKey("@context".into()))?;
+            return Err(JsonError::JsonMissingKey("@context".into()).into());
         }
         let context = vec_from_object(value, "@context", |id| {
             string_from_value(id).map(ToString::to_string)
@@ -1425,7 +1425,8 @@ impl InitialDocument {
                     "sidecar genesisDocument does not match the DID's genesis hash: the \
                      document's JCS SHA-256 differs from the hash committed in the identifier"
                         .to_string(),
-                ))?;
+                )
+                .into());
             }
             // Then "Establish current_document": the placeholder replaced
             // with the DID by a simple string replacement.
