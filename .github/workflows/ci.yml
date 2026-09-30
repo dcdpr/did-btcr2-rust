@@ -9,6 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bumped by hand, together with advisories.yml: Dependabot does not track it.
+  CARGO_DENY_VERSION: "0.20.2"
 
 jobs:
   fmt:
@@ -110,7 +112,7 @@ jobs:
       - run: rustup toolchain install
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
           fallback: none
       - run: cargo deny --locked --workspace check bans licenses sources
 
@@ -145,7 +147,7 @@ jobs:
       - if: steps.changes.outputs.manifests == 'true'
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
           fallback: none
       - if: steps.changes.outputs.manifests == 'true'
         run: cargo deny --locked --workspace check advisories

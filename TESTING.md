@@ -36,7 +36,9 @@ manifests differ from `main` is checked on every push). It also runs daily on
 `cargo fmt --check`, not `cargo fmt --all`: `--all` also formats path
 dependencies, and `vendor/bech32-rust` must stay byte-identical to its source
 commit (`vendor/README.md`). `cargo deny` needs `--workspace`; without it only
-the root crate's dependency graph is checked.
+the root crate's dependency graph is checked. The workflows pin the cargo-deny
+version in `CARGO_DENY_VERSION`, once in `ci.yml` and once in `advisories.yml`.
+Dependabot does not track it, so bump it by hand in both files together.
 
 The HTTP binding's suite (`did-btcr2-resolver-http`, second line) runs offline
 against a scripted resolver; only `smoke` opens a socket, on loopback at an

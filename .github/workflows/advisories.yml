@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Bumped by hand, together with ci.yml: Dependabot does not track it.
+  CARGO_DENY_VERSION: "0.20.2"
+
 jobs:
   # Runs the third-party code (install-action and the cargo-deny binary it downloads) with a
   # read-only token. The issue write scope lives in the report job alone.
@@ -25,7 +29,7 @@ jobs:
       - run: rustup toolchain install
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
           fallback: none
       - id: deny
         run: |
