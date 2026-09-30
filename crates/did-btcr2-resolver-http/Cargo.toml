@@ -10,9 +10,8 @@ name = "did-btcr2-resolver-http"
 path = "src/main.rs"
 
 [dependencies]
-# `version` alongside `path` keeps cargo-deny's wildcard ban clean for this member.
-did-btcr2 = { path = "../..", version = "0.1.0" }
-did-btcr2-client = { path = "../did-btcr2-client", version = "0.1.0" }
+did-btcr2 = { path = "../.." }
+did-btcr2-client = { path = "../did-btcr2-client" }
 # Blocking HTTP/1.1 listener: 5 transitive crates with default features, no TLS
 # (TLS is behind the non-default ssl-* features and is not wanted here).
 tiny_http = "0.12"
