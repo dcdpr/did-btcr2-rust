@@ -115,12 +115,18 @@ Semver discipline begins at the 1.0 cut, once the did:btcr2 spec stabilizes.
   request, and proves the captured chain against `signals.json` before it
   judges the resolve outcome, so a record the chain contradicts is reported
   as a signal mismatch rather than a confirmations mismatch.
+- `rust-version` is declared: 1.88 is the minimum supported Rust version,
+  checked in CI.
+- `bech32-rust` is a vendored path dependency (`vendor/bech32-rust`); building
+  needs no access to a private git host.
 
 ### Deprecated
 
 ### Removed
 
 - `resolver::Error::UnconfirmedBeaconTx`.
+- The `smt-sim` benchmark crate (its history stays at the `archive/smt-sim`
+  tag).
 - The conformance harness's stale-update-context and unanchored
   (`pending.json`) skip reasons, its `scenario.json` delivery cross-check, and
   its number-tolerant `versionId` read; the corpus they served is gone.

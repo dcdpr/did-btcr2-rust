@@ -12,19 +12,31 @@ repeats the other; for "is requirement X covered", read CONFORMANCE.md.
 Run everything from the workspace root `did-btcr2-rust/`.
 
 ```bash
-cargo test -p did-btcr2 -p did-btcr2-client -p did-btcr2-cli -p chain-capture -p did-btcr2-resolver-http
+BTCR2_REQUIRE_TEST_SUITE=1 cargo test --workspace --locked
 cargo test -p did-btcr2-resolver-http --test conformance --test post --test guard --test schema --test smoke --test fixtures
 cargo test -p did-btcr2 --lib op_vectors -- --nocapture     # prints the coverage ledger
 cargo test -p did-btcr2 --lib minted_chain -- --nocapture   # minted clean chain
 cargo test -p did-btcr2 --lib minted_fork -- --nocapture    # minted fork
-cargo fmt -p <crate> -- --check
-cargo clippy -p <crate> --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc -p did-btcr2 --no-deps
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo build --workspace --all-targets --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo +1.88 check --workspace --locked                      # the declared rust-version
+cargo deny --locked --workspace check                       # cargo-deny 0.20.2 or later
 ```
 
-Never use `cargo --all` or `--workspace`. The `smt-sim` workspace member fails
-to build without a system fontconfig, which is unrelated to any of the crates
-above. Always name crates with `-p`.
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs the first line
+and the last six as separate jobs, so one failure does not hide another.
+cargo-deny's advisories check runs there only when `Cargo.lock`, a
+`Cargo.toml` or `deny.toml` differs from the comparison base: the target
+branch for a pull request, the previous commit for a push to `main`, and the
+merge-base with `main` for a push to any other branch (so a branch whose
+manifests differ from `main` is checked on every push). It also runs daily on
+`main` on a schedule (`.github/workflows/advisories.yml`). Use
+`cargo fmt --check`, not `cargo fmt --all`: `--all` also formats path
+dependencies, and `vendor/bech32-rust` must stay byte-identical to its source
+commit (`vendor/README.md`). `cargo deny` needs `--workspace`; without it only
+the root crate's dependency graph is checked.
 
 The HTTP binding's suite (`did-btcr2-resolver-http`, second line) runs offline
 against a scripted resolver; only `smoke` opens a socket, on loopback at an
@@ -608,8 +620,7 @@ submodule would let every vector test pass vacuously. Set
 `BTCR2_REQUIRE_TEST_SUITE=1` to turn the absence into a failure: the guard test
 `test_suite_is_checked_out_when_required` (in `did-btcr2` and in `chain-capture`)
 then fails, naming the variable and `git submodule update --init --recursive`.
-CI sets it on both test jobs (`cargo-test` and `cargo-test:release`). Unset or
-empty, the drivers skip as before.
+The Actions `test` job sets it. Unset or empty, the drivers skip as before.
 
 To check the submodule out, see the one-time setup in
 [README.md](./README.md): `git submodule init && git submodule update`.
