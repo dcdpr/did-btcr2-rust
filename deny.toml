@@ -2,20 +2,28 @@
 
 [advisories]
 version = 2
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+# Each entry names the advisory and why it is unreachable from this workspace:
+# { id = "RUSTSEC-YYYY-NNNN", reason = "..." }
 ignore = []
 
 [licenses]
 version = 2
+# This check covers shipped (non-dev) dependencies only: cargo-deny's
+# `include-dev` defaults to false, so dev-dependency licences (for example the
+# jsonschema subtree used by the resolver-http tests) are not checked here.
 # https://spdx.org/licenses/
 allow = [
     "Apache-2.0", "BSD-3-Clause", "CC0-1.0", "ISC", "MIT", "MPL-2.0",
     # https://spdx.org/licenses/MITNFA.html
     # https://spdx.org/licenses/Unicode-3.0.html
-    # https://spdx.org/licenses/Unicode-DFS-2016.html
-    "MITNFA", "Unicode-3.0", "Unicode-DFS-2016",
-    # https://spdx.org/licenses/MIT-0.html — borrow-or-share, via fluent-uri <- referencing <- jsonschema (dev-dependency)
-    # https://spdx.org/licenses/Zlib.html — foldhash, via hashbrown <- jsonschema (dev-dependency)
-    "MIT-0", "Zlib",
+    "MITNFA", "Unicode-3.0",
+]
+exceptions = [
+    # The Mozilla CA root data that rustls uses to verify Esplora hosts.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 confidence-threshold = 0.93
 private = { ignore = true }
@@ -23,6 +31,9 @@ private = { ignore = true }
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Path dependencies of the publish = false crates carry no version; the
+# published root crate still needs one on every dependency.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
