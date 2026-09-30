@@ -62,14 +62,24 @@ expect_edit() {
 run_case none '[]'
 expect_create none
 
-run_case similar-title-only '[{"number":7,"title":"Scheduled advisory scan failed again"}]'
+bot='"author":{"login":"app/github-actions"}'
+other='"author":{"login":"someone"}'
+
+run_case similar-title-only "[{\"number\":7,\"title\":\"$title again\",$bot}]"
 expect_create similar-title-only
 
-run_case exact-among-similar '[{"number":7,"title":"Scheduled advisory scan failed again"},{"number":9,"title":"Scheduled advisory scan failed"}]'
+run_case exact-among-similar "[{\"number\":7,\"title\":\"$title again\",$bot},{\"number\":9,\"title\":\"$title\",$bot}]"
 expect_edit exact-among-similar 9
 
-run_case exact-only '[{"number":42,"title":"Scheduled advisory scan failed"}]'
+run_case exact-only "[{\"number\":42,\"title\":\"$title\",$bot}]"
 expect_edit exact-only 42
+
+# An issue with the exact title that someone else opened is not the workflow's to edit.
+run_case exact-by-other-author "[{\"number\":5,\"title\":\"$title\",$other}]"
+expect_create exact-by-other-author
+
+run_case exact-by-both-authors "[{\"number\":5,\"title\":\"$title\",$other},{\"number\":6,\"title\":\"$title\",$bot}]"
+expect_edit exact-by-both-authors 6
 
 body=$(sed -n 's/^issue create .* --body-file //p' "$work/none.calls")
 if [ -n "$body" ] && [ -f "$body" ]; then
