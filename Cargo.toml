@@ -83,6 +83,9 @@ old-spec-fixtures = []
 
 [workspace]
 members = [
-    "crates/*",
+    "crates/chain-capture",
+    "crates/did-btcr2-cli",
+    "crates/did-btcr2-client",
+    "crates/did-btcr2-resolver-http",
 ]
 exclude = ["vendor/bech32-rust"]
