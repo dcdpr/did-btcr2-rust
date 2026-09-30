@@ -2582,6 +2582,33 @@ mod tests {
         );
     }
 
+    /// `@context` is required: a document without it, or with it set to
+    /// null, fails the parse with the typed missing-key error.
+    #[test]
+    fn missing_or_null_context_is_rejected() {
+        let (_did, _vm_id, _initial, document) = source_documents();
+
+        let mut absent = document.as_ref().clone();
+        absent
+            .as_object_mut()
+            .expect("a DID document is a JSON object")
+            .remove("@context")
+            .expect("the source document carries @context");
+        let err = Document::from_json_value(absent).expect_err("a missing @context is rejected");
+        assert!(
+            matches!(&err, Error::JsonValue(json_tools::JsonError::JsonMissingKey(k)) if k == "@context"),
+            "got {err:?}"
+        );
+
+        let mut null = document.as_ref().clone();
+        null["@context"] = Value::Null;
+        let err = Document::from_json_value(null).expect_err("a null @context is rejected");
+        assert!(
+            matches!(&err, Error::JsonValue(json_tools::JsonError::JsonMissingKey(k)) if k == "@context"),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn test_document_validation_missing_elements() {
         let path = "./fixtures/initialDidDoc-missing-verificationMethod-id.json";
