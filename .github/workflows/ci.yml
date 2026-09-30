@@ -85,11 +85,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The declared rust-version overrides rust-toolchain.toml for every later step.
+      # The declared rust-version overrides rust-toolchain.toml for every later step. cargo
+      # reads it as cargo resolves it (workspace inheritance included); the runner's
+      # preinstalled stable runs the read, since the pinned toolchain is not installed yet.
+      # The value must be a single version, so a malformed GITHUB_ENV entry cannot be written.
       - name: Select the rust-version toolchain
         run: |
-          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          test -n "$msrv"
+          msrv=$(cargo +stable metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "did-btcr2") | .rust_version')
+          [[ $msrv =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
           echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
