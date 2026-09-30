@@ -143,3 +143,14 @@ jobs:
           fallback: none
       - if: steps.changes.outputs.manifests == 'true'
         run: cargo deny --locked --workspace check advisories
+
+  # Lints and tests the shell scripts the workflows call.
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck .github/scripts/*.sh
+      - run: bash .github/scripts/test-advisory-issue.sh
