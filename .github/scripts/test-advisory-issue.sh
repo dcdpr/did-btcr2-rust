@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Tests advisory-issue.sh, in both its report and its close mode, against a stub `gh` that
-# records every call and answers
-# `gh issue list` and `gh issue view` by applying the script's own --jq filter to a canned
-# list of open issues and a canned issue body.
+# records every call and answers `gh issue list` and `gh issue view` by applying the script's
+# own --jq filter to a canned list of open issues and a canned issue body.
+#
+# The stub does not implement the query qualifiers of `gh issue list`, so it refuses a call
+# that lacks the ones the canned list stands for: `--state open` (the list holds only open
+# issues), `--app github-actions` and the exact-title `--search` (gh returns no match for
+# `--app` without `--search`, so dropping either would silently find nothing on GitHub).
 # Needs bash, jq and coreutils; no network and no token.
 set -euo pipefail
 
@@ -23,14 +27,23 @@ cat > "$work/bin/gh" <<'STUB'
 set -euo pipefail
 printf '%s\n' "$*" >> "$GH_STUB_LOG"
 cmd="$1 $2"
-filter=
+filter= state= app= search=
 while [ $# -gt 0 ]; do
-  if [ "$1" = "--jq" ]; then
-    filter=$2
-  fi
+  case "$1" in
+    --jq) filter=$2 ;;
+    --state) state=$2 ;;
+    --app) app=$2 ;;
+    --search) search=$2 ;;
+  esac
   shift
 done
 if [ "$cmd" = "issue list" ]; then
+  want_search="\"$GH_STUB_TITLE\" in:title"
+  if [ "$state" != open ] || [ "$app" != github-actions ] || [ "$search" != "$want_search" ]; then
+    echo "gh stub: issue list needs --state open, --app github-actions and" \
+      "--search '$want_search'; got state='$state' app='$app' search='$search'" >&2
+    exit 3
+  fi
   printf '%s' "$GH_STUB_ISSUES" | jq -r "$filter"
 elif [ "$cmd" = "issue view" ]; then
   jq -n --arg body "$GH_STUB_BODY" '{body: $body}' | jq -r "$filter"
@@ -56,7 +69,7 @@ invoke() {
   mkdir -p "$work/$name.tmp"
   : > "$work/$name.calls"
   PATH="$work/bin:$PATH" TMPDIR="$work/$name.tmp" GH_STUB_LOG="$work/$name.calls" \
-    GH_STUB_ISSUES="$issues" GH_STUB_BODY="$old_body" GITHUB_SHA=abc123 \
+    GH_STUB_ISSUES="$issues" GH_STUB_BODY="$old_body" GH_STUB_TITLE="$title" GITHUB_SHA=abc123 \
     RUN_URL=https://example.invalid/run GH_REPO=o/r GH_TOKEN=x \
     bash "$here/advisory-issue.sh" "$@"
 }
