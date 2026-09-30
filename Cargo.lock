@@ -129,7 +129,6 @@ checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 [[package]]
 name = "bech32-rust"
 version = "0.1.0"
-source = "git+ssh://git@gl1.dcdpr.com/dcd/bech32-rust.git#27d256c98f8085a99f51479e04b6b5da8ad929bb"
 dependencies = [
  "arbitrary-int",
  "hex",

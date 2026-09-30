@@ -57,7 +57,7 @@ secp256k1 = { version = "0.27", features = ["rand"] }
 sha2 = "0.10"
 
 # Bitcoin
-bech32-rust = { version = "0.1.0", git = "ssh://git@gl1.dcdpr.com/dcd/bech32-rust.git" }
+bech32-rust = { version = "0.1.0", path = "vendor/bech32-rust" }
 esploda = "0.2"
 
 # ZCAP
@@ -85,3 +85,4 @@ old-spec-fixtures = []
 members = [
     "crates/*",
 ]
+exclude = ["vendor/bech32-rust"]

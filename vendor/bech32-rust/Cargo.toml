@@ -1,0 +1,24 @@
+[package]
+name = "bech32-rust"
+version = "0.1.0"
+authors = ["Dan Pape <dpape@dpape.com>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Encode and decode the Bech32 format"
+repository = "https://github.com/dcdpr/bech32-rust"
+documentation = "https://docs.rs/bech32-rust"
+readme = "README.md"
+keywords = ["encoding", "bech32"]
+categories = ["encoding"]
+exclude = ["tests/*", "examples/*"]
+include = ["src/**/*", "Cargo.toml", "LICENSE*", "README.md"]
+
+
+[dependencies]
+hex = "0.4"
+onlyerror = "0.1"
+arbitrary-int = "1.3"
+
+[dev-dependencies]
+proptest = "1.7"
+rand = "0.9"

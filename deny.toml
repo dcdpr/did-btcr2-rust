@@ -27,6 +27,4 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = [
-    "ssh://git@gl1.dcdpr.com/dcd/bech32-rust.git",
-]
+allow-git = []
