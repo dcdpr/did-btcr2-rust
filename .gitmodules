@@ -1,6 +1,6 @@
 [submodule "test-suite"]
 	path = test-suite
-	url = git@github.com:dcdpr/did-btcr2-test-suite.git
+	url = https://github.com/dcdpr/did-btcr2-test-suite.git
 [submodule "w3c-resolution-suite"]
 	path = w3c-resolution-suite
-	url = git@github.com:w3c/did-resolution-test-suite.git
+	url = https://github.com/w3c/did-resolution-test-suite.git
